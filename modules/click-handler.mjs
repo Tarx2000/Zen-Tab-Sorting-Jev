@@ -44,7 +44,9 @@ import { isFullAIMode, resolveEffectiveSortingMode, resolvePass2ApplyOptions, re
 console.log(`${LOG} click-handler.mjs loaded — v${BUILD_VERSION}`);
 
 const getTidyButton = () =>
-  window.gZenWorkspaces?.activeWorkspaceElement?.querySelector(`#${CONFIG.BUTTON_ID}`) || null;
+  window.gZenWorkspaces?.activeWorkspaceElement?.querySelector?.(`#${CONFIG.BUTTON_ID}`) ||
+  document.querySelector?.(`#${CONFIG.BUTTON_ID}`) ||
+  null;
 
 const wiggleButton = () => {
   try {
@@ -90,17 +92,20 @@ const assignmentMapToPlan = (tabs, assignmentMap) => {
 };
 
 export const handleOrganizeClick = async () => {
+  recordDebugEvent("START", "Zauberstab geklickt — starte Sortierung");
   wiggleButton();
 
   const workspaceId = window.gZenWorkspaces?.activeWorkspace;
   if (!workspaceId) {
+    recordDebugEvent("ERROR", "Kein aktiver Workspace gefunden (window.gZenWorkspaces?.activeWorkspace ist leer)");
     console.warn(`${LOG} no active workspace`);
+    showToast("Kein aktiver Workspace gefunden.");
     return;
   }
 
   console.log(`${LOG} click START — v${BUILD_VERSION}`);
   const aiEngine = getAIEngine();
-  recordDebugEvent("CLICK", `Sort requested for workspace "${workspaceId}" (engine: ${aiEngine})`);
+  recordDebugEvent("WORKSPACE", `Aktiver Workspace: "${workspaceId}", AI Engine: "${aiEngine}"`);
   const sortMode = resolveEffectiveSortingMode({ aiEngine, preferredMode: getAISortMode() });
   const fullAIMode = isFullAIMode(sortMode);
   const domainRulesEnabled = isDomainRulesEnabled();
@@ -129,9 +134,14 @@ export const handleOrganizeClick = async () => {
   // 4. Enumerate eligible tabs.
   const allTabs = getEligibleTabs().tabs;
   if (allTabs.length === 0) {
+    recordDebugEvent("TABS", `Keine sortierbaren Tabs im Workspace "${workspaceId}" gefunden.`);
     console.log(`${LOG} no eligible tabs in workspace ${workspaceId}`);
+    showToast("Keine sortierbaren Tabs im aktuellen Workspace gefunden.");
     return;
   }
+  recordDebugEvent("TABS", `${allTabs.length} sortierbare Tabs gefunden`, {
+    tabs: allTabs.map((t) => ({ title: t.title, hostname: t.hostname, group: t.currentGroup }))
+  });
 
   // 4b. Handle skip-domains.
   const skipPatterns = readSkipDomainsPref();

@@ -1,3 +1,4 @@
+import { recordDebugEvent } from "./debug-journal.mjs";
 // Zen Tab Sorting — browser-context UI: tidy button, command, workspace hooks.
 
 import { CONFIG, LOG } from "./config.mjs";
@@ -43,6 +44,15 @@ export const ensureOrganizeButton = (target) => {
 
     const buttonFragment = window.MozXULElement.parseXULToFragment(buttonXul());
     const button = buttonFragment.firstChild;
+
+    const onBtnClick = (event) => {
+      event?.preventDefault?.();
+      event?.stopPropagation?.();
+      recordDebugEvent("BUTTON-CLICK", "Klick auf #tab-wand-button registriert");
+      handleOrganizeClick();
+    };
+    button.addEventListener("click", onBtnClick);
+    button.addEventListener("command", onBtnClick);
 
     if (nativeClearButton && nativeClearButton.parentNode) {
       nativeClearButton.parentNode.insertBefore(button, nativeClearButton);
@@ -94,6 +104,20 @@ export const addButtonToAllSeparators = () => {
 };
 
 export const setupCommand = () => {
+  if (typeof window !== "undefined" && !window._zaoGlobalClickListener) {
+    window._zaoGlobalClickListener = (event) => {
+      const btn = event.target?.closest?.(`#${CONFIG.BUTTON_ID}`);
+      if (btn) {
+        event.preventDefault();
+        event.stopPropagation();
+        recordDebugEvent("CAPTURE-CLICK", "Globaler Window-Klick auf #tab-wand-button registriert");
+        handleOrganizeClick();
+      }
+    };
+    window.addEventListener("click", window._zaoGlobalClickListener, true);
+    window.addEventListener("command", window._zaoGlobalClickListener, true);
+  }
+
   const zenCommands = domCache.getCommandSet();
   if (!zenCommands) return;
 

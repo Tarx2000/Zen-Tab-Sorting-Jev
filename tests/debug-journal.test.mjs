@@ -11,9 +11,13 @@ import {
 import { CONFIG } from "../modules/config.mjs";
 
 test("Given debug mode disabled When recording events Then buffer remains empty", () => {
+  const prefStore = new Map([[CONFIG.DEBUG_MODE_PREF, false]]);
   globalThis.Services = {
     prefs: {
-      getBoolPref: (key, fallback) => (key === CONFIG.DEBUG_MODE_PREF ? false : fallback),
+      getBoolPref: (key, fallback) => prefStore.get(key) ?? fallback,
+      prefHasUserValue: (key) => prefStore.has(key),
+      getStringPref: (key) => prefStore.get(key) || "",
+      setStringPref: (key, val) => prefStore.set(key, val),
     },
   };
   clearDebugEvents();
@@ -24,9 +28,13 @@ test("Given debug mode disabled When recording events Then buffer remains empty"
 });
 
 test("Given debug mode enabled When recording events Then buffer records and formats cleanly", () => {
+  const prefStore = new Map([[CONFIG.DEBUG_MODE_PREF, true]]);
   globalThis.Services = {
     prefs: {
-      getBoolPref: (key, fallback) => (key === CONFIG.DEBUG_MODE_PREF ? true : fallback),
+      getBoolPref: (key, fallback) => prefStore.get(key) ?? fallback,
+      prefHasUserValue: (key) => prefStore.has(key),
+      getStringPref: (key) => prefStore.get(key) || "",
+      setStringPref: (key, val) => prefStore.set(key, val),
     },
   };
   clearDebugEvents();
