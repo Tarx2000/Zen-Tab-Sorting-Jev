@@ -128,17 +128,17 @@
   },
   {
     "type": "string",
-    "label": "JEV minimum confidence probability (0.05–0.99)",
+    "label": "JEV Min Probability (0.05–0.99 or 5%–99% — minimum confidence to sort into an existing group)",
     "property": "extensions.zen-auto-organize.ai-jev-min-prob",
     "defaultValue": "0.70",
-    "placeholder": "0.70"
+    "placeholder": "0.70 (or 70%)"
   },
   {
     "type": "string",
-    "label": "JEV minimum probability margin between top 2 groups (0.05–0.99)",
+    "label": "JEV Min Margin (0.00–0.99 or 0%–99% — minimum lead of #1 group over #2 group)",
     "property": "extensions.zen-auto-organize.ai-jev-min-margin",
     "defaultValue": "0.15",
-    "placeholder": "0.15"
+    "placeholder": "0.15 (or 15%)"
   },
   {
     "type": "dropdown",

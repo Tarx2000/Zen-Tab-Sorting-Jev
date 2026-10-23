@@ -15,9 +15,6 @@ import { CONFIG, LOG } from "./config.mjs";
 const BEARER_HEADER_KEY = ["author", "ization"].join("");
 const JEV_TIMEOUT_MS = 45_000;
 
-// Following wuyoscar/jev-skill/references/context-and-throughput.md:
-// Batching 15–25 choice questions per request maximizes throughput while keeping
-// per-question discrimination sharp.
 export const JEV_MAX_QUESTIONS_PER_BATCH = 25;
 export const JEV_NONE_CHOICE = "__none__";
 
@@ -34,11 +31,25 @@ export const resolveJevEndpoint = (jevProvider) =>
     ? CONFIG.AI_JEV_OPENROUTER_ENDPOINT
     : CONFIG.AI_JEV_TYPESAFE_ENDPOINT;
 
-export const clampProbability = (value, fallback) => {
-  const num = Number.parseFloat(String(value ?? "").trim());
+// Parses user input from the Settings UI flexibly:
+//   - "0.70" or "0,70" -> 0.70
+//   - "70" or "70%"    -> 0.70
+export const parseThresholdValue = (value, fallback, { min = 0.0, max = 0.99 } = {}) => {
+  const raw = String(value ?? "").trim().replace(/%/g, "").replace(",", ".");
+  if (!raw) return fallback;
+  let num = Number.parseFloat(raw);
   if (!Number.isFinite(num)) return fallback;
-  return Math.min(0.99, Math.max(0.05, num));
+  if (num > 1 && num <= 100) {
+    num = num / 100;
+  }
+  return Math.min(max, Math.max(min, num));
 };
+
+export const clampProbability = (value, fallback = CONFIG.AI_JEV_MIN_PROB_DEFAULT) =>
+  parseThresholdValue(value, fallback, { min: 0.05, max: 0.99 });
+
+export const clampMargin = (value, fallback = CONFIG.AI_JEV_MIN_MARGIN_DEFAULT) =>
+  parseThresholdValue(value, fallback, { min: 0.0, max: 0.99 });
 
 export const readJevSettings = (prefs = globalThis.Services?.prefs) => {
   const readStr = (name, fallback) => {
@@ -68,7 +79,7 @@ export const readJevSettings = (prefs = globalThis.Services?.prefs) => {
     readStr(CONFIG.AI_JEV_MIN_PROB_PREF, String(CONFIG.AI_JEV_MIN_PROB_DEFAULT)),
     CONFIG.AI_JEV_MIN_PROB_DEFAULT,
   );
-  const minMargin = clampProbability(
+  const minMargin = clampMargin(
     readStr(CONFIG.AI_JEV_MIN_MARGIN_PREF, String(CONFIG.AI_JEV_MIN_MARGIN_DEFAULT)),
     CONFIG.AI_JEV_MIN_MARGIN_DEFAULT,
   );
@@ -301,8 +312,6 @@ export const classifyExistingGroupsWithJev = async ({
     ? existingGroups.filter((g) => g && typeof g.name === "string" && g.name.trim())
     : [];
 
-  // If the workspace has no existing tab groups yet, JEV has nothing to classify
-  // into — hand all tabs directly to the One-Shot Fallback-LLM!
   if (validGroups.length === 0) {
     return {
       assignedToExisting: [],

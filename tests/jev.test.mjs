@@ -1,14 +1,51 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
+import { CONFIG } from "../modules/config.mjs";
 import {
   JEV_NONE_CHOICE,
   buildJevCriteria,
   buildJevHttpRequest,
   buildJevPayload,
+  clampMargin,
+  clampProbability,
   classifyExistingGroupsWithJev,
   evaluateJevBatchResponse,
+  readJevSettings,
 } from "../modules/jev.mjs";
+
+test("Given user-entered JEV probability and margin settings When parsed Then decimals, German commas, and percentages all work", () => {
+  assert.equal(clampProbability("0.75"), 0.75);
+  assert.equal(clampProbability("0,80"), 0.80);
+  assert.equal(clampProbability("85%"), 0.85);
+  assert.equal(clampProbability("85"), 0.85);
+
+  assert.equal(clampMargin("0.15"), 0.15);
+  assert.equal(clampMargin("0,20"), 0.20);
+  assert.equal(clampMargin("25%"), 0.25);
+  assert.equal(clampMargin("0"), 0);
+
+  const fakePrefs = {
+    PREF_STRING: "string",
+    PREF_BOOL: "bool",
+    prefHasUserValue: () => true,
+    getPrefType: (name) => (name === CONFIG.AI_PROVIDER_CONSENT_PREF ? "bool" : "string"),
+    getStringPref: (name) => {
+      if (name === CONFIG.AI_JEV_MIN_PROB_PREF) return "0,82";
+      if (name === CONFIG.AI_JEV_MIN_MARGIN_PREF) return "18%";
+      if (name === CONFIG.AI_JEV_PROVIDER_PREF) return "openrouter";
+      if (name === CONFIG.AI_JEV_API_KEY_PREF) return "or-token";
+      return "";
+    },
+    getBoolPref: () => true,
+  };
+
+  const settings = readJevSettings(fakePrefs);
+  assert.equal(settings.minProbability, 0.82);
+  assert.equal(settings.minMargin, 0.18);
+  assert.equal(settings.jevProvider, "openrouter");
+  assert.equal(settings.model, "typesafe/jev-1.13");
+});
 
 test("Given a single existing workspace group When building JEV criteria Then __none__ is included so criteria count >= 2", () => {
   const criteria = buildJevCriteria([
