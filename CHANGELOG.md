@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.11.0 — 2026-10-24
+
+### Added
+- **Floating in-browser toast notifications**: Elegant, non-intrusive in-window toast alerts in Zen Browser that immediately inform users of quota limits (e.g. ChatGPT subscription sharing limit), errors, and sort status.
+- **Dedicated ChatGPT Subscription Sharing limit detection**: Detects subscription sharing usage limits with clear German toast alerts and advice on alternatives (PrimaLabs, API keys, or JEV-only mode).
+- **Empty folder support in JEV**: User-created empty folders in the active workspace are now preserved as target categories for JEV instead of being ignored.
+
+### Fixed
+- **JEV Stage 1 bypass bug**: Fixed an issue where `isFreshLike` forced `liveExistingGroups` to an empty array in Full AI mode, inadvertently skipping JEV Stage 1 entirely. JEV now always queries the active workspace groups.
+- **Graceful JEV-only fallback**: When Stage 2 (ChatGPT / Fallback-LLM) fails or encounters a usage/quota limit, JEV Stage 1 assignments to existing groups are safely applied and preserved, and remaining tabs stay untouched without crashing the sort process.
+- **Enhanced debug logging**: Added `STAGE-1-SKIPPED`, `STAGE-1-ERROR`, and `STAGE-2-FALLBACK-ABORTED` journal events for transparent diagnostic tracing.
+
 ## 1.0.2 — 2026-06-01
 
 ### Added

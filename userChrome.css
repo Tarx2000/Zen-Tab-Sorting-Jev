@@ -905,3 +905,93 @@ dialog.zao-warning-dialog::backdrop {
   overflow-x: auto !important;
   overflow-y: scroll !important;
 }
+
+/* --- Floating in-window Toast Notifications --- */
+.zao-toast-container {
+  position: fixed !important;
+  bottom: 24px !important;
+  left: 50% !important;
+  transform: translateX(-50%) !important;
+  z-index: 2147483647 !important;
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: center !important;
+  gap: 8px !important;
+  pointer-events: none !important;
+  max-width: 90vw !important;
+}
+
+.zao-toast {
+  pointer-events: auto !important;
+  display: flex !important;
+  align-items: center !important;
+  gap: 10px !important;
+  padding: 10px 16px !important;
+  border-radius: 999px !important;
+  background: var(--zen-colors-tertiary, rgba(28, 28, 34, 0.94)) !important;
+  color: var(--zen-colors-primary, #ffffff) !important;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
+  font-size: 13px !important;
+  font-weight: 500 !important;
+  line-height: 1.4 !important;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45), 0 0 0 1px color-mix(in srgb, currentColor 18%, transparent) !important;
+  backdrop-filter: blur(16px) !important;
+  -webkit-backdrop-filter: blur(16px) !important;
+  max-width: 540px !important;
+  animation: zao-toast-enter 0.24s cubic-bezier(0.16, 1, 0.3, 1) forwards !important;
+  transition: opacity 0.2s ease, transform 0.2s ease !important;
+}
+
+.zao-toast-warning,
+.zao-toast-error {
+  border-left: 3px solid #f59e0b !important;
+}
+
+.zao-toast-error {
+  border-left-color: #ef4444 !important;
+}
+
+.zao-toast-icon {
+  font-size: 14px !important;
+  flex: 0 0 auto !important;
+}
+
+.zao-toast-message {
+  flex: 1 1 auto !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+}
+
+.zao-toast-close {
+  appearance: none !important;
+  background: transparent !important;
+  border: none !important;
+  color: inherit !important;
+  opacity: 0.55 !important;
+  cursor: pointer !important;
+  font-size: 16px !important;
+  line-height: 1 !important;
+  padding: 0 0 0 4px !important;
+  margin: 0 !important;
+  flex: 0 0 auto !important;
+}
+
+.zao-toast-close:hover {
+  opacity: 1 !important;
+}
+
+.zao-toast-dismissing {
+  opacity: 0 !important;
+  transform: translateY(8px) scale(0.96) !important;
+}
+
+@keyframes zao-toast-enter {
+  0% {
+    opacity: 0;
+    transform: translateY(12px) scale(0.95);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}

@@ -149,8 +149,8 @@ export const runOneShotFallbackNewGroups = async ({
     const msg = readiness.reason === "consent_required"
       ? "Fallback-LLM benötigt Daten-Freigabe (Consent Checkbox) in den Einstellungen."
       : `Fallback-LLM (${fallbackSettings?.provider || "unknown"}) ist nicht bereit: ${readiness.reason}`;
-    showToast(msg);
-    return { newGroups: [], skipped: [...leftoverTabs], failed: readiness.reason };
+    showToast(msg, { type: "warning" });
+    return { newGroups: [], skipped: [...leftoverTabs], failed: readiness.reason, failedMessage: msg };
   }
 
   const existingLower = new Set(
@@ -183,11 +183,12 @@ export const runOneShotFallbackNewGroups = async ({
       recordDebugEvent("STAGE-2-ERROR", `Attempt ${attempt}/${maxAttempts} error: ${lastError}`);
       const quotaCheck = detectQuotaOrRateLimit(e?.status, e?.body, lastError);
       if (quotaCheck.isQuota) {
-        showToast(quotaCheck.userMessage);
+        showToast(quotaCheck.userMessage, { type: "warning" });
         return {
           newGroups: [],
           skipped: [...leftoverTabs],
           failed: "quota_exceeded",
+          failedMessage: quotaCheck.userMessage,
           attempts: attempt,
         };
       }
@@ -198,11 +199,12 @@ export const runOneShotFallbackNewGroups = async ({
   if (!parsed) {
     const userMessage = `Fallback-LLM Schema-Fehler nach ${attemptsUsed} Versuchen (${lastError}). Übrige Tabs bleiben ungruppiert.`;
     console.error(`${LOG} ${userMessage}`);
-    showToast(userMessage);
+    showToast(userMessage, { type: "warning" });
     return {
       newGroups: [],
       skipped: [...leftoverTabs],
       failed: `schema_validation_failed: ${lastError}`,
+      failedMessage: userMessage,
       attempts: attemptsUsed,
     };
   }
@@ -288,7 +290,8 @@ export const runPass2JevHybrid = async (
   // Stage 1: JEV Decision Model (only when existing groups are present and JEV key is configured)
   if (validExistingGroups.length > 0) {
     if (!jevSettings.consentToSendData) {
-      showToast("Data-sending consent is required in Zen Tab Sorting settings.");
+      recordDebugEvent("STAGE-1-ERROR", "JEV Stufe 1: Daten-Freigabe (Consent Checkbox) in Einstellungen erforderlich.");
+      showToast("Daten-Freigabe (Consent Checkbox) in den Zen Tab Sorting Einstellungen erforderlich.", { type: "warning" });
       return { ...empty, skipped: unmatchedTabs, failed: "consent_required" };
     }
     if (jevSettings.apiKey && jevSettings.apiKey.trim()) {
@@ -330,12 +333,15 @@ export const runPass2JevHybrid = async (
       } catch (e) {
         recordDebugEvent("STAGE-1-JEV-ERROR", `JEV Stage 1 error: ${e.message || e}`);
         console.error(`${LOG} JEV Stage 1 failed, falling through to Fallback-LLM:`, e);
-        showToast(`JEV Fehler (Stufe 1): ${e.message || e} — übergebe an Fallback-LLM.`);
+        showToast(`JEV Fehler (Stufe 1): ${e.message || e} — übergebe an Fallback-LLM.`, { type: "warning" });
       }
     } else {
+      recordDebugEvent("STAGE-1-ERROR", "JEV Stufe 1: API-Key fehlt in den Einstellungen; übergebe Tabs an Fallback-LLM.");
       console.warn(`${LOG} JEV key not configured; skipping Stage 1 and sending tabs to Fallback-LLM`);
+      showToast("JEV API-Key fehlt in den Einstellungen (Zen Tab Sorting).", { type: "warning" });
     }
   } else {
+    recordDebugEvent("STAGE-1-SKIPPED", `JEV Stufe 1 übersprungen: Keine bestehenden Ordner im Workspace gefunden; übergebe ${leftoverTabs.length} Tab(s) an Fallback-LLM.`);
     console.log(`${LOG} JEV Stage 1 skipped: no existing groups in workspace; sending ${leftoverTabs.length} tab(s) to Fallback-LLM`);
   }
 
@@ -369,27 +375,38 @@ export const runPass2JevHybrid = async (
     console.log(
       `${LOG} Fallback-LLM Stage 2: created ${stage2.newGroups.length} new group(s), skipped ${stage2.skipped.length} outlier tab(s)`,
     );
+
+    if (stage2.failed) {
+      const fallbackMsg = stage2.failedMessage || `Fallback-LLM nicht verfügbar (${stage2.failed})`;
+      recordDebugEvent("STAGE-2-FALLBACK-ABORTED", `${fallbackMsg} — Bleibe im JEV-Modus: ${assignedToExisting.length} Tab(s) zugeordnet, restliche Tabs bleiben ungruppiert.`);
+      if (assignedToExisting.length > 0) {
+        showToast(`Fallback nicht verfügbar: ${assignedToExisting.length} Tab(s) in bestehende Ordner sortiert. Restliche Tabs bleiben ungruppiert.`, { type: "info" });
+      }
+    }
+
     return {
       assignedToExisting,
       newGroups: stage2.newGroups,
       skipped: stage2.skipped,
-      ...(stage2.failed ? { failed: stage2.failed } : {}),
+      ...(stage2.failed ? { failed: stage2.failed, failedMessage: stage2.failedMessage } : {}),
       ...(stage2.attempts ? { attempts: stage2.attempts } : {}),
     };
   } catch (e) {
     recordDebugEvent("STAGE-2-ERROR", `Fallback-LLM Stage 2 exception: ${e.message || e}`);
     console.error(`${LOG} Fallback-LLM Stage 2 failed:`, e);
     const quotaCheck = detectQuotaOrRateLimit(e?.status, e?.body, e?.message);
-    if (quotaCheck.isQuota) {
-      showToast(quotaCheck.userMessage);
-    } else {
-      showToast(`Fallback-LLM Fehler: ${e.message || e}`);
+    const errorMsg = quotaCheck.isQuota ? quotaCheck.userMessage : `Fallback-LLM Fehler: ${e.message || e}`;
+    showToast(errorMsg, { type: "warning" });
+    recordDebugEvent("STAGE-2-FALLBACK-ABORTED", `${errorMsg} — Bleibe im reinen JEV-Modus: ${assignedToExisting.length} Tab(s) zugeordnet.`);
+    if (assignedToExisting.length > 0) {
+      showToast(`Fallback-LLM nicht verfügbar: ${assignedToExisting.length} Tab(s) durch JEV sortiert, restliche Tabs bleiben ungruppiert.`, { type: "info" });
     }
     return {
       assignedToExisting,
       newGroups: [],
       skipped: leftoverTabs,
       failed: e.message || String(e),
+      failedMessage: errorMsg,
     };
   }
 };

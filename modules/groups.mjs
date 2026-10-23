@@ -11,30 +11,70 @@ import { getTabTitle, getTabUrl, getHostname } from "./tabs.mjs";
  * with the tabs currently inside each group. Used by JEV (Stage 1) as live
  * target categories + context anchors so no pre-saved domain rules are needed.
  *
+ * Preserves user-created empty folders as valid target categories.
+ *
  * @param {string} workspaceId
- * @returns {Array<{ name: string, domains: string[], tabs: Array<{ title: string, hostname: string, url: string }> }>}
- */
+ * @returns {Array<{ name: string, domains: string[], tabs: Array<{ title: string, hostname: string, url: string }> }>}\n */
 export const getWorkspaceExistingGroups = (workspaceId) => {
   if (!workspaceId || typeof document === "undefined") return [];
   const groupsByName = new Map();
-  const selector = `tab-group:has(tab[zen-workspace-id="${workspaceId}"])`;
-  let groupEls = [];
-  try {
-    groupEls = Array.from(document.querySelectorAll(selector));
-  } catch {
-    groupEls = Array.from(document.querySelectorAll("tab-group"));
+  const activeWorkspaceEl = window.gZenWorkspaces?.activeWorkspaceElement;
+  const activeTabsContainer = activeWorkspaceEl?.tabsContainer || activeWorkspaceEl;
+
+  const candidates = new Set();
+
+  if (activeTabsContainer?.querySelectorAll) {
+    try {
+      for (const el of activeTabsContainer.querySelectorAll("tab-group")) {
+        if (el?.isConnected) candidates.add(el);
+      }
+    } catch {}
   }
 
-  for (const groupEl of groupEls) {
+  try {
+    for (const el of document.querySelectorAll(`tab-group[zen-workspace-id="${workspaceId}"]`)) {
+      if (el?.isConnected) candidates.add(el);
+    }
+  } catch {}
+
+  try {
+    for (const el of document.querySelectorAll(`tab-group:has(tab[zen-workspace-id="${workspaceId}"])`)) {
+      if (el?.isConnected) candidates.add(el);
+    }
+  } catch {}
+
+  if (candidates.size === 0) {
+    try {
+      for (const el of document.querySelectorAll("tab-group")) {
+        if (!el?.isConnected) continue;
+        const groupWs = el.getAttribute("zen-workspace-id");
+        if (groupWs === workspaceId) {
+          candidates.add(el);
+        } else if (activeWorkspaceEl?.contains(el)) {
+          candidates.add(el);
+        } else if (el.querySelector(`tab[zen-workspace-id="${workspaceId}"]`)) {
+          candidates.add(el);
+        }
+      }
+    } catch {}
+  }
+
+  for (const groupEl of candidates) {
     if (!groupEl?.isConnected) continue;
     const rawLabel = groupEl.getAttribute("label") || "";
     const name = rawLabel.trim();
     if (isUnsetLabel(name)) continue;
 
-    const tabEls = Array.from(
+    let tabEls = Array.from(
       groupEl.querySelectorAll(`tab[zen-workspace-id="${workspaceId}"]`),
     );
-    if (tabEls.length === 0) continue;
+
+    if (
+      tabEls.length === 0 &&
+      (activeWorkspaceEl?.contains(groupEl) || groupEl.getAttribute("zen-workspace-id") === workspaceId)
+    ) {
+      tabEls = Array.from(groupEl.querySelectorAll("tab"));
+    }
 
     if (!groupsByName.has(name)) {
       groupsByName.set(name, { name, domains: [], tabs: [] });
@@ -153,93 +193,99 @@ export const applyGroupColor = (groupEl, color) => {
   }
 
   if (isValidHex(color)) {
+    const invert = colorMix(color, "#ffffff", 25);
+    const pale   = colorMix(color, "#ffffff", 80);
     try {
-      const invert = `color-mix(in srgb, ${color} ${CONFIG.HEX_INVERT_MIX_PERCENT}%, white)`;
-      const pale = `color-mix(in srgb, ${color} ${CONFIG.HEX_PALE_MIX_PERCENT}%, white)`;
       groupEl.style.setProperty("--tab-group-color", color, "important");
       groupEl.style.setProperty("--tab-group-color-invert", invert, "important");
       groupEl.style.setProperty("--tab-group-color-pale", pale, "important");
       groupEl.style.setProperty("--tab-group-line-color", color, "important");
-      console.debug(`${LOG} colored "${groupEl.getAttribute("label")}" → ${color} (hex)`);
+      console.debug(`${LOG} colored "${groupEl.getAttribute("label")}" → ${color} (hex override)`);
     } catch (e) {
-      console.error(`${LOG} style.setProperty failed:`, e);
+      console.error(`${LOG} hex style override failed:`, e);
     }
+    return;
   }
-};
 
-// Strip our custom color overrides (used when minimal style is on, or when a rule's
-// color is cleared).
-export const clearGroupColor = (groupEl) => {
-  if (!groupEl?.isConnected) return;
   try {
     groupEl.style.removeProperty("--tab-group-color");
     groupEl.style.removeProperty("--tab-group-color-invert");
     groupEl.style.removeProperty("--tab-group-color-pale");
     groupEl.style.removeProperty("--tab-group-line-color");
-  } catch (e) {
-    console.error(`${LOG} clearGroupColor failed:`, e);
-  }
+  } catch {}
 };
 
 /**
  * Walk every rule-named tab-group and either apply its rule.color or toggle the
- * `.zao-minimal` class (when minimal style pref is on). Catches groups that
- * Pass 1 didn't touch because their tabs were already correctly placed.
+ * `.zao-minimal` class so groups look like part of the chrome.
  *
- * @param workspaceId — scope to one workspace, or pass null/falsy to walk every
+ * @param {string|null} workspaceId — when null, walks every rule-named
  *                      tab-group across all workspaces (rules are global, so
- *                      pref toggles like minimal-style should sync everywhere).
- * @returns number — count of groups visited (NOT count of mutated; some visits are no-ops).
+ *                      styling follows suit on look-and-feel changes).
+ * @param {Array<{ name, color }>} rules
+ * @returns {number} Count of groups styled
  */
 export const syncAllGroupColors = (workspaceId, rules) => {
+  if (typeof document === "undefined") return 0;
   const minimal = isMinimalStyle();
-  const colorByName = new Map(rules.filter((r) => r.color).map((r) => [r.name, r.color]));
-  const ruleNames = new Set(rules.map((r) => r.name));
+  const ruleByName = new Map(rules.map((r) => [r.name, r]));
 
-  let touched = 0;
   const selector = workspaceId
     ? `tab-group:has(tab[zen-workspace-id="${workspaceId}"])`
     : `tab-group`;
-  const groups = document.querySelectorAll(selector);
-  for (const groupEl of groups) {
+
+  let styled = 0;
+  for (const groupEl of document.querySelectorAll(selector)) {
+    if (!groupEl?.isConnected) continue;
     const label = groupEl.getAttribute("label");
-    if (!label) continue;
+    const rule = ruleByName.get(label);
 
     if (minimal) {
       groupEl.classList.add("zao-minimal");
-      clearGroupColor(groupEl);
-      touched++;
-      continue;
+      applyGroupColor(groupEl, null);
+    } else {
+      groupEl.classList.remove("zao-minimal");
+      if (rule && rule.color) {
+        applyGroupColor(groupEl, rule.color);
+      } else {
+        applyGroupColor(groupEl, null);
+      }
     }
-
-    groupEl.classList.remove("zao-minimal");
-    if (!ruleNames.has(label)) continue;
-
-    if (colorByName.has(label)) applyGroupColor(groupEl, colorByName.get(label));
-    else clearGroupColor(groupEl);
-    touched++;
+    styled++;
   }
-  return touched;
+  return styled;
 };
 
-// Eject specific tabs out of whatever group they're in and park them at the top
-// of the workspace's tab list. Used for skip-domain matches before Pass 1, so
-// those tabs become ungrouped and stay ungrouped for the rest of the pipeline.
-// Returns the number of tabs moved.
+// ─── Native-API Helpers ──────────────────────────────────────────────────────
+//
+// In Zen Browser, tab groups must always be modified through `gBrowser.*` APIs
+// whenever possible:
+//   - `gBrowser.addTabGroup(tabs, { label, color }, anchor)`
+//   - `gBrowser.moveTabToExistingGroup(tab, group)`
+//   - `gBrowser.ungroupTab(tab)`
+//
+// Moving tabs solely via DOM reparenting (`tabsContainer.insertBefore`) breaks
+// Zen's internal group index, leaves groups in inconsistent state, and causes
+// tabs to bounce back to their previous group on the next user action.
+
+/**
+ * Move an array of tabs to the top of the workspace's tab list, ungrouping
+ * any of them that were inside a group.
+ *
+ * @param {Element[]} tabs — DOM <tab> elements
+ * @param {string} workspaceId
+ * @returns {number} Count of tabs moved
+ */
 export const moveTabsToTop = (tabs, workspaceId) => {
-  if (!workspaceId || !tabs?.length) {
-    console.log(`${LOG} moveTabsToTop: short-circuit — workspaceId=${workspaceId}, tabs=${tabs?.length}`);
-    return 0;
-  }
+  if (!Array.isArray(tabs) || tabs.length === 0 || !workspaceId) return 0;
   const tabsContainer = window.gZenWorkspaces?.activeWorkspaceElement?.tabsContainer;
   if (!tabsContainer) {
     console.log(`${LOG} moveTabsToTop: tabsContainer not found on activeWorkspaceElement`);
     return 0;
   }
-  // gBrowser.ungroupTab is Firefox's "remove tab from group" API. Without it,
-  // raw `tabsContainer.insertBefore` leaves Zen's tab-group bookkeeping
-  // intact and Zen re-attaches the tab asynchronously. Call it before the
-  // DOM move so both layers stay in sync.
+
+  // Zen: `gBrowser.ungroupTab` keeps Zen's group state in sync. Call it before
+  // DOM reparenting.
   const ungroupApi = typeof gBrowser?.ungroupTab === "function" ? gBrowser.ungroupTab.bind(gBrowser) : null;
   const topAnchor = tabsContainer.firstChild;
   let moved = 0;
@@ -393,10 +439,12 @@ export const findSafeInsertAnchor = () => {
   return tabsContainer?.firstChild || null;
 };
 
+// Dissolve any empty tab-group in the active workspace.
 export const dissolveEmptyGroups = () => {
+  if (typeof document === "undefined") return 0;
   let removed = 0;
   for (const groupEl of document.querySelectorAll("tab-group")) {
-    if (!groupEl.isConnected) continue;
+    if (!groupEl?.isConnected) continue;
     if (groupEl.querySelector("tab")) continue;
     const label = groupEl.getAttribute("label") || "(unnamed)";
     try {

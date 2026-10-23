@@ -99,7 +99,7 @@ export const handleOrganizeClick = async () => {
   if (!workspaceId) {
     recordDebugEvent("ERROR", "Kein aktiver Workspace gefunden (window.gZenWorkspaces?.activeWorkspace ist leer)");
     console.warn(`${LOG} no active workspace`);
-    showToast("Kein aktiver Workspace gefunden.");
+    showToast("Kein aktiver Workspace gefunden.", { type: "warning" });
     return;
   }
 
@@ -245,7 +245,16 @@ export const handleOrganizeClick = async () => {
         let pass2;
         if (aiEngine === "jev") {
           const t0 = performance.now();
-          const liveExistingGroups = isFreshLike ? [] : getWorkspaceExistingGroups(workspaceId);
+          // JEV specifically classifies into existing workspace groups; always provide
+          // the live workspace groups (or rules if 0 DOM groups exist yet).
+          let liveExistingGroups = getWorkspaceExistingGroups(workspaceId);
+          if (liveExistingGroups.length === 0 && rules.length > 0) {
+            liveExistingGroups = rules.filter((r) => r?.name).map((r) => ({
+              name: r.name,
+              domains: r.domains || [],
+              tabs: [],
+            }));
+          }
           pass2 = await runPass2JevHybrid(pass2Input, liveExistingGroups);
           console.log(`${LOG} JEV + Fallback-LLM Pass 2 took ${Math.round(performance.now() - t0)}ms`);
         } else if (aiEngine === "ollama") {
@@ -417,7 +426,9 @@ export const handleOrganizeClick = async () => {
         } else if (pass2.skipped.length > 0) {
           console.log(`${LOG} Pass 2: nothing to group (skipped ${pass2.skipped.length} ${inputLabel})`);
           recordDebugEvent("RESULT", `Pass 2: nothing to group (skipped ${pass2.skipped.length} tabs)`);
-          if (!pass2.failed) {
+          if (pass2.failedMessage) {
+            showToast(pass2.failedMessage, { type: "warning" });
+          } else if (!pass2.failed) {
             showToast("Keine Tabs zum Gruppieren gefunden oder Konfidenz-Schwelle nicht erreicht.");
           }
         }

@@ -88,7 +88,12 @@ export const detectQuotaOrRateLimit = (status, bodyText, errorMsg) => {
   const code = Number(status);
   const combined = `${status || ""} ${bodyText || ""} ${errorMsg || ""}`.toLowerCase();
   const is429 = code === 429;
+  const isSubscriptionSharing =
+    combined.includes("subscription sharing") ||
+    combined.includes("subscription sharing usage limit") ||
+    combined.includes("reached their subscription sharing");
   const isQuotaKeyword =
+    isSubscriptionSharing ||
     combined.includes("insufficient_quota") ||
     combined.includes("quota_exceeded") ||
     combined.includes("exceeded your current quota") ||
@@ -100,10 +105,12 @@ export const detectQuotaOrRateLimit = (status, bodyText, errorMsg) => {
     combined.includes("tokens per min");
 
   if (is429 || isQuotaKeyword) {
+    const userMessage = isSubscriptionSharing
+      ? "ChatGPT Subscription-Sharing-Limit erreicht! Dein Kontingent ist erschöpft. Bitte später erneut versuchen oder das Fallback-LLM auf 'Off', PrimaLabs oder OpenAI API Key umstellen."
+      : "ChatGPT / Provider Usage-Limit erreicht! Dein Kontingent ist erschöpft (HTTP 429 / Quota). Bitte später erneut versuchen oder das Fallback-LLM auf 'Off', PrimaLabs oder einen API-Key stellen.";
     return {
       isQuota: true,
-      userMessage:
-        "ChatGPT / Provider Usage-Limit erreicht! Dein Kontingent ist erschöpft (HTTP 429 / Quota). Bitte später erneut versuchen, dein Kontingent auf openai.com prüfen oder das Fallback auf 'Off' oder PrimaLabs stellen.",
+      userMessage,
     };
   }
   return {

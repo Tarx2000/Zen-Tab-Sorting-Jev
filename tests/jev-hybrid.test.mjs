@@ -242,3 +242,96 @@ test("Given JEV + Fallback-LLM hybrid mode When sorting ungrouped tabs Then JEV 
 
   assert.deepEqual(result.skipped, [ungroupedTabs[3]]);
 });
+
+test("Given JEV Stage 1 matches tabs but Fallback-LLM hits ChatGPT subscription sharing usage limit When runPass2JevHybrid runs Then Stage 1 assignments are preserved, newGroups is empty, and leftover tabs remain skipped", async () => {
+  const ungroupedTabs = [
+    { hostname: "github.com", title: "PR review", url: "https://github.com/a/b" },
+    { hostname: "reddit.com", title: "Random discussion", url: "https://reddit.com/r/all" },
+    { hostname: "picdrop.com", title: "Photos", url: "https://picdrop.com/album" },
+  ];
+
+  const existingGroups = [
+    {
+      name: "Development",
+      domains: ["github.com"],
+      tabs: [{ title: "Code", hostname: "github.com", url: "https://github.com" }],
+    },
+  ];
+
+  const fakeFetch = async (url) => {
+    if (url === "https://api.typesafe.ai/v1/systemone") {
+      return new Response(
+        JSON.stringify({
+          answers: {
+            tab_0: {
+              type: "choice",
+              choice: "Development",
+              probabilities: { Development: 0.95, __none__: 0.05 },
+              confidence: 0.95,
+            },
+            tab_1: {
+              type: "choice",
+              choice: "__none__",
+              probabilities: { __none__: 0.9, Development: 0.1 },
+              confidence: 0.9,
+            },
+            tab_2: {
+              type: "choice",
+              choice: "__none__",
+              probabilities: { __none__: 0.92, Development: 0.08 },
+              confidence: 0.92,
+            },
+          },
+        }),
+        { status: 200 },
+      );
+    }
+
+    if (url === "https://api.openai.com/v1/responses") {
+      return new Response(
+        JSON.stringify({
+          error: {
+            message: "The ChatGPT user has reached their Subscription Sharing usage limit. Ask the user to try again after their usage limit resets or use an API key instead.",
+          },
+        }),
+        { status: 429 },
+      );
+    }
+
+    throw new Error(`Unexpected URL: ${url}`);
+  };
+
+  const result = await runPass2JevHybrid(ungroupedTabs, existingGroups, {
+    jevSettings: {
+      jevProvider: "typesafe",
+      endpoint: "https://api.typesafe.ai/v1/systemone",
+      model: "jev-1.13.0",
+      apiKey: "ts-test",
+      minProbability: 0.70,
+      minMargin: 0.15,
+      consentToSendData: true,
+    },
+    fallbackSettings: {
+      provider: "chatgpt",
+      consentToSendData: true,
+      model: "gpt-5-codex-mini",
+      accessToken: "at_valid_token",
+      refreshToken: "",
+      clientId: "oaiapp_test",
+      expiresAt: Date.now() + 3600_000,
+    },
+    preFetchedSnippets: ["", "", ""],
+    fetchImpl: fakeFetch,
+  });
+
+  // Stage 1 assignment is kept!
+  assert.equal(result.assignedToExisting.length, 1);
+  assert.equal(result.assignedToExisting[0].groupName, "Development");
+  assert.equal(result.assignedToExisting[0].tabInfo, ungroupedTabs[0]);
+
+  // Stage 2 failed gracefully: no new groups, leftover tabs stayed skipped
+  assert.deepEqual(result.newGroups, []);
+  assert.deepEqual(result.skipped, [ungroupedTabs[1], ungroupedTabs[2]]);
+  assert.equal(result.failed, "quota_exceeded");
+  assert.match(result.failedMessage, /Subscription-Sharing-Limit/);
+});
