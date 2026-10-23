@@ -9,17 +9,14 @@
     "property": "extensions.zen-auto-organize.use-domain-rules",
     "defaultValue": false
   },
-
   {
     "type": "separator",
     "label": "Skip Domains"
   },
-
   {
     "type": "separator",
     "label": "Backup & Restore"
   },
-
   {
     "type": "separator",
     "label": "Look & Feel"
@@ -37,45 +34,6 @@
     "defaultValue": false
   },
   {
-    "type": "dropdown",
-    "label": "Collapsed group marker — the colored dot shown left of a collapsed group's name",
-    "property": "extensions.zen-auto-organize.pip-shape",
-    "defaultValue": "circle",
-    "placeholder": false,
-    "options": [
-      { "label": "Circle", "value": "circle" },
-      { "label": "Rounded square", "value": "square" },
-      { "label": "None", "value": "none" }
-    ]
-  },
-  {
-    "type": "dropdown",
-    "label": "When a group is open — how the marker behaves once the group is expanded",
-    "property": "extensions.zen-auto-organize.pip-open-behavior",
-    "defaultValue": "smaller",
-    "placeholder": false,
-    "options": [
-      { "label": "Smaller marker", "value": "smaller" },
-      { "label": "Same size", "value": "same" },
-      { "label": "No marker", "value": "hidden" }
-    ]
-  },
-  {
-    "type": "string",
-    "label": "Circle marker size in pixels (4–24)",
-    "property": "extensions.zen-auto-organize.pip-size-circle",
-    "defaultValue": "8",
-    "placeholder": "8"
-  },
-  {
-    "type": "string",
-    "label": "Rounded square marker size in pixels (4–24)",
-    "property": "extensions.zen-auto-organize.pip-size-square",
-    "defaultValue": "8",
-    "placeholder": "8"
-  },
-
-  {
     "type": "separator",
     "label": "AI Sorting"
   },
@@ -85,14 +43,38 @@
     "property": "extensions.zen-auto-organize.ai-engine",
     "defaultValue": "jev",
     "options": [
-      { "label": "JEV + Fallback-LLM — TypeSafe JEV for existing groups + One-Shot LLM for new groups", "value": "jev" },
-      { "label": "ChatGPT (Sign in with ChatGPT) — Use your ChatGPT Plus/Pro quota", "value": "chatgpt" },
-      { "label": "PrimaLabs — Fast OpenAI-compatible API (DeepSeek V4.1 Flash)", "value": "primalabs" },
-      { "label": "OpenAI-compatible — Remote or self-hosted /v1/chat/completions", "value": "openai" },
-      { "label": "Gemini — Google AI Studio generateContent", "value": "gemini" },
-      { "label": "Ollama — Stronger model, requires Ollama running locally", "value": "ollama" },
-      { "label": "Local — Built-in model, limited capability", "value": "local" },
-      { "label": "Custom — OpenAI or Ollama-compatible endpoint", "value": "custom" }
+      {
+        "label": "JEV + Fallback-LLM — TypeSafe JEV for existing groups + One-Shot LLM for new groups",
+        "value": "jev"
+      },
+      {
+        "label": "ChatGPT (Sign in with ChatGPT) — Use your ChatGPT Plus/Pro quota",
+        "value": "chatgpt"
+      },
+      {
+        "label": "PrimaLabs — Fast OpenAI-compatible API (DeepSeek V4.1 Flash)",
+        "value": "primalabs"
+      },
+      {
+        "label": "OpenAI-compatible — Remote or self-hosted /v1/chat/completions",
+        "value": "openai"
+      },
+      {
+        "label": "Gemini — Google AI Studio generateContent",
+        "value": "gemini"
+      },
+      {
+        "label": "Ollama — Stronger model, requires Ollama running locally",
+        "value": "ollama"
+      },
+      {
+        "label": "Local — Built-in model, limited capability",
+        "value": "local"
+      },
+      {
+        "label": "Custom — OpenAI or Ollama-compatible endpoint",
+        "value": "custom"
+      }
     ]
   },
   {
@@ -108,8 +90,14 @@
     "defaultValue": "typesafe",
     "placeholder": false,
     "options": [
-      { "label": "Official TypeSafe API — https://api.typesafe.ai/v1/systemone", "value": "typesafe" },
-      { "label": "OpenRouter Decisions API — https://openrouter.ai/api/alpha/decisions", "value": "openrouter" }
+      {
+        "label": "Official TypeSafe API — https://api.typesafe.ai/v1/systemone",
+        "value": "typesafe"
+      },
+      {
+        "label": "OpenRouter Decisions API — https://openrouter.ai/api/alpha/decisions",
+        "value": "openrouter"
+      }
     ]
   },
   {
@@ -147,13 +135,34 @@
     "defaultValue": "chatgpt",
     "placeholder": false,
     "options": [
-      { "label": "ChatGPT (Sign in with ChatGPT — uses your ChatGPT subscription quota)", "value": "chatgpt" },
-      { "label": "PrimaLabs API (https://api.primalabs.ai/v1 — DeepSeek V4.1 Flash)", "value": "primalabs" },
-      { "label": "OpenAI-compatible — Custom Base URL, API key & model", "value": "openai" },
-      { "label": "Gemini — Google AI Studio generateContent", "value": "gemini" },
-      { "label": "Ollama — Local Ollama model", "value": "ollama" },
-      { "label": "Custom — OpenAI or Ollama-compatible endpoint", "value": "custom" },
-      { "label": "Off — Only sort into existing groups with JEV", "value": "off" }
+      {
+        "label": "ChatGPT (Sign in with ChatGPT — uses your ChatGPT subscription quota)",
+        "value": "chatgpt"
+      },
+      {
+        "label": "PrimaLabs API (https://api.primalabs.ai/v1 — DeepSeek V4.1 Flash)",
+        "value": "primalabs"
+      },
+      {
+        "label": "OpenAI-compatible — Custom Base URL, API key & model",
+        "value": "openai"
+      },
+      {
+        "label": "Gemini — Google AI Studio generateContent",
+        "value": "gemini"
+      },
+      {
+        "label": "Ollama — Local Ollama model",
+        "value": "ollama"
+      },
+      {
+        "label": "Custom — OpenAI or Ollama-compatible endpoint",
+        "value": "custom"
+      },
+      {
+        "label": "Off — Only sort into existing groups with JEV",
+        "value": "off"
+      }
     ]
   },
   {
@@ -163,9 +172,18 @@
     "defaultValue": "rules-first",
     "placeholder": false,
     "options": [
-      { "label": "Rules first — Use domain rules, then AI for leftovers", "value": "rules-first" },
-      { "label": "Hybrid — Fast rules first, then AI-sort unmatched tabs every run", "value": "hybrid" },
-      { "label": "Full AI — Ignore rules and re-cluster all eligible tabs", "value": "full-ai" }
+      {
+        "label": "Rules first — Use domain rules, then AI for leftovers",
+        "value": "rules-first"
+      },
+      {
+        "label": "Hybrid — Fast rules first, then AI-sort unmatched tabs every run",
+        "value": "hybrid"
+      },
+      {
+        "label": "Full AI — Ignore rules and re-cluster all eligible tabs",
+        "value": "full-ai"
+      }
     ]
   },
   {
@@ -175,8 +193,14 @@
     "defaultValue": "transient",
     "placeholder": false,
     "options": [
-      { "label": "Transient — Move the tab only, rules untouched", "value": "transient" },
-      { "label": "Always-add — Append the tab's domain to the matched rule (rules grow)", "value": "always-add" }
+      {
+        "label": "Transient — Move the tab only, rules untouched",
+        "value": "transient"
+      },
+      {
+        "label": "Always-add — Append the tab's domain to the matched rule (rules grow)",
+        "value": "always-add"
+      }
     ]
   },
   {
@@ -186,11 +210,26 @@
     "defaultValue": "transient",
     "placeholder": false,
     "options": [
-      { "label": "Transient — Create the group only, no rule added", "value": "transient" },
-      { "label": "Auto-add — Create the group and save it as a new rule", "value": "auto-add" },
-      { "label": "Prompt — Open Zen's edit modal to confirm name and color", "value": "prompt" },
-      { "label": "Fresh categories — Re-tidy ALL tabs into AI-invented groups, ignoring rules", "value": "fresh-categories" },
-      { "label": "Plan Mode — Preview the AI's plan, pick which groups to keep, optionally re-assign", "value": "identify-only" }
+      {
+        "label": "Transient — Create the group only, no rule added",
+        "value": "transient"
+      },
+      {
+        "label": "Auto-add — Create the group and save it as a new rule",
+        "value": "auto-add"
+      },
+      {
+        "label": "Prompt — Open Zen's edit modal to confirm name and color",
+        "value": "prompt"
+      },
+      {
+        "label": "Fresh categories — Re-tidy ALL tabs into AI-invented groups, ignoring rules",
+        "value": "fresh-categories"
+      },
+      {
+        "label": "Plan Mode — Preview the AI's plan, pick which groups to keep, optionally re-assign",
+        "value": "identify-only"
+      }
     ]
   },
   {
@@ -312,8 +351,14 @@
     "defaultValue": "openai",
     "placeholder": false,
     "options": [
-      { "label": "OpenAI-compatible chat", "value": "openai" },
-      { "label": "Ollama generate", "value": "ollama" }
+      {
+        "label": "OpenAI-compatible chat",
+        "value": "openai"
+      },
+      {
+        "label": "Ollama generate",
+        "value": "ollama"
+      }
     ]
   }
 ]

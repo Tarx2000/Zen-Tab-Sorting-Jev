@@ -34,8 +34,22 @@ let settingsObserver = null;
 
 const isOurDialog = (dialog) => {
   if (!dialog) return false;
+  if (dialog.closest?.('.sineItem[mod-id="zen-tab-sorting"]')) return true;
+  if (dialog.querySelector(".zao-rules-editor, .zao-chatgpt-signin, .zao-provider-test")) return true;
+  const title = dialog.querySelector(".sineItemTitle")?.textContent || "";
+  if (title.includes("Zen Tab Sorting")) return true;
   for (const lbl of dialog.querySelectorAll(".separator-label")) {
-    if (lbl.textContent.trim().startsWith("Group Rules")) return true;
+    const text = lbl.textContent.trim();
+    if (
+      text.startsWith("Group Rules") ||
+      text.startsWith("Rules") ||
+      text.startsWith("AI Sorting") ||
+      text.startsWith("Skip Domains") ||
+      text.startsWith("Backup & Restore") ||
+      text.startsWith("Look & Feel")
+    ) {
+      return true;
+    }
   }
   return false;
 };
@@ -220,10 +234,7 @@ const updateConditionalFields = (dialog) => {
   setHidden(dialog.querySelector(".zao-provider-test"), !isRemoteProvider);
   setHidden(dialog.querySelector(".zao-jev-test-btn"), engine !== "jev");
 
-  const pipShape = getPipShape();
-  setHidden(findPrefRow(dialog, CONFIG.PIP_SIZE_CIRCLE_PREF), pipShape !== "circle");
-  setHidden(findPrefRow(dialog, CONFIG.PIP_SIZE_SQUARE_PREF), pipShape !== "square");
-  setHidden(findPrefRow(dialog, CONFIG.PIP_OPEN_BEHAVIOR_PREF), pipShape === "none");
+// Pip settings removed in favor of native Zen folder rendering
 };
 
 const COUNTDOWN_SECONDS = 3;
@@ -594,9 +605,16 @@ const performInject = (dialog) => {
   insertAfter(content, skipEditor, findSeparatorContainer(dialog, "Skip Domains"));
   insertAfter(content, backupSection, findSeparatorContainer(dialog, "Backup & Restore"));
 
-  const remoteSep = findSeparatorContainer(dialog, "Remote Provider Settings");
-  insertAfter(content, testSection, remoteSep);
-  insertAfter(content, chatGptSection, remoteSep);
+  const fallbackRow = findPrefRow(dialog, CONFIG.AI_FALLBACK_PROVIDER_PREF);
+  if (fallbackRow) {
+    insertAfter(content, testSection, fallbackRow);
+    insertAfter(content, chatGptSection, fallbackRow);
+  } else {
+    const remoteSep = findSeparatorContainer(dialog, "Remote Provider Settings") ||
+                      findSeparatorContainer(dialog, "AI Sorting");
+    insertAfter(content, testSection, remoteSep);
+    insertAfter(content, chatGptSection, remoteSep);
+  }
 
   tagSeparatorContainers(dialog);
   injectSectionDescriptions(dialog);
@@ -632,15 +650,9 @@ const onOurDialogFound = (dialog) => {
   const poll = () => {
     if (!dialog.isConnected) return;
     if (dialog.querySelector(".zao-rules-editor")) return;
-    let separator = null;
-    for (const lbl of dialog.querySelectorAll(".separator-label")) {
-      const text = lbl.textContent.trim();
-      if (text.startsWith("Group Rules") || text.startsWith("Rules")) {
-        separator = lbl.closest("vbox") || lbl.parentElement;
-        break;
-      }
-    }
-    if (separator) {
+    const content = dialog.querySelector(".sineItemPreferenceDialogContent");
+    const hasPrefs = content && (content.children.length > 2 || dialog.querySelector(".separator-label"));
+    if (hasPrefs) {
       try { performInject(dialog); }
       catch (e) { console.error(`${LOG} inject failed:`, e); }
       return;

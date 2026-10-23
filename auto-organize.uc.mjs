@@ -23,9 +23,6 @@ import {
   setupCollapsedStatePersistence,
   setupMinimalStylePrefObserver,
   teardownMinimalStylePrefObserver,
-  applyPipStyle,
-  setupPipStylePrefObserver,
-  teardownPipStylePrefObserver,
 } from "./modules/browser-hooks.mjs";
 import {
   setupSettingsObserver,
@@ -36,16 +33,17 @@ const url = window.location.href;
 const isBrowserContext = url === "chrome://browser/content/browser.xhtml";
 const isPrefsContext =
   url.startsWith("about:preferences") ||
+  url.includes("preferences") ||
+  url.includes("paneSineMods") ||
   url.startsWith("chrome://browser/content/preferences/");
 
 const tryInitializeBrowser = () => {
   try {
-    const separatorExists = domCache.getSeparators().length > 0;
     const commandSetExists = !!domCache.getCommandSet();
     const gBrowserReady = typeof gBrowser !== "undefined" && gBrowser?.tabContainer;
     const gZenWorkspacesReady = typeof window.gZenWorkspaces !== "undefined";
 
-    if (gBrowserReady && commandSetExists && separatorExists && gZenWorkspacesReady) {
+    if (gBrowserReady && commandSetExists && gZenWorkspacesReady) {
       setupCommand();
       addButtonToAllSeparators();
       setupWorkspaceHooks();
@@ -54,8 +52,6 @@ const tryInitializeBrowser = () => {
       setupTabGroupCreateHook();
       setupCollapsedStatePersistence();
       setupMinimalStylePrefObserver();
-      applyPipStyle();
-      setupPipStylePrefObserver();
       window.ZenTabSorting = Object.freeze({
         buildVersion: BUILD_VERSION,
         handleOrganizeClick: async () => {
@@ -138,7 +134,6 @@ const cleanup = () => {
     teardownTabContextMenu();
     teardownTabGroupContextMenu();
     teardownMinimalStylePrefObserver();
-    teardownPipStylePrefObserver();
   } catch (e) {
     console.error(`${LOG} cleanup error:`, e);
   }

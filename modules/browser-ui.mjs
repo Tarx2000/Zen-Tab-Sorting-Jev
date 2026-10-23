@@ -26,44 +26,74 @@ const WAND_ICON_SVG = `
 const buttonXul = () => `
   <toolbarbutton
     id="${CONFIG.BUTTON_ID}"
+    class="toolbarbutton-1 chromeclass-toolbar-additional"
     command="${CONFIG.COMMAND_ID}"
-    tooltiptext="Auto Organize Tabs (domain rules + AI fallback)">
+    tooltiptext="Auto Organize Tabs (JEV + Fallback-LLM)">
     <hbox class="toolbarbutton-box" align="center">
       ${WAND_ICON_SVG}
     </hbox>
   </toolbarbutton>
 `;
 
-const ensureOrganizeButton = (separator) => {
-  if (!separator || separator.querySelector(`#${CONFIG.BUTTON_ID}`)) return;
+export const ensureOrganizeButton = (target) => {
+  if (!target) return null;
+  const existing = target.querySelector?.(`#${CONFIG.BUTTON_ID}`);
+  if (existing) return existing;
 
   try {
-    // Position before the native clear button if it exists (matches Tidy Tabs).
-    const nativeClearButton = separator.querySelector(
-      ".zen-workspace-close-unpinned-tabs-button"
-    );
+    const nativeClearButton = target.matches?.(".zen-workspace-close-unpinned-tabs-button")
+      ? target
+      : target.querySelector?.(".zen-workspace-close-unpinned-tabs-button");
 
     const buttonFragment = window.MozXULElement.parseXULToFragment(buttonXul());
     const button = buttonFragment.firstChild;
-    if (nativeClearButton) {
-      separator.insertBefore(button, nativeClearButton);
-    } else {
-      separator.appendChild(button);
+
+    if (nativeClearButton && nativeClearButton.parentNode) {
+      nativeClearButton.parentNode.insertBefore(button, nativeClearButton);
+      return button;
     }
+    if (target.classList?.contains("pinned-tabs-container-separator")) {
+      target.appendChild(button);
+      return button;
+    }
+    target.appendChild(button);
+    return button;
   } catch (e) {
     console.error(`${LOG} ensureOrganizeButton error:`, e);
   }
+  return null;
 };
 
 export const addButtonToAllSeparators = () => {
-  const separators = domCache.getSeparators();
-  if (separators.length > 0) {
-    separators.forEach(ensureOrganizeButton);
-  } else {
-    const periphery = document.querySelector("#tabbrowser-arrowscrollbox-periphery");
-    if (periphery && !periphery.querySelector(`#${CONFIG.BUTTON_ID}`)) {
-      ensureOrganizeButton(periphery);
+  try {
+    // 1. Every native Clear button in the sidebar (places wand button directly to its left)
+    const clearButtons = document.querySelectorAll(".zen-workspace-close-unpinned-tabs-button");
+    for (const clearBtn of clearButtons) {
+      if (!clearBtn.parentElement?.querySelector(`#${CONFIG.BUTTON_ID}`)) {
+        ensureOrganizeButton(clearBtn);
+      }
     }
+
+    // 2. All separators across all workspaces
+    const separators = domCache.getSeparators();
+    if (separators && separators.length > 0) {
+      separators.forEach(ensureOrganizeButton);
+    }
+
+    // 3. Active workspace pinned container
+    const activePinned = window.gZenWorkspaces?.pinnedTabsContainer;
+    if (activePinned) {
+      const sep = activePinned.querySelector(".pinned-tabs-container-separator");
+      if (sep) ensureOrganizeButton(sep);
+    }
+
+    // 4. Fallback if no button exists anywhere in the window
+    if (!document.querySelector(`#${CONFIG.BUTTON_ID}`)) {
+      const periphery = document.querySelector("#tabbrowser-arrowscrollbox-periphery");
+      if (periphery) ensureOrganizeButton(periphery);
+    }
+  } catch (e) {
+    console.error(`${LOG} addButtonToAllSeparators error:`, e);
   }
 };
 
@@ -128,4 +158,13 @@ export const setupWorkspaceHooks = () => {
     domCache.invalidate();
     addButtonToAllSeparators();
   };
+
+  window.addEventListener("ZenWorkspaceChange", () => {
+    domCache.invalidate();
+    addButtonToAllSeparators();
+  });
+
+  window.addEventListener("TabSelect", () => {
+    addButtonToAllSeparators();
+  });
 };
