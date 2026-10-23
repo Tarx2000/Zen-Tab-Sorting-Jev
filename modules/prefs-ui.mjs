@@ -583,28 +583,38 @@ const buildProviderTestSection = () => {
   return container;
 };
 
-const buildDebugLogsSection = () => {
+const buildDebugLogsSection = (dialog) => {
   const card = h("div", { class: "zao-debug-logs-card" });
 
+  // Top header with status label and toggle button
   const header = h("div", { class: "zao-debug-logs-header" });
   const status = h("span", {
     text: isDebugMode()
-      ? `Debug-Logs (aktiv — ${getDebugEvents().length} Einträge)`
-      : "Debug-Logs (inaktiv — aktiviere \"Enable debug logging\" oben)",
+      ? `Debug-Modus: Aktiviert (${getDebugEvents().length} Logs)`
+      : "Debug-Modus: Deaktiviert",
   });
+
+  const toggleBtn = h("button", {
+    text: isDebugMode() ? "Debug-Modus deaktivieren" : "Debug-Modus aktivieren",
+  });
+  toggleBtn.className = "zao-backup-btn zao-debug-toggle-btn";
+  toggleBtn.dataset.active = isDebugMode() ? "true" : "false";
+
+  header.append(status, toggleBtn);
+
+  // Actions row with plain text labels (no icons / emojis)
   const actions = h("div", { class: "zao-debug-logs-actions" });
 
-  const refreshBtn = h("button", { text: "🔄 Aktualisieren" });
+  const refreshBtn = h("button", { text: "Aktualisieren" });
   refreshBtn.className = "zao-backup-btn";
 
-  const copyBtn = h("button", { text: "📋 Logs kopieren" });
+  const copyBtn = h("button", { text: "Logs kopieren" });
   copyBtn.className = "zao-backup-btn";
 
-  const clearBtn = h("button", { text: "🗑️ Leeren" });
+  const clearBtn = h("button", { text: "Leeren" });
   clearBtn.className = "zao-backup-btn";
 
   actions.append(refreshBtn, copyBtn, clearBtn);
-  header.append(status, actions);
 
   const viewer = h("textarea", { class: "zao-debug-logs-viewer" });
   viewer.setAttribute("readonly", "true");
@@ -612,22 +622,39 @@ const buildDebugLogsSection = () => {
   viewer.value = formatDebugEventsAsText();
 
   const refreshViewer = () => {
+    const active = isDebugMode();
+    toggleBtn.textContent = active ? "Debug-Modus deaktivieren" : "Debug-Modus aktivieren";
+    toggleBtn.dataset.active = active ? "true" : "false";
+    status.textContent = active
+      ? `Debug-Modus: Aktiviert (${getDebugEvents().length} Logs)`
+      : "Debug-Modus: Deaktiviert";
     viewer.value = formatDebugEventsAsText();
-    status.textContent = isDebugMode()
-      ? `Debug-Logs (aktiv — ${getDebugEvents().length} Einträge)`
-      : "Debug-Logs (inaktiv — aktiviere \"Enable debug logging\" oben)";
   };
+
+  toggleBtn.addEventListener("click", () => {
+    const current = isDebugMode();
+    try {
+      Services?.prefs?.setBoolPref?.(CONFIG.DEBUG_MODE_PREF, !current);
+    } catch (e) {
+      console.warn(`${LOG} could not toggle debug mode pref:`, e);
+    }
+    const prefRow = findPrefRow(dialog, CONFIG.DEBUG_MODE_PREF);
+    const cb = prefRow?.querySelector?.("input[type='checkbox'], checkbox");
+    if (cb) cb.checked = !current;
+
+    refreshViewer();
+  });
 
   copyBtn.addEventListener("click", async () => {
     try {
       if (typeof navigator?.clipboard?.writeText === "function") {
         await navigator.clipboard.writeText(viewer.value);
       }
-      copyBtn.textContent = "✓ Kopiert!";
-      setTimeout(() => { copyBtn.textContent = "📋 Logs kopieren"; }, 2000);
+      copyBtn.textContent = "Kopiert!";
+      setTimeout(() => { copyBtn.textContent = "Logs kopieren"; }, 2000);
     } catch {
       copyBtn.textContent = "Fehler!";
-      setTimeout(() => { copyBtn.textContent = "📋 Logs kopieren"; }, 2000);
+      setTimeout(() => { copyBtn.textContent = "Logs kopieren"; }, 2000);
     }
   });
 
@@ -637,7 +664,7 @@ const buildDebugLogsSection = () => {
     refreshViewer();
   });
 
-  card.append(header, viewer);
+  card.append(header, actions, viewer);
   card._zaoRefreshLogs = refreshViewer;
   return card;
 };
@@ -676,7 +703,7 @@ const performInject = (dialog) => {
     insertAfter(content, chatGptSection, remoteSep);
   }
 
-  const debugLogsSection = buildDebugLogsSection();
+  const debugLogsSection = buildDebugLogsSection(dialog);
   const debugSep = findSeparatorContainer(dialog, "Debug & Diagnostics");
   if (debugSep) {
     insertAfter(content, debugLogsSection, debugSep);

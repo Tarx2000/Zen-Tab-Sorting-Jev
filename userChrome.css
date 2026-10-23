@@ -37,13 +37,20 @@ tab-group.zao-minimal {
   outline: none !important;
   padding: 2px 4px !important;
   margin: 0 !important;
-  cursor: pointer !important;
+  cursor: default !important;
   color: inherit !important;
   opacity: 0.65 !important;
-  transition: opacity 120ms ease, color 120ms ease !important;
+  transition: opacity 120ms ease, color 120ms ease, transform 120ms ease !important;
   display: inline-flex !important;
   align-items: center !important;
   justify-content: center !important;
+}
+
+#tab-wand-button,
+#tab-wand-button *,
+#tab-wand-button svg,
+#tab-wand-button path {
+  cursor: default !important;
 }
 
 #tab-wand-button:hover,
@@ -60,7 +67,8 @@ tab-group.zao-minimal {
 #tab-wand-button svg {
   display: block !important;
   stroke: currentColor !important;
-  transition: stroke 120ms ease, opacity 120ms ease !important;
+  transition: stroke 120ms ease, opacity 120ms ease, transform 120ms ease !important;
+  pointer-events: none !important;
 }
 
 #tab-wand-button:hover svg,
@@ -69,34 +77,36 @@ tab-group.zao-minimal {
   color: #ffffff !important;
 }
 
-/* --- Toolbar button: wiggle the wand on click --- */
+/* --- Toolbar button: vibrant sparkle click animation --- */
 @keyframes zao-wand-wiggle {
-  0%   { transform: rotate(0deg); }
-  15%  { transform: rotate(-18deg); }
-  30%  { transform: rotate(20deg); }
-  45%  { transform: rotate(-14deg); }
-  60%  { transform: rotate(10deg); }
-  80%  { transform: rotate(-4deg); }
-  100% { transform: rotate(0deg); }
+  0%   { transform: scale(1) rotate(0deg); filter: drop-shadow(0 0 0px #fff); }
+  15%  { transform: scale(1.3) rotate(-26deg); filter: drop-shadow(0 0 8px #ffffff); color: #ffffff; stroke: #ffffff; }
+  30%  { transform: scale(1.4) rotate(26deg); filter: drop-shadow(0 0 12px #ffffff); color: #ffffff; stroke: #ffffff; }
+  45%  { transform: scale(1.25) rotate(-18deg); filter: drop-shadow(0 0 8px #ffffff); color: #ffffff; stroke: #ffffff; }
+  65%  { transform: scale(1.15) rotate(12deg); filter: drop-shadow(0 0 6px #ffffff); color: #ffffff; stroke: #ffffff; }
+  85%  { transform: scale(1.05) rotate(-4deg); filter: drop-shadow(0 0 3px #ffffff); color: #ffffff; stroke: #ffffff; }
+  100% { transform: scale(1) rotate(0deg); filter: drop-shadow(0 0 0px #fff); }
 }
 
 #tab-wand-button.zao-wiggling svg {
-  animation: zao-wand-wiggle 550ms ease-in-out;
-  transform-origin: 22% 78%;
+  animation: zao-wand-wiggle 650ms cubic-bezier(0.25, 1, 0.5, 1) !important;
+  transform-origin: 25% 75% !important;
+  color: #ffffff !important;
+  stroke: #ffffff !important;
 }
 
-/* AI Pass 2 in progress — applied by click-handler.mjs setButtonThinking().
-   A gentle pulse on the wand SVG (rather than an icon swap) so it's visible
-   in peripheral vision without being distracting. Kicks in after the wiggle
-   class is removed; the two never animate the SVG simultaneously. */
+/* AI Pass 2 in progress — noticeable, vibrant pulsing glow */
 @keyframes zao-thinking-pulse {
-  0%   { opacity: 1;    transform: scale(1); }
-  50%  { opacity: 0.55; transform: scale(0.92); }
-  100% { opacity: 1;    transform: scale(1); }
+  0%   { opacity: 1;    transform: scale(1);    filter: drop-shadow(0 0 0px rgba(255, 255, 255, 0)); }
+  35%  { opacity: 0.35; transform: scale(0.72); filter: drop-shadow(0 0 1px rgba(255, 255, 255, 0.2)); }
+  70%  { opacity: 1;    transform: scale(1.35); filter: drop-shadow(0 0 12px #ffffff); color: #ffffff; stroke: #ffffff; }
+  100% { opacity: 1;    transform: scale(1);    filter: drop-shadow(0 0 0px rgba(255, 255, 255, 0)); }
 }
 #tab-wand-button.zao-thinking svg {
-  animation: zao-thinking-pulse 1.2s ease-in-out infinite;
-  transform-origin: center;
+  animation: zao-thinking-pulse 1s cubic-bezier(0.4, 0, 0.2, 1) infinite !important;
+  transform-origin: center !important;
+  color: #ffffff !important;
+  stroke: #ffffff !important;
 }
 
 /* Inline description paragraph injected under a Sine "separator" header.
@@ -854,9 +864,23 @@ dialog.zao-warning-dialog::backdrop {
   display: flex !important;
   justify-content: space-between !important;
   align-items: center !important;
-  font-size: 12px !important;
+  font-size: 13px !important;
   font-weight: 500 !important;
-  opacity: 0.85 !important;
+  gap: 8px !important;
+  flex-wrap: wrap !important;
+}
+
+.zao-debug-toggle-btn {
+  font-weight: 600 !important;
+  padding: 4px 12px !important;
+  border-radius: 6px !important;
+  cursor: default !important;
+}
+
+.zao-debug-toggle-btn[data-active="true"] {
+  background: rgba(46, 204, 113, 0.2) !important;
+  color: #2ecc71 !important;
+  border: 1px solid rgba(46, 204, 113, 0.45) !important;
 }
 
 .zao-debug-logs-actions {
