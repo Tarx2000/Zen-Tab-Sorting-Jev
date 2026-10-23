@@ -1,10 +1,15 @@
 // Zen Tab Sorting — preferences-context setup.
-// Watches for Sine's per-mod settings dialog and injects the rules editor widget
-// after the "Group Rules" separator. Also injects our stylesheet (Sine's chrome CSS
-// pipeline doesn't reach about:preferences scope).
+// Watches for Sine's per-mod settings dialog and injects the rules editor widget,
+// Sign in with ChatGPT (SIWC) widget, and JEV / provider test controls.
 
 import { CONFIG, LOG, DEFAULT_RULES, BUILD_VERSION, h } from "./config.mjs";
-import { readRulesPref, writeRulesPref, getAIEngine, getPipShape } from "./rules.mjs";
+import {
+  readRulesPref,
+  writeRulesPref,
+  getAIEngine,
+  getPipShape,
+  isDomainRulesEnabled,
+} from "./rules.mjs";
 import {
   buildRulesEditor,
   buildSkipDomainsEditor,
@@ -14,15 +19,19 @@ import {
 } from "./widget.mjs";
 import { fetchZenColorsFromBrowser } from "./color-picker.mjs";
 import { testProviderConnection } from "./remote-provider.mjs";
+import { testJevConnection, defaultJevModelForProvider } from "./jev.mjs";
+import {
+  readChatGPTSession,
+  clearChatGPTSession,
+  startChatGPTSignInFlow,
+  fetchChatGPTModels,
+  ensureValidChatGPTToken,
+} from "./chatgpt-auth.mjs";
 
 console.log(`[ZenTabSort] prefs-ui.mjs loaded — v${BUILD_VERSION}`);
 
 let settingsObserver = null;
 
-// Returns true if `dialog` contains a Sine separator whose label starts with
-// "Group Rules" — our marker for "this is our mod's settings dialog". We use
-// this instead of matching on `[mod-id]` because Sine's exact attribute scheme
-// has been inconsistent across versions and our id changed mid-flight.
 const isOurDialog = (dialog) => {
   if (!dialog) return false;
   for (const lbl of dialog.querySelectorAll(".separator-label")) {
@@ -33,8 +42,6 @@ const isOurDialog = (dialog) => {
 
 const injectStylesheet = async () => {
   try {
-    // ?t=<timestamp> defeats Gecko's chrome:// fetch cache so iterative CSS edits
-    // show up after a simple dialog close+reopen (no Zen restart needed).
     const res = await fetch(`${CONFIG.CSS_URL}?t=${Date.now()}`, { cache: "no-store" });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const css = await res.text();
@@ -49,14 +56,10 @@ const injectStylesheet = async () => {
   }
 };
 
-// Inline section descriptions injected as siblings AFTER a Sine separator.
-// We can't put paragraph-length text in the separator's label itself — Sine
-// renders that as a bold section header and the long string visually breaks the
-// surrounding layout. Each entry: [labelPrefix, descriptionText].
 const SECTION_DESCRIPTIONS = [
   [
     "Group Rules",
-    "Add groups and domains below; changes save instantly.",
+    "Deterministic domain rules are off by default so JEV and your Fallback-LLM sort dynamically by context. Enable the checkbox below only if you want static domain rules.",
   ],
   [
     "Skip Domains",
@@ -72,18 +75,14 @@ const SECTION_DESCRIPTIONS = [
   ],
   [
     "AI Sorting",
-    "Optional second pass after the rule engine. Local and Ollama stay on your machine; remote providers require explicit consent before tab metadata can be sent.",
+    "JEV (Stage 1) classifies ungrouped tabs into your existing workspace groups; your Fallback-LLM (Stage 2) clusters remaining tabs into new groups in one shot.",
   ],
   [
     "Remote Provider Settings",
-    "OpenAI-compatible, Gemini, and custom providers are optional. Leave AI engine off or use Local/Ollama for local-only sorting.",
+    "Configure Sign in with ChatGPT, PrimaLabs, OpenAI-compatible, Gemini, or custom providers. Leave AI engine off or use Local/Ollama for local-only sorting.",
   ],
 ];
 
-// Tag each separator's outer container so CSS can style the row (border-bottom,
-// margins) without applying layout properties to the XUL <label> itself —
-// XUL labels behave unpredictably with `display: block` and pseudo-element
-// overrides.
 const tagSeparatorContainers = (dialog) => {
   for (const lbl of dialog.querySelectorAll(".separator-label")) {
     const container = lbl.closest("vbox") || lbl.parentElement;
@@ -97,7 +96,6 @@ const injectSectionDescriptions = (dialog) => {
     const sep = seps.find((lbl) => lbl.textContent.trim().startsWith(prefix));
     if (!sep) continue;
     const container = sep.closest("vbox") || sep.parentElement;
-    // Idempotency — re-injecting on dialog reopen shouldn't pile up <div>s.
     if (container.nextElementSibling?.classList?.contains("zao-pref-description")) continue;
     const desc = h("div");
     desc.className = "zao-pref-description";
@@ -106,58 +104,22 @@ const injectSectionDescriptions = (dialog) => {
   }
 };
 
-// ─── Conditional field visibility ────────────────────────────────────────────
-// Sine's preferences.json has no native conditional show/hide, so each control
-// renders unconditionally and we toggle a `.zao-pref-hidden` class based on the
-// current AI engine value.
-//
-// Strategy for locating a control's row:
-//   1. element with `[pref=...]` or `[property=...]` set to the pref name
-//   2. fallback: walk labels, match on text, climb to nearest vbox/hbox
-// Sine's exact DOM is opaque to us, so we try both.
-
-// Sine assigns each pref's outer container an `id` derived from the pref name
-// with dots replaced by dashes. e.g. `extensions.zen-auto-organize.ai-engine`
-// becomes id="extensions-zen-auto-organize-ai-engine". Targeting that id
-// directly is way more reliable than guessing at class names.
 const findPrefRow = (dialog, prefName) => {
   const id = prefName.replace(/\./g, "-");
   return dialog.querySelector(`#${CSS.escape(id)}`);
 };
 
-// Subset of new-group-behavior values that are meaningful on the Local engine.
-// Mirrors the same 3-way pattern as the existing-behavior dropdown:
-//   - auto-add        → save the cluster as a rule (hostname-derived name)
-//   - transient       → apply the move, don't write a rule
-//   - fresh-categories → re-tidy ALL tabs into clusters, ignoring rules
-// The other Ollama values (prompt / identify-only) require LLM-style semantic
-// output (Zen edit modal expects a meaningful name; Plan Mode review is only
-// useful when the names mean something abstract) so they're hidden on Local.
 const LOCAL_NEW_GROUP_BEHAVIORS = new Set(["auto-add", "transient", "fresh-categories"]);
 
-// Hide individual dropdown options based on a whitelist of valid values.
-// Sine's settings page is HTML (not XUL), so it renders dropdowns as either
-// native <option> elements OR custom elements (e.g. <li> with data-value).
-// We try multiple selectors and report what we found so a missing-selector
-// case is debuggable.
 const filterDropdownOptions = (row, validValues) => {
   if (!row) return;
-  // Try every selector we've ever seen Sine use. value-bearing children only.
   const items = [
     ...row.querySelectorAll("option"),
     ...row.querySelectorAll("menuitem"),
     ...row.querySelectorAll("[data-value]"),
     ...row.querySelectorAll('[role="option"]'),
   ];
-  if (items.length === 0) {
-    console.warn(
-      `${LOG} filterDropdownOptions: NO option-like children under row`,
-      row,
-      "innerHTML sample:",
-      (row.innerHTML || "").slice(0, 400)
-    );
-    return;
-  }
+  if (items.length === 0) return;
   for (const item of items) {
     const v = item.getAttribute("value") || item.getAttribute("data-value");
     if (v == null) continue;
@@ -167,103 +129,110 @@ const filterDropdownOptions = (row, validValues) => {
   }
 };
 
+const getFallbackProviderPref = () => {
+  try {
+    return Services.prefs.getStringPref(CONFIG.AI_FALLBACK_PROVIDER_PREF, "chatgpt").trim() || "chatgpt";
+  } catch {
+    return "chatgpt";
+  }
+};
+
 const updateConditionalFields = (dialog) => {
-  // Always go through getAIEngine() so unknown / empty / "None" pref values
-  // normalize to "off" the same way as everywhere else in the codebase.
   const engine = getAIEngine();
-  const isLocalOrOllama = engine === "local" || engine === "ollama";
-  const isRemoteProvider = engine === "openai" || engine === "gemini" || engine === "custom";
+  const fallbackProvider = getFallbackProviderPref();
+  const domainRulesOn = isDomainRulesEnabled();
+
+  // Active LLM target is either the standalone engine or JEV's Fallback-LLM
+  const activeLlm = engine === "jev" ? fallbackProvider : engine;
+  const isLocalOrOllama = activeLlm === "local" || activeLlm === "ollama";
+  const isRemoteProvider =
+    engine === "jev" ||
+    ["chatgpt", "primalabs", "openai", "gemini", "custom"].includes(activeLlm);
 
   const setHidden = (row, hidden) => {
     if (!row) return;
     row.classList.toggle("zao-pref-hidden", hidden);
   };
 
-  // Ollama: shows BOTH the existing-behavior and new-group-behavior rows
-  //   (they govern different parts of the unified classifier).
-  // Local: ONE row only — new-group-behavior with the 3-option filter applied.
-  //   Existing-behavior is hidden because Local unifies both decisions into
-  //   the single dropdown (auto-add = grow rules; transient = don't; fresh =
-  //   re-cluster ignoring rules entirely).
-  setHidden(findPrefRow(dialog, CONFIG.AI_EXISTING_BEHAVIOR_PREF), engine !== "ollama");
+  // Hide the Group Rules editor widget unless the user explicitly enables deterministic domain rules
+  setHidden(dialog.querySelector(".zao-rules-editor"), !domainRulesOn);
+  setHidden(findPrefRow(dialog, CONFIG.STRICT_RULES_PREF), !domainRulesOn);
+
+  // JEV fields (visible when engine === "jev")
+  setHidden(findPrefRow(dialog, CONFIG.AI_JEV_PROVIDER_PREF), engine !== "jev");
+  setHidden(findPrefRow(dialog, CONFIG.AI_JEV_API_KEY_PREF), engine !== "jev");
+  setHidden(findPrefRow(dialog, CONFIG.AI_JEV_MODEL_PREF), engine !== "jev");
+  setHidden(findPrefRow(dialog, CONFIG.AI_JEV_MIN_PROB_PREF), engine !== "jev");
+  setHidden(findPrefRow(dialog, CONFIG.AI_JEV_MIN_MARGIN_PREF), engine !== "jev");
+  setHidden(findPrefRow(dialog, CONFIG.AI_FALLBACK_PROVIDER_PREF), engine !== "jev");
+
+  // Domain-rule mutation behaviors (only relevant when domain rules are enabled)
+  setHidden(findPrefRow(dialog, CONFIG.AI_EXISTING_BEHAVIOR_PREF), !domainRulesOn || engine !== "ollama");
   const newGroupBehaviorRow = findPrefRow(dialog, CONFIG.AI_NEW_GROUP_BEHAVIOR_PREF);
-  setHidden(newGroupBehaviorRow, !isLocalOrOllama);
+  setHidden(newGroupBehaviorRow, !domainRulesOn && !isLocalOrOllama);
   if (engine === "local") {
     filterDropdownOptions(newGroupBehaviorRow, LOCAL_NEW_GROUP_BEHAVIORS);
-    // If the user previously had an Ollama-only behavior selected (e.g.
-    // prompt / identify-only), force it back to a valid Local value so the
-    // dropdown doesn't display a now-hidden selection.
     try {
       const current = Services.prefs.getStringPref(CONFIG.AI_NEW_GROUP_BEHAVIOR_PREF, "");
       if (current && !LOCAL_NEW_GROUP_BEHAVIORS.has(current)) {
-        console.log(`${LOG} new-group-behavior "${current}" not valid on Local — resetting to "transient"`);
         Services.prefs.setStringPref(CONFIG.AI_NEW_GROUP_BEHAVIOR_PREF, "transient");
       }
-    } catch (e) {
-      console.error(`${LOG} failed to reset new-group-behavior pref:`, e);
-    }
+    } catch {}
   } else if (engine === "ollama") {
-    // Restore all options for Ollama (whitelist matches preferences.json).
-    filterDropdownOptions(newGroupBehaviorRow,
-      new Set(["auto-add", "transient", "prompt", "fresh-categories", "identify-only"])
+    filterDropdownOptions(
+      newGroupBehaviorRow,
+      new Set(["auto-add", "transient", "prompt", "fresh-categories", "identify-only"]),
     );
   }
-  setHidden(findPrefRow(dialog, CONFIG.AI_OLLAMA_HOST_PREF),        engine !== "ollama");
-  setHidden(findPrefRow(dialog, CONFIG.AI_OLLAMA_MODEL_PREF),       engine !== "ollama");
-  setHidden(findPrefRow(dialog, CONFIG.AI_OLLAMA_WARMUP_PREF),      engine !== "ollama");
-  setHidden(findPrefRow(dialog, CONFIG.AI_LOCAL_BATCH_SIZE_PREF),   !isLocalOrOllama);
-  setHidden(findPrefRow(dialog, CONFIG.AI_SORT_MODE_PREF),          engine === "off");
-  setHidden(findPrefRow(dialog, CONFIG.AI_PROVIDER_CONSENT_PREF),   !isRemoteProvider);
-  setHidden(findPrefRow(dialog, CONFIG.AI_OPENAI_ENDPOINT_PREF),     engine !== "openai");
-  setHidden(findPrefRow(dialog, CONFIG.AI_OPENAI_API_KEY_PREF),      engine !== "openai");
-  setHidden(findPrefRow(dialog, CONFIG.AI_OPENAI_MODEL_PREF),        engine !== "openai");
-  setHidden(findPrefRow(dialog, CONFIG.AI_GEMINI_API_KEY_PREF),      engine !== "gemini");
-  setHidden(findPrefRow(dialog, CONFIG.AI_GEMINI_MODEL_PREF),        engine !== "gemini");
-  setHidden(findPrefRow(dialog, CONFIG.AI_CUSTOM_ENDPOINT_PREF),      engine !== "custom");
-  setHidden(findPrefRow(dialog, CONFIG.AI_CUSTOM_API_KEY_PREF),       engine !== "custom");
-  setHidden(findPrefRow(dialog, CONFIG.AI_CUSTOM_MODEL_PREF),         engine !== "custom");
-  setHidden(findPrefRow(dialog, CONFIG.AI_CUSTOM_FORMAT_PREF),        engine !== "custom");
-  setHidden(dialog.querySelector(".zao-provider-test"),               !isRemoteProvider);
 
-  // Each marker shape keeps its own size, so only surface the field for the
-  // shape currently selected — the other one stays stored, just out of the way.
-  // With the marker off, neither size nor open behavior means anything.
+  setHidden(findPrefRow(dialog, CONFIG.AI_OLLAMA_HOST_PREF), activeLlm !== "ollama");
+  setHidden(findPrefRow(dialog, CONFIG.AI_OLLAMA_MODEL_PREF), activeLlm !== "ollama");
+  setHidden(findPrefRow(dialog, CONFIG.AI_OLLAMA_WARMUP_PREF), activeLlm !== "ollama");
+  setHidden(findPrefRow(dialog, CONFIG.AI_LOCAL_BATCH_SIZE_PREF), !isLocalOrOllama);
+  setHidden(findPrefRow(dialog, CONFIG.AI_SORT_MODE_PREF), !domainRulesOn || engine === "off");
+  setHidden(findPrefRow(dialog, CONFIG.AI_PROVIDER_CONSENT_PREF), !isRemoteProvider);
+
+  // ChatGPT (Sign in with ChatGPT) fields
+  setHidden(dialog.querySelector(".zao-chatgpt-signin"), activeLlm !== "chatgpt");
+  setHidden(findPrefRow(dialog, CONFIG.AI_CHATGPT_MODEL_PREF), activeLlm !== "chatgpt");
+
+  // PrimaLabs fields
+  setHidden(findPrefRow(dialog, CONFIG.AI_PRIMALABS_ENDPOINT_PREF), activeLlm !== "primalabs");
+  setHidden(findPrefRow(dialog, CONFIG.AI_PRIMALABS_API_KEY_PREF), activeLlm !== "primalabs");
+  setHidden(findPrefRow(dialog, CONFIG.AI_PRIMALABS_MODEL_PREF), activeLlm !== "primalabs");
+
+  // OpenAI-compatible fields
+  setHidden(findPrefRow(dialog, CONFIG.AI_OPENAI_ENDPOINT_PREF), activeLlm !== "openai");
+  setHidden(findPrefRow(dialog, CONFIG.AI_OPENAI_API_KEY_PREF), activeLlm !== "openai");
+  setHidden(findPrefRow(dialog, CONFIG.AI_OPENAI_MODEL_PREF), activeLlm !== "openai");
+
+  // Gemini fields
+  setHidden(findPrefRow(dialog, CONFIG.AI_GEMINI_API_KEY_PREF), activeLlm !== "gemini");
+  setHidden(findPrefRow(dialog, CONFIG.AI_GEMINI_MODEL_PREF), activeLlm !== "gemini");
+
+  // Custom fields
+  setHidden(findPrefRow(dialog, CONFIG.AI_CUSTOM_ENDPOINT_PREF), activeLlm !== "custom");
+  setHidden(findPrefRow(dialog, CONFIG.AI_CUSTOM_API_KEY_PREF), activeLlm !== "custom");
+  setHidden(findPrefRow(dialog, CONFIG.AI_CUSTOM_MODEL_PREF), activeLlm !== "custom");
+  setHidden(findPrefRow(dialog, CONFIG.AI_CUSTOM_FORMAT_PREF), activeLlm !== "custom");
+
+  // Provider test buttons
+  setHidden(dialog.querySelector(".zao-provider-test"), !isRemoteProvider);
+  setHidden(dialog.querySelector(".zao-jev-test-btn"), engine !== "jev");
+
   const pipShape = getPipShape();
   setHidden(findPrefRow(dialog, CONFIG.PIP_SIZE_CIRCLE_PREF), pipShape !== "circle");
   setHidden(findPrefRow(dialog, CONFIG.PIP_SIZE_SQUARE_PREF), pipShape !== "square");
   setHidden(findPrefRow(dialog, CONFIG.PIP_OPEN_BEHAVIOR_PREF), pipShape === "none");
 };
 
-// First-time AI engine warning modals.
-//
-// Each engine (Local, Ollama) has its own one-shot warning that fires when
-// the user picks it from the dropdown for the first time. Acknowledgement is
-// recorded in a per-engine pref so each modal only ever appears once.
-//
-// The modals do NOT re-fire on settings reopen — that would be too
-// aggressive. If the user ESC's, the way to re-see is to switch engines
-// off and back.
-//
-// The "I Understand" button is disabled for 3 seconds with a live countdown
-// in the label so the user has to actually read the warning before clicking.
 const COUNTDOWN_SECONDS = 3;
 
-// Build + show a warning modal. `contentNodes` are appended to the dialog
-// body in order, before the action button. `ackPref` is the pref key whose
-// boolean tracks acknowledgement (skip if true, set true on confirm).
 const showAckModal = ({ ackPref, contentNodes, logTag }) => {
   let alreadyAck = false;
   try { alreadyAck = Services.prefs.getBoolPref(ackPref, false); } catch {}
-  console.debug(`${LOG} [${logTag}] maybeShow called — acknowledged=${alreadyAck}`);
-  if (alreadyAck) {
-    console.debug(`${LOG} [${logTag}] skipping — already acknowledged. To re-show, unset ${ackPref} in about:config.`);
-    return;
-  }
-  if (document.querySelector(".zao-warning-dialog[open]")) {
-    console.debug(`${LOG} [${logTag}] skipping — another warning modal already open`);
-    return;
-  }
-  console.debug(`${LOG} [${logTag}] building modal`);
+  if (alreadyAck) return;
+  if (document.querySelector(".zao-warning-dialog[open]")) return;
 
   const modal = h("dialog", { class: "zao-warning-dialog" });
   for (const n of contentNodes) modal.appendChild(n);
@@ -293,56 +262,33 @@ const showAckModal = ({ ackPref, contentNodes, logTag }) => {
     try { modal.close(); } catch {}
     modal.remove();
   });
-  // On ESC / external close, stop the countdown so it doesn't keep firing
-  // against a detached DOM node.
   modal.addEventListener("close", () => { clearInterval(tick); });
 
   actions.appendChild(btn);
   modal.appendChild(actions);
-  // Append to documentElement (top-level), NOT inside Sine's dialog. Nested
-  // <dialog>.showModal() doesn't reliably layer above the parent and can
-  // get clipped by its boundaries.
   document.documentElement.appendChild(modal);
   try {
     modal.showModal();
-    console.debug(`${LOG} [${logTag}] modal shown`);
   } catch (e) {
-    console.warn(`${LOG} [${logTag}] showModal() failed — falling back to confirm():`, e);
+    console.warn(`${LOG} [${logTag}] showModal() failed:`, e);
     modal.remove();
   }
 };
 
 const maybeShowOllamaWarning = () => {
   const title = h("h3", { class: "zao-warning-title", text: "Heads up: Ollama runs on your machine" });
-
   const lead = h("p", { class: "zao-warning-lead" });
   lead.appendChild(document.createTextNode("Ollama uses your computer's "));
   lead.appendChild(h("strong", { text: "RAM and VRAM" }));
   lead.appendChild(document.createTextNode(" to run AI models."));
-
   const list = h("ul", { class: "zao-warning-list" });
-
   const li1 = h("li");
   li1.appendChild(h("strong", { text: "Risk: " }));
   li1.appendChild(document.createTextNode("a model too big for your hardware can slow or crash your system."));
-
   const li2 = h("li");
   li2.appendChild(h("strong", { text: "Safe default: " }));
   li2.appendChild(document.createTextNode("qwen2.5:1.5b (~1 GB) — runs on most machines."));
-
-  const li3 = h("li");
-  li3.appendChild(h("strong", { text: "Going bigger? " }));
-  const link = h("a", { class: "zao-warning-link", text: "See the model guide" });
-  link.href = "https://github.com/LoopRook/Zen-Tab-Sorting";
-  link.target = "_blank";
-  link.rel = "noopener noreferrer";
-  li3.appendChild(link);
-  li3.appendChild(document.createTextNode(" first."));
-
-  list.appendChild(li1);
-  list.appendChild(li2);
-  list.appendChild(li3);
-
+  list.append(li1, li2);
   showAckModal({
     ackPref: CONFIG.OLLAMA_ACKNOWLEDGED_PREF,
     contentNodes: [title, lead, list],
@@ -352,36 +298,15 @@ const maybeShowOllamaWarning = () => {
 
 const maybeShowLocalWarning = () => {
   const title = h("h3", { class: "zao-warning-title", text: "Heads up: Local AI runs inside Firefox" });
-
   const lead = h("p", { class: "zao-warning-lead" });
   lead.appendChild(document.createTextNode("The Local engine uses "));
   lead.appendChild(h("strong", { text: "Firefox's built-in ML model" }));
   lead.appendChild(document.createTextNode(" — no extra setup, but it runs inside the browser."));
-
   const list = h("ul", { class: "zao-warning-list" });
-
   const li1 = h("li");
   li1.appendChild(h("strong", { text: "Risk: " }));
   li1.appendChild(document.createTextNode("with hundreds of tabs, the AI pass can briefly spike CPU and lag the browser."));
-
-  const li2 = h("li");
-  li2.appendChild(h("strong", { text: "Limited: " }));
-  li2.appendChild(document.createTextNode("only assigns tabs to existing groups. Won't invent new categories."));
-
-  const li3 = h("li");
-  li3.appendChild(h("strong", { text: "Want stronger results? " }));
-  li3.appendChild(document.createTextNode("Try Ollama for cluster-and-name. "));
-  const link = h("a", { class: "zao-warning-link", text: "See the model guide" });
-  link.href = "https://github.com/LoopRook/Zen-Tab-Sorting";
-  link.target = "_blank";
-  link.rel = "noopener noreferrer";
-  li3.appendChild(link);
-  li3.appendChild(document.createTextNode("."));
-
   list.appendChild(li1);
-  list.appendChild(li2);
-  list.appendChild(li3);
-
   showAckModal({
     ackPref: CONFIG.LOCAL_ACKNOWLEDGED_PREF,
     contentNodes: [title, lead, list],
@@ -389,52 +314,59 @@ const maybeShowLocalWarning = () => {
   });
 };
 
-// Re-run the show/hide pass whenever the engine pref flips, or the pip shape
-// changes (which swaps in that shape's size field). One observer per
-// preferences-window context, torn down with the rest on window unload.
+const OBSERVED_PREFS = [
+  CONFIG.AI_ENGINE_PREF,
+  CONFIG.AI_FALLBACK_PROVIDER_PREF,
+  CONFIG.AI_JEV_PROVIDER_PREF,
+  CONFIG.USE_DOMAIN_RULES_PREF,
+  CONFIG.PIP_SHAPE_PREF,
+];
+
 let enginePrefObserver = null;
 const setupEnginePrefObserver = () => {
   if (enginePrefObserver) return;
   enginePrefObserver = {
     observe(_subject, topic, data) {
       if (topic !== "nsPref:changed") return;
-      if (data === CONFIG.PIP_SHAPE_PREF) {
-        for (const d of document.querySelectorAll(".sineItemPreferenceDialog")) {
-          if (isOurDialog(d)) {
-            updateConditionalFields(d);
-            break;
+      if (data === CONFIG.AI_JEV_PROVIDER_PREF) {
+        try {
+          const prov = Services.prefs.getStringPref(CONFIG.AI_JEV_PROVIDER_PREF, "typesafe");
+          const curModel = Services.prefs.getStringPref(CONFIG.AI_JEV_MODEL_PREF, "").trim();
+          if (
+            !curModel ||
+            curModel === CONFIG.AI_JEV_TYPESAFE_MODEL_DEFAULT ||
+            curModel === CONFIG.AI_JEV_OPENROUTER_MODEL_DEFAULT
+          ) {
+            Services.prefs.setStringPref(CONFIG.AI_JEV_MODEL_PREF, defaultJevModelForProvider(prov));
           }
-        }
-        return;
+        } catch {}
       }
-      if (data !== CONFIG.AI_ENGINE_PREF) return;
-      const engine = getAIEngine();
-      console.log(`${LOG} [ollama-warning] engine pref changed → "${engine}"`);
       for (const d of document.querySelectorAll(".sineItemPreferenceDialog")) {
         if (isOurDialog(d)) {
           updateConditionalFields(d);
-          // First-time engine warning. Each engine has its own one-shot
-          // acknowledgement pref; neither modal re-fires once acknowledged.
-          if (engine === "ollama") maybeShowOllamaWarning();
-          else if (engine === "local") maybeShowLocalWarning();
+          if (data === CONFIG.AI_ENGINE_PREF) {
+            const engine = getAIEngine();
+            if (engine === "ollama") maybeShowOllamaWarning();
+            else if (engine === "local") maybeShowLocalWarning();
+          }
           break;
         }
       }
     },
   };
-  Services.prefs.addObserver(CONFIG.AI_ENGINE_PREF, enginePrefObserver);
-  Services.prefs.addObserver(CONFIG.PIP_SHAPE_PREF, enginePrefObserver);
+  for (const pref of OBSERVED_PREFS) {
+    try { Services.prefs.addObserver(pref, enginePrefObserver); } catch {}
+  }
 };
 
 const teardownEnginePrefObserver = () => {
   if (!enginePrefObserver) return;
-  try { Services.prefs.removeObserver(CONFIG.AI_ENGINE_PREF, enginePrefObserver); } catch {}
-  try { Services.prefs.removeObserver(CONFIG.PIP_SHAPE_PREF, enginePrefObserver); } catch {}
+  for (const pref of OBSERVED_PREFS) {
+    try { Services.prefs.removeObserver(pref, enginePrefObserver); } catch {}
+  }
   enginePrefObserver = null;
 };
 
-// Locate a Sine separator by the prefix of its visible label, returning the
-// outer container element (so injectAfter places content as a sibling of it).
 const findSeparatorContainer = (dialog, prefix) => {
   for (const lbl of dialog.querySelectorAll(".separator-label")) {
     if (lbl.textContent.trim().startsWith(prefix)) {
@@ -452,16 +384,159 @@ const insertAfter = (parent, newNode, refNode) => {
   }
 };
 
-// "Test connection" row for the Remote Provider Settings section. One click
-// fires a minimal probe through the SAME readiness gate + request path as a
-// real sort, then shows the outcome inline — so key/model problems surface as
-// the exact provider error instead of a silent no-op sort.
+// Interactive "Sign in with ChatGPT" widget for OpenAI SIWC subscription quota.
+const buildChatGPTSignInSection = () => {
+  const container = h("div", { class: "zao-chatgpt-signin zao-provider-test" });
+
+  const signInBtn = h("button", { text: "Sign in with ChatGPT" });
+  signInBtn.className = "zao-backup-btn";
+
+  const signOutBtn = h("button", { text: "Sign out" });
+  signOutBtn.className = "zao-backup-btn";
+
+  const loadModelsBtn = h("button", { text: "Load ChatGPT models" });
+  loadModelsBtn.className = "zao-backup-btn";
+
+  const modelSelect = h("select");
+  modelSelect.style.marginLeft = "6px";
+  modelSelect.hidden = true;
+
+  const status = h("span", { class: "zao-provider-test-status" });
+  container.append(signInBtn, signOutBtn, loadModelsBtn, modelSelect, status);
+
+  const refreshState = () => {
+    const session = readChatGPTSession(Services.prefs);
+    const connected = Boolean(session && (session.accessToken || session.refreshToken));
+    signOutBtn.hidden = !connected;
+    loadModelsBtn.hidden = !connected;
+    if (connected) {
+      const who = session.email || session.subject || "ChatGPT account";
+      status.textContent = `Signed in (${who})`;
+      status.dataset.state = "ok";
+      signInBtn.textContent = "Reconnect ChatGPT";
+    } else {
+      status.textContent = "Not signed in — click to authorize with your ChatGPT subscription.";
+      status.removeAttribute("data-state");
+      signInBtn.textContent = "Sign in with ChatGPT";
+      modelSelect.hidden = true;
+    }
+  };
+
+  modelSelect.addEventListener("change", () => {
+    if (modelSelect.value) {
+      try {
+        Services.prefs.setStringPref(CONFIG.AI_CHATGPT_MODEL_PREF, modelSelect.value);
+        status.textContent = `Selected model: ${modelSelect.value}`;
+        status.dataset.state = "ok";
+      } catch {}
+    }
+  });
+
+  loadModelsBtn.addEventListener("click", async () => {
+    loadModelsBtn.disabled = true;
+    status.textContent = "Loading available ChatGPT models…";
+    try {
+      const token = await ensureValidChatGPTToken(Services.prefs);
+      const models = await fetchChatGPTModels(token);
+      if (models.length === 0) {
+        status.textContent = "No models returned by /v1/models; type model slug manually below.";
+      } else {
+        modelSelect.replaceChildren();
+        const currentModel = Services.prefs.getStringPref(
+          CONFIG.AI_CHATGPT_MODEL_PREF,
+          CONFIG.AI_CHATGPT_MODEL_DEFAULT,
+        );
+        for (const m of models) {
+          const opt = h("option", { text: `${m.label} (${m.id})` });
+          opt.value = m.id;
+          if (m.id === currentModel) opt.selected = true;
+          modelSelect.appendChild(opt);
+        }
+        modelSelect.hidden = false;
+        status.textContent = `Loaded ${models.length} model(s).`;
+        status.dataset.state = "ok";
+      }
+    } catch (e) {
+      status.textContent = `Failed to load models: ${e?.message || e}`;
+      status.dataset.state = "err";
+    } finally {
+      loadModelsBtn.disabled = false;
+    }
+  });
+
+  signInBtn.addEventListener("click", async () => {
+    signInBtn.disabled = true;
+    try {
+      const session = await startChatGPTSignInFlow({
+        prefs: Services.prefs,
+        onStatus: (msg) => {
+          status.textContent = msg;
+          status.removeAttribute("data-state");
+        },
+      });
+      // Automatically enable data-sending consent when the user signs in with ChatGPT
+      try {
+        Services.prefs.setBoolPref(CONFIG.AI_PROVIDER_CONSENT_PREF, true);
+      } catch {}
+      refreshState();
+      if (session?.accessToken) {
+        loadModelsBtn.click();
+      }
+    } catch (e) {
+      status.textContent = `Sign-in failed: ${e?.message || e}`;
+      status.dataset.state = "err";
+    } finally {
+      signInBtn.disabled = false;
+    }
+  });
+
+  signOutBtn.addEventListener("click", () => {
+    clearChatGPTSession(Services.prefs);
+    refreshState();
+  });
+
+  refreshState();
+  return container;
+};
+
 const buildProviderTestSection = () => {
   const container = h("div", { class: "zao-provider-test" });
+
+  const jevButton = h("button", { text: "Test JEV" });
+  jevButton.className = "zao-backup-btn zao-jev-test-btn";
+
   const button = h("button", { text: "Test connection" });
   button.className = "zao-backup-btn";
+
   const status = h("span", { class: "zao-provider-test-status" });
-  container.append(button, status);
+  container.append(jevButton, button, status);
+
+  jevButton.addEventListener("click", async () => {
+    jevButton.disabled = true;
+    status.textContent = "Testing JEV…";
+    status.removeAttribute("data-state");
+    try {
+      const result = await testJevConnection();
+      if (result.ok) {
+        status.textContent = `JEV Connected — ${result.reply}`;
+        status.dataset.state = "ok";
+      } else if (result.reason === "consent_required") {
+        status.textContent = "Consent required — tick the data-sending checkbox above first.";
+        status.dataset.state = "err";
+      } else if (result.reason === "missing_required_config") {
+        status.textContent = "Missing JEV API key.";
+        status.dataset.state = "err";
+      } else {
+        status.textContent = `JEV Failed: ${result.error || result.reason}`;
+        status.dataset.state = "err";
+      }
+    } catch (e) {
+      status.textContent = `JEV Failed: ${e?.message || e}`;
+      status.dataset.state = "err";
+    } finally {
+      jevButton.disabled = false;
+    }
+  });
 
   button.addEventListener("click", async () => {
     button.disabled = true;
@@ -479,7 +554,7 @@ const buildProviderTestSection = () => {
         status.textContent = `Missing: ${(result.missingFields || []).join(", ")}.`;
         status.dataset.state = "err";
       } else if (result.reason === "provider_disabled") {
-        status.textContent = "Select a remote AI engine (OpenAI-compatible, Gemini, or Custom) first.";
+        status.textContent = "Select a remote AI engine or Fallback-LLM first.";
         status.dataset.state = "err";
       } else {
         status.textContent = `Failed: ${result.error || result.reason}`;
@@ -502,43 +577,35 @@ const performInject = (dialog) => {
   const content = dialog.querySelector(".sineItemPreferenceDialogContent");
   if (!content) return;
 
-  // Seed the rules pref with defaults on first open if currently empty.
-  // keepIncomplete: true so a blank row the user added in a previous session
-  // (saved as `{name:"", domains:[]}`) reappears in the editor and can be
-  // filled in. The wand-click pipeline (`loadRules`) still filters these out.
+  // Do NOT pre-populate deterministic domain rules unless the user explicitly adds them.
   let initial = readRulesPref({ keepIncomplete: true });
-  if (!initial || initial.length === 0) {
+  if (!initial) {
     initial = JSON.parse(JSON.stringify(DEFAULT_RULES));
-    writeRulesPref(initial);
   }
 
   const rulesEditor = buildRulesEditor(initial);
   const skipEditor = buildSkipDomainsEditor();
   const backupSection = buildBackupRestoreSection();
+  const chatGptSection = buildChatGPTSignInSection();
+  const testSection = buildProviderTestSection();
 
-  // Each section's content lives as a sibling immediately after its Sine
-  // separator. injectSectionDescriptions runs next and will insert its
-  // description paragraph BETWEEN the separator and our content (because it
-  // checks `nextElementSibling` for a description and inserts at separator+1
-  // when not found).
-  insertAfter(content, rulesEditor, findSeparatorContainer(dialog, "Group Rules"));
+  const rulesCheckboxRow = findPrefRow(dialog, CONFIG.USE_DOMAIN_RULES_PREF) || findSeparatorContainer(dialog, "Group Rules");
+  insertAfter(content, rulesEditor, rulesCheckboxRow);
   insertAfter(content, skipEditor, findSeparatorContainer(dialog, "Skip Domains"));
   insertAfter(content, backupSection, findSeparatorContainer(dialog, "Backup & Restore"));
-  insertAfter(content, buildProviderTestSection(), findSeparatorContainer(dialog, "Remote Provider Settings"));
+
+  const remoteSep = findSeparatorContainer(dialog, "Remote Provider Settings");
+  insertAfter(content, testSection, remoteSep);
+  insertAfter(content, chatGptSection, remoteSep);
 
   tagSeparatorContainers(dialog);
   injectSectionDescriptions(dialog);
   setupEnginePrefObserver();
   updateConditionalFields(dialog);
-  console.log(`${LOG} injected rules + skip + backup sections into Sine settings dialog`);
+  console.log(`${LOG} injected rules + skip + backup + ChatGPT SIWC sections into Sine settings dialog`);
 };
 
-// Sine's loadPrefs() is async — the dialog is added to DOM before its content is
-// populated. Poll for the "Group Rules" separator (or legacy "Rules") to appear,
-// then inject once. Also wire a re-render hook for when the dialog is reopened.
 const onOurDialogFound = (dialog) => {
-  // Marker class — scopes our separator-restyling CSS to our dialog only,
-  // so we don't restyle SuperPins or any other mod's section headers.
   dialog.classList.add("zao-our-dialog");
 
   if (dialog.querySelector(".zao-rules-editor")) {
@@ -552,7 +619,6 @@ const onOurDialogFound = (dialog) => {
       if (dialog.hasAttribute("open")) {
         const editor = dialog.querySelector(".zao-rules-editor");
         editor?._zaoRefresh?.("dialog open attr");
-        // Re-sync visibility — Sine may have re-rendered controls on reopen.
         updateConditionalFields(dialog);
       }
     });
@@ -564,8 +630,6 @@ const onOurDialogFound = (dialog) => {
 
   let attempts = 0;
   const poll = () => {
-    // If the dialog was removed mid-poll (user closed the prefs page), abandon —
-    // querying a detached node burns CPU and pollutes the console with warnings.
     if (!dialog.isConnected) return;
     if (dialog.querySelector(".zao-rules-editor")) return;
     let separator = null;
@@ -593,13 +657,9 @@ const onOurDialogFound = (dialog) => {
   poll();
 };
 
-// Watch for Sine's per-mod settings dialog. Identify by the presence of a
-// "Group Rules" separator inside any .sineItemPreferenceDialog — robust against
-// Sine's mod-id attribute scheme changing across versions.
 export const setupSettingsObserver = () => {
   if (settingsObserver) return;
 
-  // Pull Zen's live tab-group palette so the picker matches the native modal exactly.
   fetchZenColorsFromBrowser();
 
   const scanForOurDialog = (root) => {
@@ -617,8 +677,6 @@ export const setupSettingsObserver = () => {
       for (const node of m.addedNodes) {
         scanForOurDialog(node);
       }
-      // Also: a child separator-label may be added LATER to an existing dialog
-      // (Sine's loadPrefs is async). Re-check the dialog the mutation happened in.
       if (m.target?.closest) {
         const dialog = m.target.closest(".sineItemPreferenceDialog");
         if (dialog && isOurDialog(dialog)) onOurDialogFound(dialog);
@@ -627,7 +685,6 @@ export const setupSettingsObserver = () => {
   });
   settingsObserver.observe(document.body, { childList: true, subtree: true });
 
-  // Catch any dialog already in the DOM at init time.
   document.querySelectorAll(".sineItemPreferenceDialog").forEach((d) => {
     if (isOurDialog(d)) onOurDialogFound(d);
   });

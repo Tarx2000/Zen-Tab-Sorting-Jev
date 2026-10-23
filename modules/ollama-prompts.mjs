@@ -1,11 +1,12 @@
-// Zen Tab Sorting — Ollama prompt builders.
+// Zen Tab Sorting — Ollama & Fallback-LLM prompt builders.
 //
-// Pure string-building functions for the five prompts we send to Ollama:
-//   - classifyExisting  → "fit each tab into one of the existing categories"
-//   - cluster           → "these tabs don't fit existing categories, invent new ones"
-//   - unified           → single-call combination of the above two
-//   - fresh             → Arc-Tidy: ignore existing categories, re-cluster everything
-//   - merge             → "consolidate these over-specialized categories"
+// Pure string-building functions for the prompts we send to LLMs:
+//   - classifyExisting         → "fit each tab into one of the existing categories"
+//   - cluster                  → "these tabs don't fit existing categories, invent new ones"
+//   - unified                  → single-call combination of the above two
+//   - fresh                    → Arc-Tidy: ignore existing categories, re-cluster everything
+//   - merge                    → "consolidate these over-specialized categories"
+//   - buildOneShotNewGroupsPrompt → Stage 2 One-Shot Fallback-LLM for tabs JEV did not place
 //
 // No side effects, no I/O, no `await`. Pulled out of ollama.mjs to keep the
 // orchestrator file focused on flow rather than prose.
@@ -35,7 +36,41 @@ const renderTabLine = (t, i, snippet) => {
 const renderTabList = (tabs, snippets) =>
   tabs.map((t, i) => renderTabLine(t, i, snippets?.[i])).join("\n");
 
-// ─── Classify (Phase 3: fit into existing) ───────────────────────────────────
+// ─── One-Shot Fallback-LLM (Stage 2 after JEV) ─────────────────────────────
+//
+// Receives ALL remaining ungrouped tabs in a single call after JEV has already
+// placed any tabs that belonged in existing workspace groups. Creates new group
+// names and assigns tabs in one shot, requiring at least 2 related tabs per new
+// group and leaving isolated exotic/singleton tabs as "skipped".
+
+export const buildOneShotNewGroupsPrompt = (leftoverTabs, snippets = [], existingGroupNames = []) => {
+  const existingNote = Array.isArray(existingGroupNames) && existingGroupNames.length > 0
+    ? `\nAlready existing workspace groups (do NOT reuse these names; create NEW group names for the remaining tabs):\n${existingGroupNames.map((n) => `- ${n}`).join("\n")}\n`
+    : "";
+
+  return `You are organizing browser tabs that did not fit into any existing tab group. Look at ALL of the ungrouped tabs below together in one shot, invent sensible NEW group names for related tabs, and assign each tab to its new group.
+${existingNote}
+Ungrouped Tabs:
+${renderTabList(leftoverTabs, snippets)}
+
+Each tab line may include a Summary with bracketed page signals:
+- [type: ...] — page type (article, video, product, document, website, etc.)
+- [site: ...] — site or brand name
+- [topic: ...] — main heading / document title on the page
+
+Guidelines:
+- Group tabs by the user's current CONTEXT, PROJECT, or INTENT (using the page title, topic, and summary), not rigid domain-only rules. For example, a Canva or Google Docs tab about a business pitch belongs with Business/Work tabs, whereas a personal invitation belongs with Personal/Event tabs.
+- Invent short, clear, natural category names in Title Case (1-3 words).
+- Only create a new group when AT LEAST 2 tabs clearly belong together in that group.
+- If a tab is an isolated outlier/exotic singleton that does not share a meaningful group with any other tab in this list, assign it "skipped" so it stays ungrouped.
+- Do not echo a tab's full title or raw hostname as the group name.
+- Do not include meta words like "new", "category", "label", "topic", or "group" in the group name.
+- Return raw JSON only. Do not use markdown code fences, prose, or explanations.
+
+Output ONLY a JSON object mapping EVERY tab number shown above (as a string key) to either its chosen new group name or "skipped". Do not omit any tab.`;
+};
+
+// ─── Classify (Phase 3: fit into existing) ──────────────────────────────────
 
 export const buildClassifyPrompt = (rules, unmatched) =>
   `Categorize each browser tab into one of the existing categories below. Pick the category whose example domains are most similar to the tab's hostname or topic.
@@ -48,7 +83,7 @@ ${renderTabList(unmatched)}
 
 Output ONLY a JSON object mapping each tab number (as a string key) to the chosen category name. Use "none" ONLY for tabs that are genuinely unrelated to every category — most tabs should match a category.`;
 
-// ─── Cluster (older fallback: invent new groups for unmatched) ───────────────
+// ─── Cluster (older fallback: invent new groups for unmatched) ──────────────
 
 export const buildClusterPrompt = (leftover) =>
   `These browser tabs don't fit any existing category. Group them into one or more NEW categories.
@@ -71,7 +106,7 @@ Output ONLY a JSON object with this exact shape:
   "skipped": [2, 4]
 }`;
 
-// ─── Unified (Phase 4b: single-call classify + invent) ───────────────────────
+// ─── Unified (Phase 4b: single-call classify + invent) ──────────────────────
 //
 // Prompt design notes for small local models:
 //   - Avoid imperative phrases the model might literally echo back (it has
@@ -109,7 +144,7 @@ ${renderTabList(unmatched, snippets)}
 
 Output raw JSON only: a JSON object mapping EVERY tab number shown above (string key) to exactly one chosen label. Do not omit any tab.`;
 
-// ─── Fresh (Phase 4c: Arc-Tidy — ignore existing, re-cluster all) ────────────
+// ─── Fresh (Phase 4c: Arc-Tidy — ignore existing, re-cluster all) ───────────
 
 export const buildFreshPrompt = (tabs, snippets) =>
   `Look at all these browser tabs and cluster them into a small number of new categories that you invent. Ignore any current grouping — start fresh.
@@ -138,7 +173,7 @@ Guidelines:
 
 Output ONLY a JSON object mapping EVERY tab number shown above (string key) to the chosen category name or "skipped". Do not omit any tab.`;
 
-// ─── Merge (Phase 4b polish: consolidate over-specialized categories) ────────
+// ─── Merge (Phase 4b polish: consolidate over-specialized categories) ───────
 //
 // The schema is a flat key-value map (original → target) rather than nested
 // arrays of objects. Small LLMs reliably emit this shape; nested arrays of

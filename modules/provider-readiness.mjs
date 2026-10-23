@@ -1,4 +1,13 @@
-export const PROVIDER_NAMES = ["off", "local", "ollama", "openai", "gemini", "custom"];
+export const PROVIDER_NAMES = [
+  "off",
+  "local",
+  "ollama",
+  "openai",
+  "primalabs",
+  "chatgpt",
+  "gemini",
+  "custom",
+];
 
 export const getProviderReadiness = (settings) => {
   if (settings.provider === "off" || settings.provider === "local") {
@@ -24,7 +33,16 @@ export const requestProviderFetch = async (settings, fetchProvider) => {
 const getMissingRequiredFields = (settings) => {
   switch (settings.provider) {
     case "openai":
+    case "primalabs":
       return missingStringFields({ endpoint: settings.endpoint, apiKey: settings.apiKey, model: settings.model });
+    case "chatgpt": {
+      const hasToken =
+        (typeof settings.accessToken === "string" && settings.accessToken.trim().length > 0) ||
+        (typeof settings.refreshToken === "string" && settings.refreshToken.trim().length > 0);
+      const missing = missingStringFields({ model: settings.model });
+      if (!hasToken) missing.unshift("accessToken");
+      return missing;
+    }
     case "gemini":
       return missingStringFields({ apiKey: settings.apiKey, model: settings.model });
     case "custom":

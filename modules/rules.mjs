@@ -6,29 +6,23 @@ import { CONFIG, DEFAULT_RULES, LOG, ZEN_COLOR_NAMES, isValidHex, normalizePipSi
 import { normalizeSortingMode } from "./sorting-mode.mjs";
 
 /**
- * Read the rules pref written by the settings widget.
- *
- * Three return states callers should know about:
- *   - `null`     — pref is unset, blank, or unparseable JSON
- *   - `[]`       — pref exists but every entry was malformed (and got dropped)
- *   - `Rule[]`   — one or more valid rules
- *
- * Each Rule has shape: `{ name: string, domains: string[], color?: string }`.
- * Color is preserved if it's either a Zen palette name (e.g. "blue") or a hex (`#abc`).
- *
- * Malformed entries are silently dropped — invalid rules don't break valid ones.
+ * Whether deterministic domain rules (Pass 1) are enabled.
+ * Off by default (`false`) so sorting relies purely on JEV + Fallback-LLM
+ * unless the user explicitly ticks the optional domain-rules checkbox.
  */
+export const isDomainRulesEnabled = () => {
+  try {
+    return Services.prefs.getBoolPref(CONFIG.USE_DOMAIN_RULES_PREF, false);
+  } catch {
+    return false;
+  }
+};
+
 /**
- * Read the rules pref.
+ * Read the rules pref written by the settings widget.
  *
  * @param {Object} [opts]
  * @param {boolean} [opts.keepIncomplete=false]
- *   When true, in-progress rules (empty name or empty domains) are returned
- *   alongside complete ones. The settings widget passes this so a user can
- *   add a blank row, close the browser, and find it still waiting to be
- *   filled in next session. The wand-click pipeline (`loadRules`) uses the
- *   default — incomplete rules are no-ops at apply-time anyway, but keeping
- *   them out of the logs is cleaner.
  */
 export const readRulesPref = ({ keepIncomplete = false } = {}) => {
   try {
@@ -68,8 +62,6 @@ export const writeRulesPref = (rules) => {
 };
 
 // Skip-domain list: hostnames or `*.host` patterns the tidy click never touches.
-// Tabs matching any pattern are ejected from their group and parked at the top
-// of the workspace before Pass 1 runs (see click-handler.mjs).
 export const readSkipDomainsPref = () => {
   try {
     const raw = Services.prefs.getStringPref(CONFIG.SKIP_DOMAINS_PREF, "");
@@ -91,10 +83,7 @@ export const writeSkipDomainsPref = (domains) => {
   }
 };
 
-// Collapsed-group persistence. Zen's session manager doesn't save the
-// `collapsed` attribute on tab-groups, so they all come back expanded after
-// a browser restart. We track which group labels were collapsed in a pref
-// and re-apply on TabGroupCreate (session restore).
+// Collapsed-group persistence.
 export const readCollapsedGroupsPref = () => {
   try {
     const raw = Services.prefs.getStringPref(CONFIG.COLLAPSED_GROUPS_PREF, "");
@@ -133,28 +122,32 @@ export const validateRules = (data) => {
 };
 
 const loadRulesFromFile = async () => {
-  // Gecko aggressively caches chrome:// fetches across reloads of the running
-  // browser. The ?t=<timestamp> query string busts that cache so iterative edits
-  // to rules.json are picked up without restarting Zen.
   const url = `${CONFIG.RULES_URL}?t=${Date.now()}`;
   const res = await fetch(url, { cache: "no-store" });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return validateRules(await res.json());
 };
 
-// Priority: settings widget pref > rules.json file > hardcoded defaults.
+// Deterministic domain rules are disabled by default unless the user opts in via
+// `use-domain-rules` (or when an explicit non-JEV rule test sets `rules-json`).
 export const loadRules = async () => {
+  const engine = getAIEngine();
+  if (!isDomainRulesEnabled() && (engine === "jev" || engine === "chatgpt" || engine === "primalabs")) {
+    return [];
+  }
   const prefRules = readRulesPref();
   if (prefRules && prefRules.length > 0) {
     console.log(`${LOG} loaded ${prefRules.length} rule(s) from settings widget`);
     return prefRules;
   }
+  if (!isDomainRulesEnabled()) {
+    return [];
+  }
   try {
     const fileRules = await loadRulesFromFile();
-    console.log(`${LOG} loaded ${fileRules.length} rule(s) from rules.json (settings unset)`);
+    console.log(`${LOG} loaded ${fileRules.length} rule(s) from rules.json`);
     return fileRules;
-  } catch (e) {
-    console.warn(`${LOG} rules.json load failed (${e.message}) — using built-in defaults`);
+  } catch {
     return DEFAULT_RULES;
   }
 };
@@ -167,9 +160,6 @@ export const isMinimalStyle = () => {
   }
 };
 
-// Collapsed-group marker shape: "circle" (default), "square" (a rounded square
-// proportioned like the rest of Zen's rounded-square iconography), or "none"
-// to switch the marker off entirely.
 export const getPipShape = () => {
   try {
     const value = Services.prefs.getStringPref(CONFIG.PIP_SHAPE_PREF, "circle");
@@ -179,7 +169,6 @@ export const getPipShape = () => {
   }
 };
 
-// What the marker does while the group is open.
 export const getPipOpenBehavior = () => {
   try {
     const value = Services.prefs.getStringPref(CONFIG.PIP_OPEN_BEHAVIOR_PREF, "smaller");
@@ -189,13 +178,6 @@ export const getPipOpenBehavior = () => {
   }
 };
 
-// Pip size in px for a given shape, each shape having its own stored value.
-// Stored as string prefs (Sine has no number control), so parse defensively and
-// clamp — a blank or nonsense value falls back to the default rather than
-// producing an invisible or giant marker.
-//
-// Read order: this shape's pref → the pre-split `pip-size` pref (so a size set
-// before shapes had separate sizes still applies) → the default.
 export const getPipSize = (shape = getPipShape()) => {
   try {
     const prefs = Services.prefs;
@@ -210,10 +192,6 @@ export const getPipSize = (shape = getPipShape()) => {
   }
 };
 
-// When ON, the tidy click ejects any tab from a rule-named group if its
-// hostname isn't in that rule's `domains[]`. Off by default — preserves the
-// historical behavior where Pass 1 only moves matching tabs, leaving mismatched
-// tabs where the user (or AI) put them.
 export const isStrictRulesEnforced = () => {
   try {
     return Services.prefs.getBoolPref(CONFIG.STRICT_RULES_PREF, false);
@@ -223,12 +201,13 @@ export const isStrictRulesEnforced = () => {
 };
 
 // Which AI engine is selected. Returns one of:
-// "off" | "local" | "ollama" | "openai" | "gemini" | "custom".
-// Any unrecognized value (Sine's "None" is the empty string) maps to "off".
+// "off" | "jev" | "chatgpt" | "primalabs" | "local" | "ollama" | "openai" | "gemini" | "custom".
 export const getAIEngine = () => {
   try {
     const engine = Services.prefs.getStringPref(CONFIG.AI_ENGINE_PREF, "");
-    if (["local", "ollama", "openai", "gemini", "custom"].includes(engine)) return engine;
+    if (["jev", "chatgpt", "primalabs", "local", "ollama", "openai", "gemini", "custom"].includes(engine)) {
+      return engine;
+    }
     return "off";
   } catch {
     return "off";
@@ -261,10 +240,6 @@ export const getOllamaModel = () => {
   }
 };
 
-// Whether to preload the model at browser start AND keep it warm between
-// classification calls. Default true — most users want low-latency clicks.
-// Turning off saves VRAM when idle but every first click after the model
-// unloads (Ollama default 5min idle) pays a cold-start cost.
 export const isOllamaWarmupEnabled = () => {
   try {
     return Services.prefs.getBoolPref(CONFIG.AI_OLLAMA_WARMUP_PREF, true);
@@ -273,13 +248,6 @@ export const isOllamaWarmupEnabled = () => {
   }
 };
 
-// User-configurable batch size for the Local-AI chunking path. Larger values
-// = more parallel embedding calls per chunk (faster but heavier on RAM/CPU).
-// Smaller values = gentler on the system but slower overall.
-//
-// Stored as a string pref because Sine's preferences.json schema doesn't have
-// a native int type — we parse + clamp on read so any stray about:config
-// edit can't break the pipeline.
 export const getLocalAIBatchSize = () => {
   try {
     const raw = Services.prefs.getStringPref(
@@ -294,34 +262,27 @@ export const getLocalAIBatchSize = () => {
   }
 };
 
-// What to do when AI assigns a tab to an existing rule-matched group.
-//   "always-add" — append the tab's hostname to that rule's domains (default)
-//   "transient"  — move the tab into the group, but don't touch the rule
-//
-// On the Local engine the existing-behavior row is hidden in settings — the
-// new-group-behavior dropdown drives BOTH decisions instead. Map:
-//   Auto-add  → always-add  (grow the rule)
-//   Transient → transient   (don't grow)
-//   Fresh     → transient   (Fresh ignores rules; the answer doesn't matter)
+// Never auto-append domains into rules unless the user explicitly enabled
+// deterministic domain rules and selected "always-add".
 export const getAIExistingBehavior = () => {
   try {
+    if (!isDomainRulesEnabled()) return "transient";
     if (getAIEngine() === "local") {
       return getAINewGroupBehavior() === "auto-add" ? "always-add" : "transient";
     }
-    return Services.prefs.getStringPref(CONFIG.AI_EXISTING_BEHAVIOR_PREF, "always-add");
+    return Services.prefs.getStringPref(CONFIG.AI_EXISTING_BEHAVIOR_PREF, "transient");
   } catch {
-    return "always-add";
+    return "transient";
   }
 };
 
-// What to do when AI clusters a set of unmatched tabs into a new group.
-//   "auto-add"  — create the tab-group AND a matching rule (default)
-//   "transient" — create the tab-group but don't add a rule
-//   "prompt"    — create the tab-group and open Zen's edit modal so user can confirm
+// Never auto-create domain rules unless the user explicitly enabled domain rules.
 export const getAINewGroupBehavior = () => {
   try {
-    return Services.prefs.getStringPref(CONFIG.AI_NEW_GROUP_BEHAVIOR_PREF, "auto-add");
+    const raw = Services.prefs.getStringPref(CONFIG.AI_NEW_GROUP_BEHAVIOR_PREF, "transient");
+    if (!isDomainRulesEnabled() && raw === "auto-add") return "transient";
+    return raw;
   } catch {
-    return "auto-add";
+    return "transient";
   }
 };

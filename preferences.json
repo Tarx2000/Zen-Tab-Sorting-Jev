@@ -3,6 +3,12 @@
     "type": "separator",
     "label": "Group Rules"
   },
+  {
+    "type": "checkbox",
+    "label": "Enable deterministic domain rules (Pass 1) — off by default so JEV & Fallback-LLM sort dynamically by context",
+    "property": "extensions.zen-auto-organize.use-domain-rules",
+    "defaultValue": false
+  },
 
   {
     "type": "separator",
@@ -77,11 +83,15 @@
     "type": "dropdown",
     "label": "AI engine",
     "property": "extensions.zen-auto-organize.ai-engine",
+    "defaultValue": "jev",
     "options": [
-      { "label": "Local — Built-in model, limited capability", "value": "local" },
-      { "label": "Ollama — Stronger model, requires Ollama running locally", "value": "ollama" },
+      { "label": "JEV + Fallback-LLM — TypeSafe JEV for existing groups + One-Shot LLM for new groups", "value": "jev" },
+      { "label": "ChatGPT (Sign in with ChatGPT) — Use your ChatGPT Plus/Pro quota", "value": "chatgpt" },
+      { "label": "PrimaLabs — Fast OpenAI-compatible API (DeepSeek V4.1 Flash)", "value": "primalabs" },
       { "label": "OpenAI-compatible — Remote or self-hosted /v1/chat/completions", "value": "openai" },
       { "label": "Gemini — Google AI Studio generateContent", "value": "gemini" },
+      { "label": "Ollama — Stronger model, requires Ollama running locally", "value": "ollama" },
+      { "label": "Local — Built-in model, limited capability", "value": "local" },
       { "label": "Custom — OpenAI or Ollama-compatible endpoint", "value": "custom" }
     ]
   },
@@ -90,6 +100,61 @@
     "label": "Allow sending tab titles, URLs, and optional page snippets to the selected provider",
     "property": "extensions.zen-auto-organize.ai-provider-consent",
     "defaultValue": false
+  },
+  {
+    "type": "dropdown",
+    "label": "JEV provider (Stage 1: classify into existing workspace tab groups)",
+    "property": "extensions.zen-auto-organize.ai-jev-provider",
+    "defaultValue": "typesafe",
+    "placeholder": false,
+    "options": [
+      { "label": "Official TypeSafe API — https://api.typesafe.ai/v1/systemone", "value": "typesafe" },
+      { "label": "OpenRouter Decisions API — https://openrouter.ai/api/alpha/decisions", "value": "openrouter" }
+    ]
+  },
+  {
+    "type": "string",
+    "label": "JEV API key (TypeSafe or OpenRouter key)",
+    "property": "extensions.zen-auto-organize.ai-jev-api-key",
+    "defaultValue": "",
+    "placeholder": "Bearer key for TypeSafe or OpenRouter"
+  },
+  {
+    "type": "string",
+    "label": "JEV model",
+    "property": "extensions.zen-auto-organize.ai-jev-model",
+    "defaultValue": "jev-1.13.0",
+    "placeholder": "jev-1.13.0 or typesafe/jev-1.13"
+  },
+  {
+    "type": "string",
+    "label": "JEV minimum confidence probability (0.05–0.99)",
+    "property": "extensions.zen-auto-organize.ai-jev-min-prob",
+    "defaultValue": "0.70",
+    "placeholder": "0.70"
+  },
+  {
+    "type": "string",
+    "label": "JEV minimum probability margin between top 2 groups (0.05–0.99)",
+    "property": "extensions.zen-auto-organize.ai-jev-min-margin",
+    "defaultValue": "0.15",
+    "placeholder": "0.15"
+  },
+  {
+    "type": "dropdown",
+    "label": "Fallback-LLM for new groups (Stage 2: One-Shot clustering of leftover ungrouped tabs)",
+    "property": "extensions.zen-auto-organize.ai-fallback-provider",
+    "defaultValue": "chatgpt",
+    "placeholder": false,
+    "options": [
+      { "label": "ChatGPT (Sign in with ChatGPT — uses your ChatGPT subscription quota)", "value": "chatgpt" },
+      { "label": "PrimaLabs API (https://api.primalabs.ai/v1 — DeepSeek V4.1 Flash)", "value": "primalabs" },
+      { "label": "OpenAI-compatible — Custom Base URL, API key & model", "value": "openai" },
+      { "label": "Gemini — Google AI Studio generateContent", "value": "gemini" },
+      { "label": "Ollama — Local Ollama model", "value": "ollama" },
+      { "label": "Custom — OpenAI or Ollama-compatible endpoint", "value": "custom" },
+      { "label": "Off — Only sort into existing groups with JEV", "value": "off" }
+    ]
   },
   {
     "type": "dropdown",
@@ -107,22 +172,22 @@
     "type": "dropdown",
     "label": "When AI assigns a tab to an existing group",
     "property": "extensions.zen-auto-organize.ai-existing-behavior",
-    "defaultValue": "always-add",
+    "defaultValue": "transient",
     "placeholder": false,
     "options": [
-      { "label": "Always-add — Append the tab's domain to the matched rule (rules grow)", "value": "always-add" },
-      { "label": "Transient — Move the tab only, rules untouched", "value": "transient" }
+      { "label": "Transient — Move the tab only, rules untouched", "value": "transient" },
+      { "label": "Always-add — Append the tab's domain to the matched rule (rules grow)", "value": "always-add" }
     ]
   },
   {
     "type": "dropdown",
     "label": "When AI creates a new group",
     "property": "extensions.zen-auto-organize.ai-new-group-behavior",
-    "defaultValue": "auto-add",
+    "defaultValue": "transient",
     "placeholder": false,
     "options": [
-      { "label": "Auto-add — Create the group and save it as a new rule", "value": "auto-add" },
       { "label": "Transient — Create the group only, no rule added", "value": "transient" },
+      { "label": "Auto-add — Create the group and save it as a new rule", "value": "auto-add" },
       { "label": "Prompt — Open Zen's edit modal to confirm name and color", "value": "prompt" },
       { "label": "Fresh categories — Re-tidy ALL tabs into AI-invented groups, ignoring rules", "value": "fresh-categories" },
       { "label": "Plan Mode — Preview the AI's plan, pick which groups to keep, optionally re-assign", "value": "identify-only" }
@@ -155,6 +220,34 @@
   {
     "type": "separator",
     "label": "Remote Provider Settings"
+  },
+  {
+    "type": "string",
+    "label": "ChatGPT model (used with Sign in with ChatGPT)",
+    "property": "extensions.zen-auto-organize.ai-chatgpt-model",
+    "defaultValue": "gpt-5-codex-mini",
+    "placeholder": "gpt-5-codex-mini"
+  },
+  {
+    "type": "string",
+    "label": "PrimaLabs endpoint",
+    "property": "extensions.zen-auto-organize.ai-primalabs-endpoint",
+    "defaultValue": "https://api.primalabs.ai/v1",
+    "placeholder": "https://api.primalabs.ai/v1"
+  },
+  {
+    "type": "string",
+    "label": "PrimaLabs API key",
+    "property": "extensions.zen-auto-organize.ai-primalabs-api-key",
+    "defaultValue": "",
+    "placeholder": "Bearer key for api.primalabs.ai"
+  },
+  {
+    "type": "string",
+    "label": "PrimaLabs model",
+    "property": "extensions.zen-auto-organize.ai-primalabs-model",
+    "defaultValue": "primalabs-ai/DeepSeek-V4.1-Flash-1017",
+    "placeholder": "primalabs-ai/DeepSeek-V4.1-Flash-1017"
   },
   {
     "type": "string",

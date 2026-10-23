@@ -1,3 +1,8 @@
+import {
+  buildChatGPTResponsesRequest,
+  parseChatGPTResponsesOutput,
+} from "./chatgpt-auth.mjs";
+
 const AUTH_HEADER_NAME = ["author", "ization"].join("");
 
 // OpenAI's chat/completions parameters split with the GPT-5 generation. Older
@@ -27,7 +32,14 @@ export const buildProviderRequest = (provider, prompt, maxTokens, paramStyle = P
   const boundedTokens = boundMaxTokens(maxTokens, paramStyle);
   switch (provider.provider) {
     case "openai":
+    case "primalabs":
       return openAiRequest(provider.endpoint, provider.apiKey, provider.model, prompt, boundedTokens, paramStyle);
+    case "chatgpt":
+      return buildChatGPTResponsesRequest({
+        accessToken: provider.accessToken,
+        model: provider.model,
+        inputText: prompt,
+      });
     case "gemini":
       return geminiRequest(provider.apiKey, provider.model, prompt, boundedTokens);
     case "ollama":
@@ -74,9 +86,14 @@ export const describeEmptyResponse = (kind, text) => {
   return parts.join(", ");
 };
 
-export const getProviderKind = (provider) => (provider.provider === "custom" ? provider.format : provider.provider);
+export const getProviderKind = (provider) => {
+  if (provider.provider === "custom") return provider.format;
+  if (provider.provider === "primalabs") return "openai";
+  return provider.provider;
+};
 
 export const parseProviderResponse = (kind, text) => {
+  if (kind === "chatgpt") return parseChatGPTResponsesOutput(text);
   const parsed = parseJson(text);
   if (parsed === null) return null;
   if (kind === "ollama") return typeof parsed.response === "string" ? parsed.response : null;

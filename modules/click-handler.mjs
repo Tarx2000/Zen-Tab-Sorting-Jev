@@ -1,15 +1,28 @@
 // Zen Tab Sorting — tidy-button click orchestrator.
-// Sequences: wiggle → consolidate → load rules → dissolve stale → enumerate tabs
-//            → Pass 1 → apply → ungrouped-to-top → sync colors.
+// Sequences: wiggle → consolidate → load rules (optional) → enumerate tabs
+//            → JEV Stage 1 (existing workspace groups) + Fallback-LLM Stage 2 (new groups)
+//            → apply → ungrouped-to-top → sync colors.
 
 import { CONFIG, LOG, BUILD_VERSION } from "./config.mjs";
-// (CONFIG is used inside the click pipeline for thresholds, pref names, and DOM ids.)
-import { loadRules, readSkipDomainsPref, isMinimalStyle, isStrictRulesEnforced, getAIEngine, getAISortMode, getOllamaHost, getOllamaModel, getAINewGroupBehavior, getAIExistingBehavior } from "./rules.mjs";
+import {
+  loadRules,
+  readSkipDomainsPref,
+  isMinimalStyle,
+  isStrictRulesEnforced,
+  isDomainRulesEnabled,
+  getAIEngine,
+  getAISortMode,
+  getOllamaHost,
+  getOllamaModel,
+  getAINewGroupBehavior,
+  getAIExistingBehavior,
+} from "./rules.mjs";
 import { getEligibleTabs } from "./tabs.mjs";
 import {
   consolidateDuplicateGroups,
   dissolveStaleGroups,
   dissolveEmptyGroups,
+  getWorkspaceExistingGroups,
   moveTabsToTop,
   moveUngroupedToTop,
   syncAllGroupColors,
@@ -17,13 +30,16 @@ import {
 import { runPass1, applyPass1, matchesDomain } from "./pass1.mjs";
 import { runPass2, runPass2Fresh, applyPass2 } from "./ai.mjs";
 import { checkOllamaReady, reportOllamaError, normalizeOllamaHost, runPass2Ollama, runPass2OllamaFresh, classifyExistingGroupsBatch } from "./ollama.mjs";
-import { runPass2Remote, runPass2RemoteFresh, classifyExistingGroupsRemoteBatch } from "./remote-provider.mjs";
+import {
+  runPass2JevHybrid,
+  runPass2Remote,
+  runPass2RemoteFresh,
+  classifyExistingGroupsRemoteBatch,
+} from "./remote-provider.mjs";
 import { showToast } from "./ui-toast.mjs";
 import { showPreviewModal } from "./preview-modal.mjs";
 import { isFullAIMode, resolveEffectiveSortingMode, resolvePass2ApplyOptions, resolveSortingPlan } from "./sorting-mode.mjs";
 
-// Module-version stamp so we can confirm the latest copy is loaded in the running window.
-// If you don't see this in the Browser Console after restart, ES module cache is stale.
 console.log(`${LOG} click-handler.mjs loaded — v${BUILD_VERSION}`);
 
 const getTidyButton = () =>
@@ -34,10 +50,6 @@ const wiggleButton = () => {
     const button = getTidyButton();
     if (!button) return;
     button.classList.remove("zao-wiggling");
-    // Reading offsetWidth forces a synchronous layout flush. This is the standard
-    // "restart a CSS animation" trick: without it, removing and immediately
-    // re-adding the class is collapsed into one no-op by the browser, so rapid
-    // re-clicks wouldn't see the animation play again.
     void button.offsetWidth;
     button.classList.add("zao-wiggling");
     setTimeout(() => {
@@ -48,9 +60,6 @@ const wiggleButton = () => {
   }
 };
 
-// Mark the tidy button as "AI thinking" — applied when Pass 2 starts, removed
-// when it finishes (success or failure). CSS animates a subtle pulse so the
-// user knows the click is still in flight without a blocking modal.
 const setButtonThinking = (thinking) => {
   try {
     const button = getTidyButton();
@@ -61,13 +70,11 @@ const setButtonThinking = (thinking) => {
   }
 };
 
-// Convert (currentGroup, targetGroup) into a single-word description of what
-// Pass 1 will do for this tab. Used for the diagnostic table only.
 const actionFor = (currentGroup, targetGroup) => {
-  if (!targetGroup) return "leave";        // no rule matched
+  if (!targetGroup) return "leave";
   if (targetGroup === currentGroup) return "stay";
-  if (currentGroup) return "move";          // tab is in a different group
-  return "group";                           // tab is currently ungrouped
+  if (currentGroup) return "move";
+  return "group";
 };
 
 const assignmentMapToPlan = (tabs, assignmentMap) => {
@@ -94,6 +101,7 @@ export const handleOrganizeClick = async () => {
   const aiEngine = getAIEngine();
   const sortMode = resolveEffectiveSortingMode({ aiEngine, preferredMode: getAISortMode() });
   const fullAIMode = isFullAIMode(sortMode);
+  const domainRulesEnabled = isDomainRulesEnabled();
 
   // 1. Merge any duplicate-name groups before lookups assume uniqueness.
   const consolidation = consolidateDuplicateGroups(workspaceId);
@@ -101,31 +109,29 @@ export const handleOrganizeClick = async () => {
     console.log(`${LOG} pre-pass consolidation: merged ${consolidation.mergedLabels} duplicate label(s), moved ${consolidation.tabsMoved} tab(s)`);
   }
 
-  // 2. Load rules BEFORE the stale-group sweep so we know which group names are valid.
+  // 2. Load optional domain rules (empty by default when domain rules are disabled).
   const rules = await loadRules();
 
-  // 3. Dissolve groups whose names don't match any current rule.
-  if (!fullAIMode) {
+  // 3. Never dissolve existing workspace groups unless deterministic domain rules AND
+  //    strict rule enforcement are explicitly enabled. Existing user/AI groups are
+  //    preserved as anchor categories for JEV.
+  if (!fullAIMode && domainRulesEnabled && isStrictRulesEnforced() && rules.length > 0) {
     const dissolution = dissolveStaleGroups(workspaceId, rules);
     if (dissolution.dissolved > 0) {
       console.log(`${LOG} dissolved ${dissolution.dissolved} stale group(s), ungrouped ${dissolution.ungrouped} tab(s)`);
     }
   } else {
-    console.log(`${LOG} stale-rule dissolution skipped — full-ai mode ignores rule-based grouping`);
+    console.log(`${LOG} preserving existing workspace tab groups (domainRules=${domainRulesEnabled})`);
   }
 
-  // 4. Enumerate eligible tabs (post-dissolution state).
+  // 4. Enumerate eligible tabs.
   const allTabs = getEligibleTabs().tabs;
   if (allTabs.length === 0) {
     console.log(`${LOG} no eligible tabs in workspace ${workspaceId}`);
     return;
   }
 
-  // 4b. Handle skip-domains. Tabs whose hostname matches any skip pattern get
-  // ejected from any current group and parked at the top of the workspace,
-  // then excluded from the rest of the pipeline (Pass 1 + Pass 2). The skip
-  // list is authoritative — re-applied on every click, so manually moving a
-  // skipped tab into a group is reverted on the next tidy.
+  // 4b. Handle skip-domains.
   const skipPatterns = readSkipDomainsPref();
   let tabs = allTabs;
   if (skipPatterns.length > 0) {
@@ -144,25 +150,14 @@ export const handleOrganizeClick = async () => {
     return;
   }
 
-  // 5. Pass 1 matching + diagnostic logging.
+  // 5. Pass 1 matching (only moves tabs if optional domain rules exist).
   const { assignments, byGroup, unmatched, alreadyCorrect } = runPass1(tabs, rules);
 
-  // Read AI engine + new-group behavior up-front so the Pass 1 diagnostic table
-  // below can show the action that would follow given the current mode.
-  // Read the new-group behavior for any AI engine — local now also supports
-  // fresh-categories / identify-only (clustering into hostname-named groups).
-  // The other behaviors (auto-add / always-add / prompt) imply LLM-style
-  // semantic naming and are no-ops on local; we just fall through to the
-  // existing-only path in that case.
   const newGroupBehavior = aiEngine !== "off" ? getAINewGroupBehavior() : "";
   const isFreshMode = fullAIMode || newGroupBehavior === "fresh-categories";
   const isIdentifyOnly = newGroupBehavior === "identify-only";
-  // Both fresh and identify-only reclassify ALL tabs and bypass Pass 1's apply.
-  // Identify-only also gates the apply step on user confirmation via modal.
   const isFreshLike = isFreshMode || isIdentifyOnly;
 
-  // Wrapped in try/finally so console.groupEnd always runs even if a later step
-  // throws — otherwise the next click's logs would nest inside this group.
   console.groupCollapsed(
     `${LOG} Pass 1 — ${tabs.length} tabs · ${alreadyCorrect.length} already correct · ${byGroup.size} group(s) to update · ${unmatched.length} unmatched`
   );
@@ -191,75 +186,57 @@ export const handleOrganizeClick = async () => {
       );
     }
 
-    if (unmatched.length > 0) {
-      console.log(`${unmatched.length} unmatched tab(s) — left in place:`);
-      console.table(
-        unmatched.map(({ id, hostname, title, currentGroup }) => ({
-          id,
-          hostname,
-          currentGroup: currentGroup || "—",
-          title,
-        }))
-      );
-    }
-
-    // 6. Apply Pass 1 moves — UNLESS we're in a fresh-like mode, where AI
-    // is about to re-tidy everything (and identify-only may even cancel).
+    // 6. Apply Pass 1 moves (if any optional domain rules matched).
     const sortingPlan = resolveSortingPlan({ mode: sortMode, tabs, pass1: { byGroup, unmatched } });
-    if (sortingPlan.shouldApplyPass1) {
+    if (sortingPlan.shouldApplyPass1 && sortingPlan.pass1ByGroup.size > 0) {
       const result = applyPass1(sortingPlan.pass1ByGroup, workspaceId, rules);
       console.log(`${LOG} Applied: created ${result.createdGroups} new group(s), moved ${result.movedToNew} tab(s) into new groups, ${result.movedToExisting} tab(s) into existing groups.`);
       if (result.errors.length > 0) {
         console.warn(`${LOG} ${result.errors.length} error(s) during apply:`, result.errors);
       }
 
-      // 6b. Strict rule enforcement (opt-in via Look & Feel toggle). After
-      // Pass 1's moves, eject any unmatched tab that's still parked inside a
-      // group — e.g. a `photos.google.com` tab that's inside "Google Utils"
-      // but isn't in that rule's `domains[]`. Ejected tabs go to the top of
-      // the workspace; if AI Pass 2 runs next, it gets a crack at re-placing
-      // them. Strict mode never fires in fresh/identify-only modes — those
-      // bypass Pass 1 entirely.
-      if (isStrictRulesEnforced()) {
+      if (domainRulesEnabled && isStrictRulesEnforced()) {
         const candidates = unmatched.filter((t) => t.currentGroup && t._tab?.isConnected);
         if (candidates.length > 0) {
           const ejected = moveTabsToTop(candidates.map((t) => t._tab), workspaceId);
           if (ejected > 0) {
             console.log(`${LOG} Strict: ejected ${ejected} unmatched tab(s) from rule groups`);
-            // Update planning shape so downstream Pass 2 / diagnostics see
-            // the new ungrouped reality.
             for (const t of candidates) t.currentGroup = null;
           }
         }
       }
-    } else {
-      console.log(`${LOG} Pass 1 apply skipped — ${sortMode} mode will ${isIdentifyOnly ? "preview" : "reclassify"} all ${tabs.length} tab(s)`);
     }
 
-    // 7. Pass 2 (AI). Fresh-like modes run even when unmatched is empty — they
-    // see ALL tabs and may re-cluster rule-matched ones. Other modes only fire
-    // when there's something Pass 1 couldn't place.
-    const pass2Input = isFreshLike ? tabs : sortingPlan.tabsForAI;
+    // 7. Pass 2 (AI).
+    // By default (non-fresh modes), only evaluate currently UNGROUPED tabs so tabs
+    // already organized inside existing `<tab-group>` folders remain untouched and
+    // serve as live context anchors for JEV.
+    const rawPass2Candidates = isFreshLike ? tabs : sortingPlan.tabsForAI;
+    const pass2Input = isFreshLike
+      ? tabs
+      : rawPass2Candidates.filter((t) => !t.currentGroup);
+
     const shouldRunPass2 = aiEngine !== "off" && pass2Input.length > 0;
-    // Remote engine selected but nothing left for it: say so. Otherwise "the
-    // provider isn't working" and "rules already sorted everything" are
-    // indistinguishable from the user's side.
-    if (!shouldRunPass2 && pass2Input.length === 0 &&
-        (aiEngine === "openai" || aiEngine === "gemini" || aiEngine === "custom")) {
-      showToast("All tabs matched rules — remote AI had nothing to sort.");
+    const isRemoteEngine = ["jev", "chatgpt", "primalabs", "openai", "gemini", "custom"].includes(aiEngine);
+
+    if (!shouldRunPass2 && pass2Input.length === 0 && isRemoteEngine) {
+      showToast("No ungrouped tabs left to sort.");
     }
+
     if (shouldRunPass2) {
       const inputCount = pass2Input.length;
-      const inputLabel = isFreshLike ? "ALL eligible tab(s)" : sortingPlan.aiInputLabel;
+      const inputLabel = isFreshLike ? "ALL eligible tab(s)" : "ungrouped tab(s)";
       const modeSuffix = isIdentifyOnly ? " (identify-only)" : isFreshMode ? ` (${sortMode === "full-ai" ? "full-ai" : "fresh-categories"})` : "";
       console.log(`${LOG} Pass 2 — running ${aiEngine}${modeSuffix} AI over ${inputCount} ${inputLabel}...`);
-      // Visual feedback on the toolbar wand while AI thinks (can be several
-      // seconds, especially on cold start). Cleared in the finally below
-      // regardless of success/failure/modal-cancellation.
       setButtonThinking(true);
       try {
         let pass2;
-        if (aiEngine === "ollama") {
+        if (aiEngine === "jev") {
+          const t0 = performance.now();
+          const liveExistingGroups = isFreshLike ? [] : getWorkspaceExistingGroups(workspaceId);
+          pass2 = await runPass2JevHybrid(pass2Input, liveExistingGroups);
+          console.log(`${LOG} JEV + Fallback-LLM Pass 2 took ${Math.round(performance.now() - t0)}ms`);
+        } else if (aiEngine === "ollama") {
           const host = getOllamaHost();
           const model = getOllamaModel();
           const status = await checkOllamaReady(host, model);
@@ -269,55 +246,22 @@ export const handleOrganizeClick = async () => {
           } else {
             console.debug(`${LOG} Ollama ready at ${normalizeOllamaHost(host)} (model: ${model})`);
             const t0 = performance.now();
+            const effectiveRules = rules.length > 0 ? rules : getWorkspaceExistingGroups(workspaceId);
             if (isFreshLike) {
               pass2 = await runPass2OllamaFresh(tabs);
             } else {
-              pass2 = await runPass2Ollama(pass2Input, rules);
-              // Stickiness for rule-considering modes: don't let the AI
-              // pull a tab OUT of a user-organized group INTO a brand-new
-              // AI-invented category. Reclassifying into an EXISTING group
-              // (assignedToExisting) is still allowed — that's the wand
-              // correcting wrong placement. Fresh / identify-only opt out
-              // of this by design (those modes are full re-orgs).
-              if (pass2.newGroups?.length) {
-                const displaced = [];
-                for (const g of pass2.newGroups) {
-                  const stays = [];
-                  for (const t of g.tabs) {
-                    if (t.currentGroup) displaced.push(t);
-                    else stays.push(t);
-                  }
-                  g.tabs = stays;
-                }
-                pass2.newGroups = pass2.newGroups.filter((g) => g.tabs.length > 0);
-                if (displaced.length > 0) {
-                  console.log(
-                    `${LOG} stickiness: kept ${displaced.length} already-grouped tab(s) in place rather than moving to new AI group(s):`,
-                    displaced.map((t) => `${t.hostname} (in "${t.currentGroup}")`)
-                  );
-                  pass2.skipped = [...(pass2.skipped || []), ...displaced];
-                }
-              }
+              pass2 = await runPass2Ollama(pass2Input, effectiveRules);
             }
             console.log(`${LOG} Ollama Pass 2 took ${Math.round(performance.now() - t0)}ms`);
           }
-        } else if (aiEngine === "openai" || aiEngine === "gemini" || aiEngine === "custom") {
+        } else if (["chatgpt", "primalabs", "openai", "gemini", "custom"].includes(aiEngine)) {
           const t0 = performance.now();
-          pass2 = isFreshLike ? await runPass2RemoteFresh(tabs) : await runPass2Remote(pass2Input, rules);
+          const effectiveRules = rules.length > 0 ? rules : getWorkspaceExistingGroups(workspaceId);
+          pass2 = isFreshLike
+            ? await runPass2RemoteFresh(tabs)
+            : await runPass2Remote(pass2Input, effectiveRules);
           console.log(`${LOG} ${aiEngine} Pass 2 took ${Math.round(performance.now() - t0)}ms`);
         } else {
-          // Local engine. Two sub-paths:
-          //   - fresh-categories / identify-only: cluster ALL eligible tabs
-          //     into new groups (ignores rules). This is the ONLY Local mode
-          //     that creates new groups.
-          //   - auto-add / transient (or any other value): existing-only fit.
-          //     The dropdown's choice between auto-add vs transient feeds
-          //     getAIExistingBehavior() to decide whether the rule grows.
-          // Soft cap: very large input sets take real time on the Local engine
-          // even with chunking + dedupe. Confirm with the user before running
-          // so a 3000-tab workspace doesn't ambush them. Cancellation just
-          // produces an empty-plan pass2 result; the outer flow (color sync,
-          // settle, etc.) still runs.
           const localInput = pass2Input;
           let cancelled = false;
           if (localInput.length > CONFIG.AI_LOCAL_CONFIRM_THRESHOLD) {
@@ -333,13 +277,15 @@ export const handleOrganizeClick = async () => {
             }
           }
           if (!cancelled) {
+            const effectiveRules = rules.length > 0 ? rules : getWorkspaceExistingGroups(workspaceId);
             if (isFreshLike) {
               pass2 = await runPass2Fresh(tabs);
             } else {
-              pass2 = await runPass2(pass2Input, rules, workspaceId);
+              pass2 = await runPass2(pass2Input, effectiveRules, workspaceId);
             }
           }
         }
+
         if (pass2.assignedToExisting.length > 0 || pass2.newGroups.length > 0) {
           console.log(`${LOG} Pass 2 plan: ${pass2.assignedToExisting.length} to existing group(s), ${pass2.newGroups.length} new group(s), ${pass2.skipped.length} skipped`);
           if (pass2.assignedToExisting.length > 0) {
@@ -356,23 +302,13 @@ export const handleOrganizeClick = async () => {
             })));
           }
 
-          // Decide whether to show the Plan Mode modal:
-          //   - Plan Mode (identify-only) → always show (it IS the modal mode);
-          //     applies to BOTH engines (local Fresh is hostname-named so the
-          //     modal lets the user rename / re-assign before applying)
-          //   - Auto-add / Always-add → show so user can veto rule mutations
-          //     before they hit the rules table. Ollama-only — those modes imply
-          //     LLM-style semantic naming.
-          //   - Transient (either) → no modal (it's just a temp move per user)
-          //   - Prompt → no modal (Zen handles per-group via its own edit modal)
-          //   - Fresh-categories → no modal (no rule mutations happen here)
           let planToApply = pass2;
           let showModal = false;
           let modalReason = "";
           if (isIdentifyOnly) {
             showModal = true;
             modalReason = "Plan Mode";
-          } else if (aiEngine === "ollama" && !isFreshMode && newGroupBehavior !== "prompt") {
+          } else if (domainRulesEnabled && aiEngine === "ollama" && !isFreshMode && newGroupBehavior !== "prompt") {
             const existingBehavior = getAIExistingBehavior();
             const flags = [];
             if (existingBehavior === "always-add") flags.push("always-add");
@@ -384,13 +320,10 @@ export const handleOrganizeClick = async () => {
           }
 
           if (showModal) {
-            console.debug(`${LOG} Plan Mode modal opening (${modalReason}) — user must confirm before rules mutate`);
+            const existingTargets = rules.length > 0 ? rules : getWorkspaceExistingGroups(workspaceId);
+            console.debug(`${LOG} Plan Mode modal opening (${modalReason})`);
             planToApply = await showPreviewModal({
               plan: pass2,
-              // "Re-assign to new" — open-ended clustering for pending tabs.
-              // Always uses a fresh classifier so the model isn't biased by
-              // existing-rule context (the user explicitly wants NEW). Routes
-              // to whichever engine the user picked.
               onReassignToNew: async (pendingTabs) => {
                 const r = aiEngine === "local"
                   ? await runPass2Fresh(pendingTabs)
@@ -399,15 +332,16 @@ export const handleOrganizeClick = async () => {
                     : await runPass2RemoteFresh(pendingTabs);
                 return { newGroups: r.newGroups, skipped: r.skipped };
               },
-              // "Re-assign to planned" — constrained-vocabulary classification.
-              // Treats each kept bucket (new group or existing-target) as a
-              // fake rule whose domains are its tabs' hostnames, then runs
-              // Phase-3-style classification into one of those names.
               onAssignToPlanned: async (pendingTabs, keptBuckets) => {
                 const fakeRules = keptBuckets.map((g) => ({
                   name: g.name,
                   domains: [...new Set(g.tabs.map((t) => t.hostname).filter((h) => h))],
+                  tabs: g.tabs,
                 }));
+                if (aiEngine === "jev") {
+                  const res = await runPass2JevHybrid(pendingTabs, fakeRules);
+                  return { assignments: res.assignedToExisting, skipped: [...res.skipped, ...res.newGroups.flatMap((g) => g.tabs)] };
+                }
                 if (aiEngine === "local") {
                   const local = await runPass2(pendingTabs, fakeRules, workspaceId);
                   return { assignments: local.assignedToExisting, skipped: local.skipped };
@@ -417,20 +351,18 @@ export const handleOrganizeClick = async () => {
                   : await classifyExistingGroupsRemoteBatch(pendingTabs, fakeRules);
                 return assignmentMapToPlan(pendingTabs, assignmentMap);
               },
-              // "Re-assign to existing" — classifies pending tabs against the
-              // user's full rules table, regardless of what's currently kept
-              // in the modal. Lets the user route a tab into any rule-named
-              // group (e.g., "Dev") that the AI didn't propose this run. The
-              // callback is only provided when rules actually exist — modal
-              // disables the button when undefined.
-              onAssignToExisting: rules.length > 0 ? async (pendingTabs) => {
+              onAssignToExisting: existingTargets.length > 0 ? async (pendingTabs) => {
+                if (aiEngine === "jev") {
+                  const res = await runPass2JevHybrid(pendingTabs, existingTargets);
+                  return { assignments: res.assignedToExisting, skipped: [...res.skipped, ...res.newGroups.flatMap((g) => g.tabs)] };
+                }
                 if (aiEngine === "local") {
-                  const local = await runPass2(pendingTabs, rules, workspaceId);
+                  const local = await runPass2(pendingTabs, existingTargets, workspaceId);
                   return { assignments: local.assignedToExisting, skipped: local.skipped };
                 }
                 const assignmentMap = aiEngine === "ollama"
-                  ? await classifyExistingGroupsBatch(pendingTabs, rules, getOllamaHost(), getOllamaModel())
-                  : await classifyExistingGroupsRemoteBatch(pendingTabs, rules);
+                  ? await classifyExistingGroupsBatch(pendingTabs, existingTargets, getOllamaHost(), getOllamaModel())
+                  : await classifyExistingGroupsRemoteBatch(pendingTabs, existingTargets);
                 return assignmentMapToPlan(pendingTabs, assignmentMap);
               } : undefined,
             });
@@ -440,19 +372,13 @@ export const handleOrganizeClick = async () => {
           }
 
           if (planToApply) {
-            const ai = applyPass2(planToApply, workspaceId, rules, resolvePass2ApplyOptions(sortMode));
+            const applyOpts = domainRulesEnabled
+              ? resolvePass2ApplyOptions(sortMode)
+              : { existingBehavior: "transient", newGroupBehavior: "transient", persistRules: false };
+            const ai = applyPass2(planToApply, workspaceId, rules, applyOpts);
             console.log(`${LOG} Pass 2 applied: ${ai.movedToExisting} tab(s) → existing groups, ${ai.newGroupsCreated} new group(s), ${ai.rulesGrown} rule(s) grown, ${ai.newRulesCreated} new rule(s)`);
-            // Use the filtered plan's skipped list for the post-apply cleanup
-            // (in Plan Mode, this includes tabs from un-kept groups, which
-            // should also get ungrouped from their pre-tidy containers).
             pass2 = planToApply;
 
-            // Fresh-like cleanup: AI's contract is "re-org everything", but
-            // applyPass2 only moves tabs AI explicitly placed. Skipped tabs
-            // (singletons dropped, "skipped" picks) would stay in their pre-tidy
-            // groups, leaving e.g. Google Utils alive just to hold one orphan.
-            // Yank them out to workspace top, then dissolveEmptyGroups can
-            // remove the newly-emptied containers.
             if (isFreshLike) {
               const tabsContainer = window.gZenWorkspaces?.activeWorkspaceElement?.tabsContainer;
               if (tabsContainer) {
@@ -460,9 +386,6 @@ export const handleOrganizeClick = async () => {
                 for (const tabInfo of pass2.skipped) {
                   const tab = tabInfo?._tab;
                   if (!tab?.isConnected) continue;
-                  // Use closest() rather than parentElement — Zen often wraps
-                  // a tab in an intermediate container inside the tab-group,
-                  // so parentElement isn't the tab-group element directly.
                   if (tab.closest("tab-group")) {
                     try {
                       tabsContainer.insertBefore(tab, tabsContainer.firstChild);
@@ -492,39 +415,22 @@ export const handleOrganizeClick = async () => {
     const movedUp = moveUngroupedToTop(workspaceId);
     if (movedUp > 0) console.log(`${LOG} moved ${movedUp} ungrouped tab(s) to the top of the list`);
 
-    // 9. Sync per-rule styling on every rule-matched group (covers groups Pass 1 didn't touch).
+    // 9. Sync styling.
     const colored = syncAllGroupColors(workspaceId, rules);
     if (colored > 0) console.log(`${LOG} synced styling on ${colored} group(s) (minimal=${isMinimalStyle()})`);
 
-    // DIAGNOSTIC: detect tab-group nesting. tab-group inside another tab-group
-    // is a Zen-API bug (their tab-group system isn't designed to nest). If we
-    // ever see nested > 0, our addTabGroup call is anchoring at a tab inside
-    // an existing group and Zen ends up creating a child group.
     try {
       const allGroups = document.querySelectorAll("tab-group").length;
       const nestedGroups = document.querySelectorAll("tab-group tab-group").length;
       if (nestedGroups > 0) {
-        console.warn(`${LOG} ⚠ NESTED TAB-GROUPS DETECTED: ${nestedGroups} group(s) inside other groups (total ${allGroups}). This is the "subgroup" bug — investigating anchor points for gBrowser.addTabGroup.`);
-        // Log each nested pair so we can identify which groups are the parent/child.
-        for (const inner of document.querySelectorAll("tab-group tab-group")) {
-          const parent = inner.parentElement?.closest("tab-group");
-          console.warn(`  nested: "${inner.getAttribute("label") || "(unlabeled)"}" inside "${parent?.getAttribute("label") || "(unlabeled)"}"`);
-        }
+        console.warn(`${LOG} ⚠ NESTED TAB-GROUPS DETECTED: ${nestedGroups} group(s) inside other groups (total ${allGroups}).`);
       }
     } catch (e) {
       console.error(`${LOG} nesting diagnostic failed:`, e);
     }
 
-    // Tab-list settle: after raw `tabsContainer.insertBefore(...)` moves used
-    // by skip-domain parking / strict-mode ejection / moveUngroupedToTop, the
-    // gBrowser's internal `_tPos` cache and the workspace tab-container state
-    // are out of sync with the DOM. Symptom: the first drag attempt on any
-    // sorted tab is silently dropped — second attempt works because some
-    // intervening event resync the bookkeeping. Trigger that resync explicitly.
     try {
       window.gZenWorkspaces?.updateTabsContainers?.();
-      // Force gBrowser to rebuild its position cache by reading .tabs (which
-      // some Firefox versions invalidate via the getter; harmless if not).
       void window.gBrowser?.tabs?.length;
     } catch (e) {
       console.warn(`${LOG} tab-list settle failed (non-fatal):`, e);

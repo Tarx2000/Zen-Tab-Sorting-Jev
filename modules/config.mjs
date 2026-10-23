@@ -42,6 +42,7 @@ export const CONFIG = {
   MOD_ID: "zen-tab-sorting",
 
   RULES_PREF: "extensions.zen-auto-organize.rules-json",
+  USE_DOMAIN_RULES_PREF: "extensions.zen-auto-organize.use-domain-rules",
   SKIP_DOMAINS_PREF: "extensions.zen-auto-organize.skip-domains-json",
   // Set of tab-group LABELS currently collapsed. JSON-encoded string array.
   // Updated on every collapse-toggle; re-applied on every TabGroupCreate so
@@ -84,13 +85,49 @@ export const CONFIG = {
   PIP_SQUARE_RADIUS_DIVISOR: 4,
 
   // AI Sorting (Pass 2). Engine governed by AI_ENGINE_PREF:
-  //   "off"    — no AI pass
-  //   "local"  — Firefox's bundled ML engine (modules/ai.mjs), existing-groups only
-  //   "ollama" — local Ollama daemon (modules/ollama.mjs), existing + new groups
+  //   "off"       — no AI pass
+  //   "jev"       — JEV decision model for existing groups + One-Shot Fallback-LLM for new groups
+  //   "chatgpt"   — OpenAI Sign in with ChatGPT (subscription quota via /v1/responses)
+  //   "primalabs" — PrimaLabs OpenAI-compatible endpoint
+  //   "local"     — Firefox's bundled ML engine (modules/ai.mjs), existing-groups only
+  //   "ollama"    — local Ollama daemon (modules/ollama.mjs), existing + new groups
+  //   "openai"    — OpenAI-compatible /v1/chat/completions
+  //   "gemini"    — Google AI Studio generateContent
+  //   "custom"    — Custom OpenAI or Ollama-compatible endpoint
   AI_ENGINE_PREF: "extensions.zen-auto-organize.ai-engine",
   AI_SORT_MODE_PREF: "extensions.zen-auto-organize.ai-sort-mode",
   AI_EXISTING_BEHAVIOR_PREF: "extensions.zen-auto-organize.ai-existing-behavior",
   AI_NEW_GROUP_BEHAVIOR_PREF: "extensions.zen-auto-organize.ai-new-group-behavior",
+
+  // JEV Decision Model settings (Stage 1: classify into existing workspace tab groups)
+  AI_JEV_PROVIDER_PREF: "extensions.zen-auto-organize.ai-jev-provider",
+  AI_JEV_API_KEY_PREF: "extensions.zen-auto-organize.ai-jev-api-key",
+  AI_JEV_MODEL_PREF: "extensions.zen-auto-organize.ai-jev-model",
+  AI_JEV_MIN_PROB_PREF: "extensions.zen-auto-organize.ai-jev-min-prob",
+  AI_JEV_MIN_MARGIN_PREF: "extensions.zen-auto-organize.ai-jev-min-margin",
+  AI_JEV_TYPESAFE_ENDPOINT: "https://api.typesafe.ai/v1/systemone",
+  AI_JEV_OPENROUTER_ENDPOINT: "https://openrouter.ai/api/alpha/decisions",
+  AI_JEV_TYPESAFE_MODEL_DEFAULT: "jev-1.13.0",
+  AI_JEV_OPENROUTER_MODEL_DEFAULT: "typesafe/jev-1.13",
+  AI_JEV_MIN_PROB_DEFAULT: 0.70,
+  AI_JEV_MIN_MARGIN_DEFAULT: 0.15,
+
+  // Fallback-LLM settings (Stage 2: one-shot cluster & name for tabs left ungrouped by JEV)
+  AI_FALLBACK_PROVIDER_PREF: "extensions.zen-auto-organize.ai-fallback-provider",
+
+  // Sign in with ChatGPT (SIWC) settings
+  AI_CHATGPT_SESSION_PREF: "extensions.zen-auto-organize.ai-chatgpt-session-json",
+  AI_CHATGPT_HOST_ID_PREF: "extensions.zen-auto-organize.ai-chatgpt-host-id",
+  AI_CHATGPT_MODEL_PREF: "extensions.zen-auto-organize.ai-chatgpt-model",
+  AI_CHATGPT_MODEL_DEFAULT: "gpt-5-codex-mini",
+
+  // PrimaLabs settings
+  AI_PRIMALABS_ENDPOINT_PREF: "extensions.zen-auto-organize.ai-primalabs-endpoint",
+  AI_PRIMALABS_API_KEY_PREF: "extensions.zen-auto-organize.ai-primalabs-api-key",
+  AI_PRIMALABS_MODEL_PREF: "extensions.zen-auto-organize.ai-primalabs-model",
+  AI_PRIMALABS_ENDPOINT_DEFAULT: "https://api.primalabs.ai/v1",
+  AI_PRIMALABS_MODEL_DEFAULT: "primalabs-ai/DeepSeek-V4.1-Flash-1017",
+
   AI_OLLAMA_HOST_PREF: "extensions.zen-auto-organize.ai-ollama-host",
   AI_OLLAMA_MODEL_PREF: "extensions.zen-auto-organize.ai-ollama-model",
   AI_OLLAMA_WARMUP_PREF: "extensions.zen-auto-organize.ai-ollama-warmup",
@@ -143,18 +180,13 @@ export const CONFIG = {
 // Zen uses U+200B (zero-width space) as the `label` attribute placeholder for a
 // brand-new "Create tab group" that the user hasn't named yet. It's invisible in
 // the source so we name it.
-export const ZEN_UNSET_LABEL = "​";
+export const ZEN_UNSET_LABEL = "\u200b";
 export const isUnsetLabel = (label) => !label || label === ZEN_UNSET_LABEL;
 
 // Fallback rules if rules.json is missing or malformed AND the Sine pref is unset.
-export const DEFAULT_RULES = [
-  { name: "Calendar", domains: ["calendar.google.com", "connect.garmin.com"] },
-  { name: "AI Tools", domains: ["chat.openai.com", "gemini.google.com", "perplexity.ai"] },
-  { name: "Dev",      domains: ["dashboard.render.com", "github.com", "stackoverflow.com"] },
-  { name: "Shopping", domains: ["amazon.com", "staples.com", "ebay.com"] },
-  { name: "Social",   domains: ["reddit.com", "x.com", "bsky.app"] },
-  { name: "Search",   domains: ["google.com", "duckduckgo.com"] },
-];
+// Empty by default so no deterministic domain rules are forced unless the user
+// explicitly enables domain rules and adds their own entries.
+export const DEFAULT_RULES = [];
 
 // Zen's named tab-group palette. Storing the *name* lets Zen handle light/dark variants
 // via its native --tab-group-color-{name}* CSS variables. The hex column is the picker's

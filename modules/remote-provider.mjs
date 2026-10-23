@@ -1,9 +1,18 @@
-// Zen Tab Sorting — remote provider Pass 2 drivers.
+// Zen Tab Sorting — remote provider & JEV + Fallback-LLM Pass 2 drivers.
 //
-// This mirrors the Ollama orchestration shape, but the transport is any
-// OpenAI/Gemini/custom provider explicitly enabled in preferences.
+// Supports:
+//   1. JEV + One-Shot Fallback-LLM hybrid pipeline (`runPass2JevHybrid`):
+//      - Stage 1: TypeSafe JEV decision model classifies ungrouped tabs into
+//        existing workspace `<tab-group>` folders using probability + margin thresholds.
+//      - Stage 2: All remaining ungrouped tabs are sent in a single One-Shot call
+//        to the configured Fallback-LLM (ChatGPT SIWC, PrimaLabs, OpenAI-compatible,
+//        Gemini, Ollama, or Custom) to create new groups (min 2 tabs per new group)
+//        and leave true outliers ungrouped (`skipped`).
+//   2. Standalone remote providers (`openai`, `primalabs`, `chatgpt`, `gemini`, `custom`).
 
 import { LOG } from "./config.mjs";
+import { ensureValidChatGPTToken } from "./chatgpt-auth.mjs";
+import { classifyExistingGroupsWithJev, readJevSettings } from "./jev.mjs";
 import { getProviderReadiness } from "./provider-readiness.mjs";
 import {
   buildProviderRequest,
@@ -14,8 +23,14 @@ import {
   parseProviderResponse,
   PARAM_STYLE_CLASSIC,
 } from "./provider-requests.mjs";
-import { readProviderSettings } from "./provider-settings.mjs";
-import { buildClassifyPrompt, buildClusterPrompt, buildUnifiedPrompt, buildFreshPrompt } from "./ollama-prompts.mjs";
+import { readFallbackProviderSettings, readProviderSettings } from "./provider-settings.mjs";
+import {
+  buildClassifyPrompt,
+  buildClusterPrompt,
+  buildUnifiedPrompt,
+  buildFreshPrompt,
+  buildOneShotNewGroupsPrompt,
+} from "./ollama-prompts.mjs";
 import { consolidateNewGroups } from "./new-group-consolidation.mjs";
 import { chunkTabsForProvider, PROVIDER_TAB_BATCH_SIZE } from "./provider-batching.mjs";
 import { collectProviderTabMap } from "./remote-assignment-retry.mjs";
@@ -26,6 +41,7 @@ const GENERATE_TIMEOUT_MS = 120000;
 const PROVIDER_JSON_MAX_TOKENS = 4096;
 const PROVIDER_FRESH_JSON_MAX_TOKENS = 4096;
 const PROVIDER_FRESH_TAB_BATCH_SIZE = 35;
+export const FALLBACK_MIN_NEW_GROUP_TABS = 2;
 
 const stripMetaPrefix = (s) => s
   .replace(/^\s*(?:new\s+)?(?:category|label|topic|bucket|group)\s*[:\-–]\s*/i, "")
@@ -34,8 +50,8 @@ const stripMetaPrefix = (s) => s
 // One-click connectivity probe for the settings dialog's "Test connection"
 // button. Runs the SAME readiness gate as a real sort (consent stays required —
 // a test request still sends data to the provider), then issues a minimal
-// prompt. Returns a plain result object; never throws.
-export const testProviderConnection = async (settings = readProviderSettings(Services.prefs)) => {
+// probe. Returns a plain result object; never throws.
+export const testProviderConnection = async (settings = readProviderSettings(globalThis.Services?.prefs)) => {
   const readiness = getProviderReadiness(settings);
   if (!readiness.ok) {
     return { ok: false, reason: readiness.reason, missingFields: readiness.missingFields || [] };
@@ -48,7 +64,199 @@ export const testProviderConnection = async (settings = readProviderSettings(Ser
   }
 };
 
-export const classifyExistingGroupsRemoteBatch = async (pendingTabs, rules, settings = readProviderSettings(Services.prefs)) => {
+// Stage 2: One-Shot Fallback-LLM for tabs that JEV did not confidently place into
+// an existing workspace group (or all ungrouped tabs when 0 groups exist).
+// Sends all leftover tabs together in ONE request so the LLM has full context,
+// and enforces `minGroupSize` (default 2) so isolated singletons stay ungrouped.
+export const runOneShotFallbackNewGroups = async ({
+  leftoverTabs,
+  snippets = [],
+  existingGroupNames = [],
+  fallbackSettings = readFallbackProviderSettings(globalThis.Services?.prefs),
+  minGroupSize = FALLBACK_MIN_NEW_GROUP_TABS,
+  fetchImpl,
+}) => {
+  if (!Array.isArray(leftoverTabs) || leftoverTabs.length === 0) {
+    return { newGroups: [], skipped: [] };
+  }
+  if (fallbackSettings?.provider === "off") {
+    return { newGroups: [], skipped: [...leftoverTabs] };
+  }
+  // If fewer tabs remain than the minimum group size (e.g. only 1 tab left),
+  // it cannot form a multi-tab group, so leave it ungrouped without an extra API call.
+  if (leftoverTabs.length < minGroupSize) {
+    return { newGroups: [], skipped: [...leftoverTabs] };
+  }
+
+  const readiness = getProviderReadiness(fallbackSettings);
+  if (!readiness.ok) {
+    const msg = readiness.reason === "consent_required"
+      ? "Fallback LLM needs data-sending consent before creating new groups."
+      : `Fallback LLM (${fallbackSettings?.provider || "unknown"}) is not ready: ${readiness.reason}`;
+    showToast(msg);
+    return { newGroups: [], skipped: [...leftoverTabs], failed: readiness.reason };
+  }
+
+  const existingLower = new Set(
+    (existingGroupNames || []).map((n) => String(n || "").trim().toLowerCase()).filter(Boolean),
+  );
+
+  const oneShotInput = buildOneShotNewGroupsPrompt(leftoverTabs, snippets, existingGroupNames);
+  const parsed = await providerJson(readiness.value, oneShotInput, PROVIDER_JSON_MAX_TOKENS, fetchImpl);
+
+  const groupsByLower = new Map();
+  const skipped = [];
+
+  // Support both flat map `{"0": "Group", "1": "skipped"}` and `{"groups": [...]}`
+  if (Array.isArray(parsed?.groups)) {
+    const seen = new Set();
+    for (const grp of parsed.groups) {
+      const rawName = stripMetaPrefix(String(grp?.name || "").trim());
+      const lower = rawName.toLowerCase();
+      if (!rawName || lower === "skipped" || lower === "none" || existingLower.has(lower)) continue;
+      if (!groupsByLower.has(lower)) groupsByLower.set(lower, { name: rawName, tabs: [] });
+      for (const idx of Array.isArray(grp?.tabs) ? grp.tabs : []) {
+        const num = Number.parseInt(idx, 10);
+        if (!Number.isFinite(num) || num < 0 || num >= leftoverTabs.length || seen.has(num)) continue;
+        seen.add(num);
+        groupsByLower.get(lower).tabs.push(leftoverTabs[num]);
+      }
+    }
+    for (let i = 0; i < leftoverTabs.length; i++) {
+      if (!seen.has(i)) skipped.push(leftoverTabs[i]);
+    }
+  } else {
+    for (let i = 0; i < leftoverTabs.length; i++) {
+      const rawVal = parsed?.[String(i)] ?? parsed?.[i];
+      const cleaned = stripMetaPrefix(rawVal == null ? "" : String(rawVal).trim());
+      const lower = cleaned.toLowerCase();
+      if (!cleaned || lower === "skipped" || lower === "none" || existingLower.has(lower)) {
+        skipped.push(leftoverTabs[i]);
+        continue;
+      }
+      if (!groupsByLower.has(lower)) {
+        groupsByLower.set(lower, { name: cleaned, tabs: [] });
+      }
+      groupsByLower.get(lower).tabs.push(leftoverTabs[i]);
+    }
+  }
+
+  // Enforce minimum group size (default 2): demote any 1-tab group to `skipped`
+  // so singletons stay ungrouped instead of creating 1-tab folders.
+  const newGroups = [];
+  for (const group of groupsByLower.values()) {
+    if (group.tabs.length < minGroupSize) {
+      skipped.push(...group.tabs);
+    } else {
+      newGroups.push(group);
+    }
+  }
+
+  return { newGroups, skipped };
+};
+
+// Complete 2-stage JEV + One-Shot Fallback-LLM pipeline:
+//   1. Enrich ungrouped tabs with page snippets (`fetchPageSnippet`).
+//   2. If workspace has existing `<tab-group>` folders, run JEV (`classifyExistingGroupsWithJev`)
+//      to place tabs that match existing groups with high probability & margin.
+//   3. Send all leftover tabs in ONE shot to the Fallback-LLM (`runOneShotFallbackNewGroups`)
+//      to invent new group names and group related tabs (>= 2 tabs per group), while leaving
+//      true exotic singletons ungrouped (`skipped`).
+export const runPass2JevHybrid = async (
+  unmatchedTabs,
+  existingGroups = [],
+  {
+    jevSettings = readJevSettings(globalThis.Services?.prefs),
+    fallbackSettings = readFallbackProviderSettings(globalThis.Services?.prefs),
+    minGroupSize = FALLBACK_MIN_NEW_GROUP_TABS,
+    fetchImpl,
+    preFetchedSnippets,
+  } = {},
+) => {
+  const empty = { assignedToExisting: [], newGroups: [], skipped: [] };
+  if (!Array.isArray(unmatchedTabs) || unmatchedTabs.length === 0) return empty;
+
+  const snippets = Array.isArray(preFetchedSnippets)
+    ? preFetchedSnippets
+    : await fetchSnippets(unmatchedTabs, "jev-hybrid");
+
+  const validExistingGroups = Array.isArray(existingGroups)
+    ? existingGroups.filter((g) => g && typeof g.name === "string" && g.name.trim())
+    : [];
+
+  let assignedToExisting = [];
+  let leftoverTabs = [...unmatchedTabs];
+  let leftoverSnippets = [...snippets];
+
+  // Stage 1: JEV Decision Model (only when existing groups are present and JEV key is configured)
+  if (validExistingGroups.length > 0) {
+    if (!jevSettings.consentToSendData) {
+      showToast("Data-sending consent is required in Zen Tab Sorting settings.");
+      return { ...empty, skipped: unmatchedTabs, failed: "consent_required" };
+    }
+    if (jevSettings.apiKey && jevSettings.apiKey.trim()) {
+      try {
+        const jevResult = await classifyExistingGroupsWithJev({
+          tabs: unmatchedTabs,
+          existingGroups: validExistingGroups,
+          snippets,
+          jevSettings,
+          fetchImpl,
+        });
+        assignedToExisting = jevResult.assignedToExisting;
+        leftoverTabs = jevResult.leftoverTabs;
+        leftoverSnippets = jevResult.leftoverSnippets;
+        console.log(
+          `${LOG} JEV Stage 1: assigned ${assignedToExisting.length}/${unmatchedTabs.length} tab(s) to existing groups, ${leftoverTabs.length} left for Fallback-LLM`,
+        );
+      } catch (e) {
+        console.error(`${LOG} JEV Stage 1 failed, falling through to Fallback-LLM:`, e);
+        showToast(`JEV classification error: ${e.message || e}`);
+      }
+    } else {
+      console.warn(`${LOG} JEV key not configured; skipping Stage 1 and sending tabs to Fallback-LLM`);
+    }
+  } else {
+    console.log(`${LOG} JEV Stage 1 skipped: no existing groups in workspace; sending ${leftoverTabs.length} tab(s) to Fallback-LLM`);
+  }
+
+  // Stage 2: One-Shot Fallback-LLM for remaining ungrouped tabs
+  if (leftoverTabs.length === 0) {
+    return { assignedToExisting, newGroups: [], skipped: [] };
+  }
+
+  try {
+    const existingGroupNames = validExistingGroups.map((g) => g.name);
+    const stage2 = await runOneShotFallbackNewGroups({
+      leftoverTabs,
+      snippets: leftoverSnippets,
+      existingGroupNames,
+      fallbackSettings,
+      minGroupSize,
+      fetchImpl,
+    });
+    console.log(
+      `${LOG} Fallback-LLM Stage 2: created ${stage2.newGroups.length} new group(s), skipped ${stage2.skipped.length} outlier tab(s)`,
+    );
+    return {
+      assignedToExisting,
+      newGroups: stage2.newGroups,
+      skipped: stage2.skipped,
+      ...(stage2.failed ? { failed: stage2.failed } : {}),
+    };
+  } catch (e) {
+    console.error(`${LOG} Fallback-LLM Stage 2 failed:`, e);
+    showToast(`Fallback-LLM failed: ${e.message || e}`);
+    return {
+      assignedToExisting,
+      newGroups: [],
+      skipped: leftoverTabs,
+      failed: e.message || String(e),
+    };
+  }
+};
+
+export const classifyExistingGroupsRemoteBatch = async (pendingTabs, rules, settings = readProviderSettings(globalThis.Services?.prefs)) => {
   if (!pendingTabs?.length || !rules?.length) return new Map();
   const readiness = getProviderReadiness(settings);
   if (!readiness.ok) {
@@ -75,7 +283,7 @@ export const classifyExistingGroupsRemoteBatch = async (pendingTabs, rules, sett
   return out;
 };
 
-export const runPass2Remote = async (unmatched, rules, settings = readProviderSettings(Services.prefs)) => {
+export const runPass2Remote = async (unmatched, rules, settings = readProviderSettings(globalThis.Services?.prefs)) => {
   const empty = { assignedToExisting: [], newGroups: [], skipped: [] };
   if (!unmatched?.length) return empty;
 
@@ -103,7 +311,7 @@ export const runPass2Remote = async (unmatched, rules, settings = readProviderSe
       initialBatchSize: PROVIDER_TAB_BATCH_SIZE,
       label: "remote provider",
       buildPrompt: (tabs, chunkSnippets) => buildUnifiedPrompt(rules, tabs, chunkSnippets),
-      fetchJson: (prompt) => providerJson(readiness.value, prompt, PROVIDER_JSON_MAX_TOKENS),
+      fetchJson: (inputStr) => providerJson(readiness.value, inputStr, PROVIDER_JSON_MAX_TOKENS),
     });
     const assignedToExisting = [];
     const newGroupsByKey = new Map();
@@ -126,8 +334,8 @@ export const runPass2Remote = async (unmatched, rules, settings = readProviderSe
       newGroupsByKey.get(lower).tabs.push(unmatched[i]);
     }
 
-    const newGroups = await consolidateNewGroups([...newGroupsByKey.values()], (prompt) =>
-      providerJson(readiness.value, prompt), "Remote provider");
+    const newGroups = await consolidateNewGroups([...newGroupsByKey.values()], (inputStr) =>
+      providerJson(readiness.value, inputStr), "Remote provider");
     if (failures.length > 0) {
       showToast(`Remote provider retried incomplete batches; ${skipped.length} tab(s) still did not move.`);
     }
@@ -139,7 +347,7 @@ export const runPass2Remote = async (unmatched, rules, settings = readProviderSe
   }
 };
 
-export const runPass2RemoteFresh = async (allTabs, settings = readProviderSettings(Services.prefs)) => {
+export const runPass2RemoteFresh = async (allTabs, settings = readProviderSettings(globalThis.Services?.prefs)) => {
   const empty = { assignedToExisting: [], newGroups: [], skipped: [] };
   if (!allTabs?.length) return empty;
 
@@ -158,7 +366,7 @@ export const runPass2RemoteFresh = async (allTabs, settings = readProviderSettin
       initialBatchSize: PROVIDER_FRESH_TAB_BATCH_SIZE,
       label: "remote provider fresh",
       buildPrompt: (tabs, chunkSnippets) => buildFreshPrompt(tabs, chunkSnippets),
-      fetchJson: (prompt) => providerJson(readiness.value, prompt, PROVIDER_FRESH_JSON_MAX_TOKENS),
+      fetchJson: (inputStr) => providerJson(readiness.value, inputStr, PROVIDER_FRESH_JSON_MAX_TOKENS),
     });
     const newGroupsByKey = new Map();
     const skipped = [];
@@ -179,8 +387,8 @@ export const runPass2RemoteFresh = async (allTabs, settings = readProviderSettin
       showToast(`Remote provider skipped ${failures.length} full-AI batch(es). Try a stronger model if some tabs did not move.`);
     }
 
-    const newGroups = await consolidateNewGroups([...newGroupsByKey.values()], (prompt) =>
-      providerJson(readiness.value, prompt, PROVIDER_FRESH_JSON_MAX_TOKENS), "Remote provider");
+    const newGroups = await consolidateNewGroups([...newGroupsByKey.values()], (inputStr) =>
+      providerJson(readiness.value, inputStr, PROVIDER_FRESH_JSON_MAX_TOKENS), "Remote provider");
 
     return {
       assignedToExisting: [],
@@ -224,8 +432,8 @@ const clusterUnmatchedNewGroups = async (leftover, settings) => {
   };
 };
 
-const providerJson = async (settings, prompt, maxTokens = PROVIDER_JSON_MAX_TOKENS) => {
-  const responseText = await providerText(settings, prompt, maxTokens);
+const providerJson = async (settings, inputStr, maxTokens = PROVIDER_JSON_MAX_TOKENS, fetchImpl) => {
+  const responseText = await providerText(settings, inputStr, maxTokens, fetchImpl);
   let parsed;
   try {
     parsed = JSON.parse(extractJsonObjectText(responseText));
@@ -242,6 +450,11 @@ const extractJsonObjectText = (text) => {
   const raw = String(text || "").trim();
   const fenced = raw.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
   if (fenced) return fenced[1].trim();
+  const firstBrace = raw.indexOf("{");
+  const lastBrace = raw.lastIndexOf("}");
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    return raw.slice(firstBrace, lastBrace + 1);
+  }
   return raw;
 };
 
@@ -251,7 +464,8 @@ const extractJsonObjectText = (text) => {
 // through the main browser window's fetch instead. In the browser window this
 // resolves to the same fetch as before, and in Node (tests stub
 // globalThis.fetch) Services is undefined so the global is used unchanged.
-const resolveFetch = () => {
+const resolveFetch = (customFetch) => {
+  if (typeof customFetch === "function") return customFetch;
   try {
     if (typeof Services !== "undefined" && typeof window !== "undefined" &&
         window.location?.href !== "chrome://browser/content/browser.xhtml") {
@@ -262,11 +476,11 @@ const resolveFetch = () => {
   return fetch;
 };
 
-const sendProviderRequest = async (request) => {
+const sendProviderRequest = async (request, fetchImpl) => {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), GENERATE_TIMEOUT_MS);
   try {
-    const doFetch = resolveFetch();
+    const doFetch = resolveFetch(fetchImpl);
     const response = await doFetch(request.url, { ...request.init, signal: controller.signal });
     return { response, body: await response.text() };
   } catch (e) {
@@ -282,18 +496,28 @@ const sendProviderRequest = async (request) => {
 // re-learning it after a restart costs one rejected request.
 const paramStyleByTarget = new Map();
 
-const providerText = async (settings, prompt, maxTokens) => {
-  const kind = getProviderKind(settings);
-  // Only the OpenAI-shaped kinds have the parameter split. Gemini and Ollama
-  // take their own parameters and are left alone.
+const providerText = async (settings, inputStr, maxTokens, fetchImpl) => {
+  let effectiveSettings = settings;
+  if (settings.provider === "chatgpt") {
+    const freshToken = await ensureValidChatGPTToken(
+      globalThis.Services?.prefs,
+      fetchImpl,
+      settings,
+    );
+    effectiveSettings = { ...settings, accessToken: freshToken };
+  }
+
+  const kind = getProviderKind(effectiveSettings);
+  // Only the OpenAI-shaped kinds have the parameter split. Gemini, ChatGPT SIWC,
+  // and Ollama take their own parameters and are left alone.
   const adaptive = kind === "openai";
-  const target = `${settings.endpoint || ""}\x00${settings.model || ""}`;
+  const target = `${effectiveSettings.endpoint || ""}\x00${effectiveSettings.model || ""}`;
   const cached = adaptive ? paramStyleByTarget.get(target) : null;
   const ladder = !adaptive
     ? [PARAM_STYLE_CLASSIC]
     : cached
       ? [cached]
-      : paramStyleLadder(settings.model);
+      : paramStyleLadder(effectiveSettings.model);
 
   let response;
   let body;
@@ -302,7 +526,10 @@ const providerText = async (settings, prompt, maxTokens) => {
   // the request. Any other failure is the caller's problem, not ours.
   for (const candidate of ladder) {
     style = candidate;
-    ({ response, body } = await sendProviderRequest(buildProviderRequest(settings, prompt, maxTokens, candidate)));
+    ({ response, body } = await sendProviderRequest(
+      buildProviderRequest(effectiveSettings, inputStr, maxTokens, candidate),
+      fetchImpl,
+    ));
     if (response.ok || !isParamStyleError(response.status, body)) break;
     console.log(`${LOG} provider rejected the ${candidate} parameter shape`);
   }

@@ -2,8 +2,59 @@
 // color application (named via Zen API; hex via CSS variable overrides), and the
 // sort-ungrouped-to-top pass.
 
-import { CONFIG, LOG, isZenColorName, isValidHex } from "./config.mjs";
+import { CONFIG, LOG, isZenColorName, isValidHex, isUnsetLabel } from "./config.mjs";
 import { isMinimalStyle } from "./rules.mjs";
+import { getTabTitle, getTabUrl, getHostname } from "./tabs.mjs";
+
+/**
+ * Snapshot all existing `<tab-group>` elements in the active workspace, along
+ * with the tabs currently inside each group. Used by JEV (Stage 1) as live
+ * target categories + context anchors so no pre-saved domain rules are needed.
+ *
+ * @param {string} workspaceId
+ * @returns {Array<{ name: string, domains: string[], tabs: Array<{ title: string, hostname: string, url: string }> }>}
+ */
+export const getWorkspaceExistingGroups = (workspaceId) => {
+  if (!workspaceId || typeof document === "undefined") return [];
+  const groupsByName = new Map();
+  const selector = `tab-group:has(tab[zen-workspace-id="${workspaceId}"])`;
+  let groupEls = [];
+  try {
+    groupEls = Array.from(document.querySelectorAll(selector));
+  } catch {
+    groupEls = Array.from(document.querySelectorAll("tab-group"));
+  }
+
+  for (const groupEl of groupEls) {
+    if (!groupEl?.isConnected) continue;
+    const rawLabel = groupEl.getAttribute("label") || "";
+    const name = rawLabel.trim();
+    if (isUnsetLabel(name)) continue;
+
+    const tabEls = Array.from(
+      groupEl.querySelectorAll(`tab[zen-workspace-id="${workspaceId}"]`),
+    );
+    if (tabEls.length === 0) continue;
+
+    if (!groupsByName.has(name)) {
+      groupsByName.set(name, { name, domains: [], tabs: [] });
+    }
+    const entry = groupsByName.get(name);
+    const domainSet = new Set(entry.domains);
+
+    for (const tabEl of tabEls) {
+      if (!tabEl?.isConnected) continue;
+      const url = getTabUrl(tabEl);
+      const hostname = getHostname(url);
+      const title = getTabTitle(tabEl) || "(untitled)";
+      if (hostname) domainSet.add(hostname);
+      entry.tabs.push({ title, hostname, url });
+    }
+    entry.domains = [...domainSet];
+  }
+
+  return [...groupsByName.values()];
+};
 
 // Find an existing tab-group with the given label in the given workspace.
 // Tries direct attribute match first (which doesn't always work because Zen doesn't
@@ -152,16 +203,20 @@ export const syncAllGroupColors = (workspaceId, rules) => {
   const groups = document.querySelectorAll(selector);
   for (const groupEl of groups) {
     const label = groupEl.getAttribute("label");
-    if (!label || !ruleNames.has(label)) continue;
+    if (!label) continue;
 
     if (minimal) {
       groupEl.classList.add("zao-minimal");
       clearGroupColor(groupEl);
-    } else {
-      groupEl.classList.remove("zao-minimal");
-      if (colorByName.has(label)) applyGroupColor(groupEl, colorByName.get(label));
-      else clearGroupColor(groupEl);
+      touched++;
+      continue;
     }
+
+    groupEl.classList.remove("zao-minimal");
+    if (!ruleNames.has(label)) continue;
+
+    if (colorByName.has(label)) applyGroupColor(groupEl, colorByName.get(label));
+    else clearGroupColor(groupEl);
     touched++;
   }
   return touched;
@@ -329,32 +384,7 @@ export const dissolveStaleGroups = (workspaceId, rules) => {
 };
 
 /**
- * Remove any tab-group element with zero tabs. Useful after operations that
- * yank tabs out of their groups (Phase 4c "Fresh categories" Arc-Tidy mode
- * is the main caller) — Zen sometimes auto-collapses empties but not always,
- * so this is a defensive cleanup.
- *
- * NOTE: this walks ALL tab-groups in the DOM, not just one workspace — empty
- * groups in other workspaces are equally invalid. workspaceId parameter is
- * accepted only for log consistency with the other dissolve helpers.
- *
- * @returns number — count of group elements removed.
- */
-/**
  * Find a DOM-safe `insertBefore` anchor for gBrowser.addTabGroup.
- *
- * Bug context: passing any element that's INSIDE a <tab-group> as
- * `insertBefore` causes Zen to nest the new group inside the existing one
- * (the "subgroups" bug). Even passing the tab-group ELEMENT itself does this
- * — Zen treats `insertBefore: aTabGroup` as "create me INSIDE that group."
- *
- * Workaround: always anchor at the workspace's tabsContainer.firstChild,
- * which is guaranteed to be at workspace top-level (sibling of all groups,
- * not inside any). New groups thus appear at the top of the workspace —
- * an acceptable tradeoff vs the alternative of broken nested groups.
- *
- * The `tab` parameter is ignored in the current implementation but retained
- * for API compatibility with callers that pass `tabs[0]` for documentation.
  *
  * @returns {Element|null}
  */
@@ -384,10 +414,6 @@ export const dissolveEmptyGroups = () => {
  * Merge tab-groups in the current workspace that share a label.
  * First DOM-order occurrence is the "canonical" winner; tabs from later duplicates
  * move into it, then the empty duplicate is removed.
- *
- * @returns {{ mergedLabels, tabsMoved }} where:
- *   mergedLabels — number of labels that had duplicates (count of dedupe operations)
- *   tabsMoved    — total tabs migrated from duplicates into their canonical group
  */
 export const consolidateDuplicateGroups = (workspaceId) => {
   if (!workspaceId) return { mergedLabels: 0, tabsMoved: 0 };
