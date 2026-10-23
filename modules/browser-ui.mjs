@@ -7,19 +7,15 @@ import { handleOrganizeClick } from "./click-handler.mjs";
 // Lucide "wand-sparkles" — the magic wand with a sparkle around the tip.
 // Inline SVG (not an icon-font / external file) so it inherits currentColor from
 // the toolbar theme and animates cleanly with the .zao-wiggling class.
+// Minimalist Zen magic wand icon with clean star sparkle
 const WAND_ICON_SVG = `
-  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24"
-       fill="none" stroke="currentColor" stroke-width="2"
+  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24"
+       fill="none" stroke="currentColor" stroke-width="1.75"
        stroke-linecap="round" stroke-linejoin="round">
-    <path d="M15 4V2"/>
-    <path d="M15 16v-2"/>
-    <path d="M8 9h2"/>
-    <path d="M20 9h2"/>
-    <path d="M17.8 11.8 19 13"/>
-    <path d="M15 9h.01"/>
-    <path d="M17.8 6.2 19 5"/>
-    <path d="m3 21 9-9"/>
-    <path d="M12.2 6.2 11 5"/>
+    <path d="m4 20 10-10"/>
+    <path d="m13 7 4 4"/>
+    <path d="M18 2.5v5"/>
+    <path d="M15.5 5h5"/>
   </svg>
 `;
 
@@ -28,7 +24,7 @@ const buttonXul = () => `
     id="${CONFIG.BUTTON_ID}"
     class="toolbarbutton-1 chromeclass-toolbar-additional"
     command="${CONFIG.COMMAND_ID}"
-    tooltiptext="Auto Organize Tabs (JEV + Fallback-LLM)">
+    tooltiptext="Auto Sort Tabs">
     <hbox class="toolbarbutton-box" align="center">
       ${WAND_ICON_SVG}
     </hbox>

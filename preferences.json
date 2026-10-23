@@ -5,7 +5,7 @@
   },
   {
     "type": "checkbox",
-    "label": "Enable deterministic domain rules (Pass 1) — off by default so JEV & Fallback-LLM sort dynamically by context",
+    "label": "Enable deterministic domain rules (Pass 1) \u2014 off by default so JEV & Fallback-LLM sort dynamically by context",
     "property": "extensions.zen-auto-organize.use-domain-rules",
     "defaultValue": false
   },
@@ -23,13 +23,13 @@
   },
   {
     "type": "checkbox",
-    "label": "Minimal style — strip group colors and match Zen's address-bar styling",
+    "label": "Minimal style \u2014 strip group colors and match Zen's address-bar styling",
     "property": "extensions.zen-auto-organize.minimal-style",
     "defaultValue": false
   },
   {
     "type": "checkbox",
-    "label": "Strict rule enforcement — eject tabs from a group when their hostname isn't in that group's rule",
+    "label": "Strict rule enforcement \u2014 eject tabs from a group when their hostname isn't in that group's rule",
     "property": "extensions.zen-auto-organize.strict-rules",
     "defaultValue": false
   },
@@ -44,35 +44,35 @@
     "defaultValue": "jev",
     "options": [
       {
-        "label": "JEV + Fallback-LLM — TypeSafe JEV for existing groups + One-Shot LLM for new groups",
+        "label": "JEV + Fallback-LLM \u2014 TypeSafe JEV for existing groups + One-Shot LLM for new groups",
         "value": "jev"
       },
       {
-        "label": "ChatGPT (Sign in with ChatGPT) — Use your ChatGPT Plus/Pro quota",
+        "label": "ChatGPT (Sign in with ChatGPT) \u2014 Use your ChatGPT Plus/Pro quota",
         "value": "chatgpt"
       },
       {
-        "label": "PrimaLabs — Fast OpenAI-compatible API (DeepSeek V4.1 Flash)",
+        "label": "PrimaLabs \u2014 Fast OpenAI-compatible API (DeepSeek V4.1 Flash)",
         "value": "primalabs"
       },
       {
-        "label": "OpenAI-compatible — Remote or self-hosted /v1/chat/completions",
+        "label": "OpenAI-compatible \u2014 Remote or self-hosted /v1/chat/completions",
         "value": "openai"
       },
       {
-        "label": "Gemini — Google AI Studio generateContent",
+        "label": "Gemini \u2014 Google AI Studio generateContent",
         "value": "gemini"
       },
       {
-        "label": "Ollama — Stronger model, requires Ollama running locally",
+        "label": "Ollama \u2014 Stronger model, requires Ollama running locally",
         "value": "ollama"
       },
       {
-        "label": "Local — Built-in model, limited capability",
+        "label": "Local \u2014 Built-in model, limited capability",
         "value": "local"
       },
       {
-        "label": "Custom — OpenAI or Ollama-compatible endpoint",
+        "label": "Custom \u2014 OpenAI or Ollama-compatible endpoint",
         "value": "custom"
       }
     ]
@@ -91,11 +91,11 @@
     "placeholder": false,
     "options": [
       {
-        "label": "Official TypeSafe API — https://api.typesafe.ai/v1/systemone",
+        "label": "Official TypeSafe API \u2014 https://api.typesafe.ai/v1/systemone",
         "value": "typesafe"
       },
       {
-        "label": "OpenRouter Decisions API — https://openrouter.ai/api/alpha/decisions",
+        "label": "OpenRouter Decisions API \u2014 https://openrouter.ai/api/alpha/decisions",
         "value": "openrouter"
       }
     ]
@@ -116,14 +116,14 @@
   },
   {
     "type": "string",
-    "label": "JEV Min Probability (0.05–0.99 or 5%–99% — minimum confidence to sort into an existing group)",
+    "label": "JEV Min Probability (0.05\u20130.99 or 5%\u201399% \u2014 minimum confidence to sort into an existing group)",
     "property": "extensions.zen-auto-organize.ai-jev-min-prob",
     "defaultValue": "0.70",
     "placeholder": "0.70 (or 70%)"
   },
   {
     "type": "string",
-    "label": "JEV Min Margin (0.00–0.99 or 0%–99% — minimum lead of #1 group over #2 group)",
+    "label": "JEV Min Margin (0.00\u20130.99 or 0%\u201399% \u2014 minimum lead of #1 group over #2 group)",
     "property": "extensions.zen-auto-organize.ai-jev-min-margin",
     "defaultValue": "0.15",
     "placeholder": "0.15 (or 15%)"
@@ -136,31 +136,31 @@
     "placeholder": false,
     "options": [
       {
-        "label": "ChatGPT (Sign in with ChatGPT — uses your ChatGPT subscription quota)",
+        "label": "ChatGPT (Sign in with ChatGPT \u2014 uses your ChatGPT subscription quota)",
         "value": "chatgpt"
       },
       {
-        "label": "PrimaLabs API (https://api.primalabs.ai/v1 — DeepSeek V4.1 Flash)",
+        "label": "PrimaLabs API (https://api.primalabs.ai/v1 \u2014 DeepSeek V4.1 Flash)",
         "value": "primalabs"
       },
       {
-        "label": "OpenAI-compatible — Custom Base URL, API key & model",
+        "label": "OpenAI-compatible \u2014 Custom Base URL, API key & model",
         "value": "openai"
       },
       {
-        "label": "Gemini — Google AI Studio generateContent",
+        "label": "Gemini \u2014 Google AI Studio generateContent",
         "value": "gemini"
       },
       {
-        "label": "Ollama — Local Ollama model",
+        "label": "Ollama \u2014 Local Ollama model",
         "value": "ollama"
       },
       {
-        "label": "Custom — OpenAI or Ollama-compatible endpoint",
+        "label": "Custom \u2014 OpenAI or Ollama-compatible endpoint",
         "value": "custom"
       },
       {
-        "label": "Off — Only sort into existing groups with JEV",
+        "label": "Off \u2014 Nur bestehende Ordner mit JEV (kein Fallback / keine neuen Gruppen)",
         "value": "off"
       }
     ]
@@ -173,15 +173,15 @@
     "placeholder": false,
     "options": [
       {
-        "label": "Rules first — Use domain rules, then AI for leftovers",
+        "label": "Rules first \u2014 Use domain rules, then AI for leftovers",
         "value": "rules-first"
       },
       {
-        "label": "Hybrid — Fast rules first, then AI-sort unmatched tabs every run",
+        "label": "Hybrid \u2014 Fast rules first, then AI-sort unmatched tabs every run",
         "value": "hybrid"
       },
       {
-        "label": "Full AI — Ignore rules and re-cluster all eligible tabs",
+        "label": "Full AI \u2014 Ignore rules and re-cluster all eligible tabs",
         "value": "full-ai"
       }
     ]
@@ -194,11 +194,11 @@
     "placeholder": false,
     "options": [
       {
-        "label": "Transient — Move the tab only, rules untouched",
+        "label": "Transient \u2014 Move the tab only, rules untouched",
         "value": "transient"
       },
       {
-        "label": "Always-add — Append the tab's domain to the matched rule (rules grow)",
+        "label": "Always-add \u2014 Append the tab's domain to the matched rule (rules grow)",
         "value": "always-add"
       }
     ]
@@ -211,23 +211,23 @@
     "placeholder": false,
     "options": [
       {
-        "label": "Transient — Create the group only, no rule added",
+        "label": "Transient \u2014 Create the group only, no rule added",
         "value": "transient"
       },
       {
-        "label": "Auto-add — Create the group and save it as a new rule",
+        "label": "Auto-add \u2014 Create the group and save it as a new rule",
         "value": "auto-add"
       },
       {
-        "label": "Prompt — Open Zen's edit modal to confirm name and color",
+        "label": "Prompt \u2014 Open Zen's edit modal to confirm name and color",
         "value": "prompt"
       },
       {
-        "label": "Fresh categories — Re-tidy ALL tabs into AI-invented groups, ignoring rules",
+        "label": "Fresh categories \u2014 Re-tidy ALL tabs into AI-invented groups, ignoring rules",
         "value": "fresh-categories"
       },
       {
-        "label": "Plan Mode — Preview the AI's plan, pick which groups to keep, optionally re-assign",
+        "label": "Plan Mode \u2014 Preview the AI's plan, pick which groups to keep, optionally re-assign",
         "value": "identify-only"
       }
     ]
@@ -246,7 +246,7 @@
   },
   {
     "type": "checkbox",
-    "label": "Keep Ollama model warm — preloads at browser start and keeps it loaded between clicks (faster tidy clicks; uses VRAM continuously)",
+    "label": "Keep Ollama model warm \u2014 preloads at browser start and keeps it loaded between clicks (faster tidy clicks; uses VRAM continuously)",
     "property": "extensions.zen-auto-organize.ai-ollama-warmup",
     "defaultValue": true
   },
@@ -360,5 +360,15 @@
         "value": "ollama"
       }
     ]
+  },
+  {
+    "type": "separator",
+    "label": "Debug & Diagnostics"
+  },
+  {
+    "type": "checkbox",
+    "label": "Enable debug logging (records sorting decisions, JEV scores & Fallback-LLM responses in Settings)",
+    "property": "extensions.zen-auto-organize.debug-mode",
+    "defaultValue": false
   }
 ]

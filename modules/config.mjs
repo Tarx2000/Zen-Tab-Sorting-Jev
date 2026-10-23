@@ -51,6 +51,7 @@ export const CONFIG = {
   COLLAPSED_GROUPS_PREF: "extensions.zen-auto-organize.collapsed-groups-json",
   MINIMAL_STYLE_PREF: "extensions.zen-auto-organize.minimal-style",
   STRICT_RULES_PREF: "extensions.zen-auto-organize.strict-rules",
+  DEBUG_MODE_PREF: "extensions.zen-auto-organize.debug-mode",
 
   // Collapsed-group pip (the colored marker drawn left of a collapsed group's
   // name — see userChrome.css). Every pip pref shares the `pip-` infix so one

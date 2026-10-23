@@ -38,6 +38,7 @@ import {
 } from "./remote-provider.mjs";
 import { showToast } from "./ui-toast.mjs";
 import { showPreviewModal } from "./preview-modal.mjs";
+import { recordDebugEvent } from "./debug-journal.mjs";
 import { isFullAIMode, resolveEffectiveSortingMode, resolvePass2ApplyOptions, resolveSortingPlan } from "./sorting-mode.mjs";
 
 console.log(`${LOG} click-handler.mjs loaded — v${BUILD_VERSION}`);
@@ -99,6 +100,7 @@ export const handleOrganizeClick = async () => {
 
   console.log(`${LOG} click START — v${BUILD_VERSION}`);
   const aiEngine = getAIEngine();
+  recordDebugEvent("CLICK", `Sort requested for workspace "${workspaceId}" (engine: ${aiEngine})`);
   const sortMode = resolveEffectiveSortingMode({ aiEngine, preferredMode: getAISortMode() });
   const fullAIMode = isFullAIMode(sortMode);
   const domainRulesEnabled = isDomainRulesEnabled();
@@ -376,6 +378,7 @@ export const handleOrganizeClick = async () => {
               ? resolvePass2ApplyOptions(sortMode)
               : { existingBehavior: "transient", newGroupBehavior: "transient", persistRules: false };
             const ai = applyPass2(planToApply, workspaceId, rules, applyOpts);
+            recordDebugEvent("APPLY", `Pass 2 applied: ${ai.movedToExisting} tabs moved into existing groups, ${ai.newGroupsCreated} new groups created`);
             console.log(`${LOG} Pass 2 applied: ${ai.movedToExisting} tab(s) → existing groups, ${ai.newGroupsCreated} new group(s), ${ai.rulesGrown} rule(s) grown, ${ai.newRulesCreated} new rule(s)`);
             pass2 = planToApply;
 
@@ -403,6 +406,10 @@ export const handleOrganizeClick = async () => {
           }
         } else if (pass2.skipped.length > 0) {
           console.log(`${LOG} Pass 2: nothing to group (skipped ${pass2.skipped.length} ${inputLabel})`);
+          recordDebugEvent("RESULT", `Pass 2: nothing to group (skipped ${pass2.skipped.length} tabs)`);
+          if (!pass2.failed) {
+            showToast("Keine Tabs zum Gruppieren gefunden oder Konfidenz-Schwelle nicht erreicht.");
+          }
         }
       } catch (e) {
         console.error(`${LOG} Pass 2 failed:`, e);

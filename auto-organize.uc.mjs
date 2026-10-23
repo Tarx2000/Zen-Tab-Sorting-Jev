@@ -1,3 +1,4 @@
+import { getDebugEvents, clearDebugEvents, formatDebugEventsAsText } from "./modules/debug-journal.mjs";
 // Zen Tab Sorting — entry point.
 // Loaded by Sine in both `chrome://browser/content/browser.xhtml` (the main browser
 // window) and `about:preferences*` (the settings page). Branches on window.location
@@ -54,6 +55,9 @@ const tryInitializeBrowser = () => {
       setupMinimalStylePrefObserver();
       window.ZenTabSorting = Object.freeze({
         buildVersion: BUILD_VERSION,
+        getDebugEvents,
+        clearDebugEvents,
+        formatDebugEventsAsText,
         handleOrganizeClick: async () => {
           window.ZenTabSortingLastRun = {
             startedAt: Date.now(),

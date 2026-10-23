@@ -37,6 +37,7 @@ import { chunkTabsForProvider, PROVIDER_TAB_BATCH_SIZE } from "./provider-batchi
 import { collectProviderTabMap } from "./remote-assignment-retry.mjs";
 import { fetchPageSnippet } from "./tabs.mjs";
 import { showToast } from "./ui-toast.mjs";
+import { recordDebugEvent, detectQuotaOrRateLimit } from "./debug-journal.mjs";
 
 const GENERATE_TIMEOUT_MS = 120000;
 const PROVIDER_JSON_MAX_TOKENS = 4096;
@@ -135,7 +136,8 @@ export const runOneShotFallbackNewGroups = async ({
   if (!Array.isArray(leftoverTabs) || leftoverTabs.length === 0) {
     return { newGroups: [], skipped: [] };
   }
-  if (fallbackSettings?.provider === "off") {
+  if (fallbackSettings?.provider === "off" || fallbackSettings?.provider === "none") {
+    recordDebugEvent("STAGE-2-FALLBACK", "Fallback-LLM ist ausgeschaltet; überspringe neue Gruppen.");
     return { newGroups: [], skipped: [...leftoverTabs] };
   }
   if (leftoverTabs.length < minGroupSize) {
@@ -178,6 +180,17 @@ export const runOneShotFallbackNewGroups = async ({
       console.warn(`${LOG} Fallback-LLM attempt ${attempt}/${maxAttempts} failed schema check: ${lastError}`);
     } catch (e) {
       lastError = e?.message || String(e);
+      recordDebugEvent("STAGE-2-ERROR", `Attempt ${attempt}/${maxAttempts} error: ${lastError}`);
+      const quotaCheck = detectQuotaOrRateLimit(e?.status, e?.body, lastError);
+      if (quotaCheck.isQuota) {
+        showToast(quotaCheck.userMessage);
+        return {
+          newGroups: [],
+          skipped: [...leftoverTabs],
+          failed: "quota_exceeded",
+          attempts: attempt,
+        };
+      }
       console.warn(`${LOG} Fallback-LLM attempt ${attempt}/${maxAttempts} failed: ${lastError}`);
     }
   }
@@ -280,6 +293,14 @@ export const runPass2JevHybrid = async (
     }
     if (jevSettings.apiKey && jevSettings.apiKey.trim()) {
       try {
+        recordDebugEvent(
+          "STAGE-1-JEV",
+          `Sending ${unmatchedTabs.length} tab(s) to JEV (${jevSettings.jevProvider}, model: ${jevSettings.model})`,
+          {
+            tabs: unmatchedTabs.map((t) => ({ title: t.title, hostname: t.hostname })),
+            existingGroups: validExistingGroups.map((g) => g.name),
+          },
+        );
         const jevResult = await classifyExistingGroupsWithJev({
           tabs: unmatchedTabs,
           existingGroups: validExistingGroups,
@@ -290,10 +311,24 @@ export const runPass2JevHybrid = async (
         assignedToExisting = jevResult.assignedToExisting;
         leftoverTabs = jevResult.leftoverTabs;
         leftoverSnippets = jevResult.leftoverSnippets;
+        recordDebugEvent(
+          "STAGE-1-JEV-RESULT",
+          `JEV Stage 1 completed: assigned ${assignedToExisting.length}/${unmatchedTabs.length} tab(s) to existing groups, ${leftoverTabs.length} left`,
+          {
+            assigned: assignedToExisting.map((a) => ({
+              tab: a.tabInfo.title || a.tabInfo.hostname,
+              group: a.groupName,
+              prob: a.similarity,
+              margin: a.margin,
+            })),
+            leftoverCount: leftoverTabs.length,
+          },
+        );
         console.log(
           `${LOG} JEV Stage 1: assigned ${assignedToExisting.length}/${unmatchedTabs.length} tab(s) to existing groups, ${leftoverTabs.length} left for Fallback-LLM`,
         );
       } catch (e) {
+        recordDebugEvent("STAGE-1-JEV-ERROR", `JEV Stage 1 error: ${e.message || e}`);
         console.error(`${LOG} JEV Stage 1 failed, falling through to Fallback-LLM:`, e);
         showToast(`JEV Fehler (Stufe 1): ${e.message || e} — übergebe an Fallback-LLM.`);
       }
@@ -306,7 +341,18 @@ export const runPass2JevHybrid = async (
 
   // Stage 2: One-Shot Fallback-LLM for remaining ungrouped tabs
   if (leftoverTabs.length === 0) {
+    recordDebugEvent("HYBRID-COMPLETE", "Alle Tabs wurden durch JEV Stufe 1 zugeordnet.");
     return { assignedToExisting, newGroups: [], skipped: [] };
+  }
+
+  if (fallbackSettings?.provider === "off" || fallbackSettings?.provider === "none") {
+    recordDebugEvent("STAGE-2-FALLBACK-OFF", "Fallback-LLM ist ausgeschaltet (off).");
+    if (assignedToExisting.length > 0) {
+      showToast(`JEV: ${assignedToExisting.length} Tab(s) in bestehende Ordner einsortiert (Fallback deaktiviert).`);
+    } else {
+      showToast("JEV: Keine Tabs passten in bestehende Ordner (Fallback deaktiviert).");
+    }
+    return { assignedToExisting, newGroups: [], skipped: leftoverTabs };
   }
 
   try {
@@ -331,8 +377,14 @@ export const runPass2JevHybrid = async (
       ...(stage2.attempts ? { attempts: stage2.attempts } : {}),
     };
   } catch (e) {
+    recordDebugEvent("STAGE-2-ERROR", `Fallback-LLM Stage 2 exception: ${e.message || e}`);
     console.error(`${LOG} Fallback-LLM Stage 2 failed:`, e);
-    showToast(`Fallback-LLM Fehler: ${e.message || e}`);
+    const quotaCheck = detectQuotaOrRateLimit(e?.status, e?.body, e?.message);
+    if (quotaCheck.isQuota) {
+      showToast(quotaCheck.userMessage);
+    } else {
+      showToast(`Fallback-LLM Fehler: ${e.message || e}`);
+    }
     return {
       assignedToExisting,
       newGroups: [],

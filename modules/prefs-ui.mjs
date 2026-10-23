@@ -20,6 +20,7 @@ import {
 import { fetchZenColorsFromBrowser } from "./color-picker.mjs";
 import { testProviderConnection } from "./remote-provider.mjs";
 import { testJevConnection, defaultJevModelForProvider } from "./jev.mjs";
+import { getDebugEvents, clearDebugEvents, formatDebugEventsAsText, isDebugMode } from "./debug-journal.mjs";
 import {
   readChatGPTSession,
   clearChatGPTSession,
@@ -582,6 +583,65 @@ const buildProviderTestSection = () => {
   return container;
 };
 
+const buildDebugLogsSection = () => {
+  const card = h("div", { class: "zao-debug-logs-card" });
+
+  const header = h("div", { class: "zao-debug-logs-header" });
+  const status = h("span", {
+    text: isDebugMode()
+      ? `Debug-Logs (aktiv — ${getDebugEvents().length} Einträge)`
+      : "Debug-Logs (inaktiv — aktiviere \"Enable debug logging\" oben)",
+  });
+  const actions = h("div", { class: "zao-debug-logs-actions" });
+
+  const refreshBtn = h("button", { text: "🔄 Aktualisieren" });
+  refreshBtn.className = "zao-backup-btn";
+
+  const copyBtn = h("button", { text: "📋 Logs kopieren" });
+  copyBtn.className = "zao-backup-btn";
+
+  const clearBtn = h("button", { text: "🗑️ Leeren" });
+  clearBtn.className = "zao-backup-btn";
+
+  actions.append(refreshBtn, copyBtn, clearBtn);
+  header.append(status, actions);
+
+  const viewer = h("textarea", { class: "zao-debug-logs-viewer" });
+  viewer.setAttribute("readonly", "true");
+  viewer.setAttribute("spellcheck", "false");
+  viewer.value = formatDebugEventsAsText();
+
+  const refreshViewer = () => {
+    viewer.value = formatDebugEventsAsText();
+    status.textContent = isDebugMode()
+      ? `Debug-Logs (aktiv — ${getDebugEvents().length} Einträge)`
+      : "Debug-Logs (inaktiv — aktiviere \"Enable debug logging\" oben)";
+  };
+
+  copyBtn.addEventListener("click", async () => {
+    try {
+      if (typeof navigator?.clipboard?.writeText === "function") {
+        await navigator.clipboard.writeText(viewer.value);
+      }
+      copyBtn.textContent = "✓ Kopiert!";
+      setTimeout(() => { copyBtn.textContent = "📋 Logs kopieren"; }, 2000);
+    } catch {
+      copyBtn.textContent = "Fehler!";
+      setTimeout(() => { copyBtn.textContent = "📋 Logs kopieren"; }, 2000);
+    }
+  });
+
+  refreshBtn.addEventListener("click", refreshViewer);
+  clearBtn.addEventListener("click", () => {
+    clearDebugEvents();
+    refreshViewer();
+  });
+
+  card.append(header, viewer);
+  card._zaoRefreshLogs = refreshViewer;
+  return card;
+};
+
 const performInject = (dialog) => {
   if (dialog.querySelector(".zao-rules-editor")) return;
 
@@ -616,6 +676,14 @@ const performInject = (dialog) => {
     insertAfter(content, chatGptSection, remoteSep);
   }
 
+  const debugLogsSection = buildDebugLogsSection();
+  const debugSep = findSeparatorContainer(dialog, "Debug & Diagnostics");
+  if (debugSep) {
+    insertAfter(content, debugLogsSection, debugSep);
+  } else {
+    content.appendChild(debugLogsSection);
+  }
+
   tagSeparatorContainers(dialog);
   injectSectionDescriptions(dialog);
   setupEnginePrefObserver();
@@ -637,6 +705,7 @@ const onOurDialogFound = (dialog) => {
       if (dialog.hasAttribute("open")) {
         const editor = dialog.querySelector(".zao-rules-editor");
         editor?._zaoRefresh?.("dialog open attr");
+        dialog.querySelector(".zao-debug-logs-card")?._zaoRefreshLogs?.();
         updateConditionalFields(dialog);
       }
     });

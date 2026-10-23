@@ -31,23 +31,42 @@ tab-group.zao-minimal {
 #tab-wand-button {
   appearance: none !important;
   background: transparent !important;
+  background-color: transparent !important;
   border: none !important;
-  padding: 3px 5px !important;
+  box-shadow: none !important;
+  outline: none !important;
+  padding: 2px 4px !important;
   margin: 0 !important;
-  border-radius: var(--zen-border-radius, 4px) !important;
   cursor: pointer !important;
   color: inherit !important;
+  opacity: 0.65 !important;
+  transition: opacity 120ms ease, color 120ms ease !important;
   display: inline-flex !important;
   align-items: center !important;
   justify-content: center !important;
 }
 
-#tab-wand-button:hover {
-  background: var(--zen-colors-tertiary, color-mix(in srgb, currentColor 10%, transparent)) !important;
+#tab-wand-button:hover,
+#tab-wand-button:hover:active,
+#tab-wand-button:focus-visible {
+  background: transparent !important;
+  background-color: transparent !important;
+  box-shadow: none !important;
+  outline: none !important;
+  opacity: 1 !important;
+  color: #ffffff !important;
 }
 
 #tab-wand-button svg {
   display: block !important;
+  stroke: currentColor !important;
+  transition: stroke 120ms ease, opacity 120ms ease !important;
+}
+
+#tab-wand-button:hover svg,
+#tab-wand-button:hover:active svg {
+  stroke: #ffffff !important;
+  color: #ffffff !important;
 }
 
 /* --- Toolbar button: wiggle the wand on click --- */
@@ -815,4 +834,50 @@ dialog.zao-warning-dialog::backdrop {
 }
 @keyframes zao-spin {
   to { transform: rotate(360deg); }
+}
+
+/* Debug Logs viewer card in about:preferences */
+.zao-debug-logs-card {
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 8px !important;
+  width: 100% !important;
+  box-sizing: border-box !important;
+  margin: 6px 0 14px 0 !important;
+  padding: 10px !important;
+  background: var(--zen-colors-tertiary, rgba(255, 255, 255, 0.04)) !important;
+  border: 1px solid color-mix(in srgb, currentColor 14%, transparent) !important;
+  border-radius: 8px !important;
+}
+
+.zao-debug-logs-header {
+  display: flex !important;
+  justify-content: space-between !important;
+  align-items: center !important;
+  font-size: 12px !important;
+  font-weight: 500 !important;
+  opacity: 0.85 !important;
+}
+
+.zao-debug-logs-actions {
+  display: flex !important;
+  gap: 6px !important;
+}
+
+.zao-debug-logs-viewer {
+  width: 100% !important;
+  box-sizing: border-box !important;
+  height: 180px !important;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace !important;
+  font-size: 11px !important;
+  line-height: 1.45 !important;
+  color: inherit !important;
+  background: var(--zen-colors-input-bg, rgba(0, 0, 0, 0.25)) !important;
+  border: 1px solid color-mix(in srgb, currentColor 12%, transparent) !important;
+  border-radius: 6px !important;
+  padding: 8px !important;
+  resize: vertical !important;
+  white-space: pre !important;
+  overflow-x: auto !important;
+  overflow-y: scroll !important;
 }
