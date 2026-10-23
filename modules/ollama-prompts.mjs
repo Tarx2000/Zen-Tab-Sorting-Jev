@@ -48,9 +48,14 @@ export const buildOneShotNewGroupsPrompt = (leftoverTabs, snippets = [], existin
     ? `\nAlready existing workspace groups (do NOT reuse these names; create NEW group names for the remaining tabs):\n${existingGroupNames.map((n) => `- ${n}`).join("\n")}\n`
     : "";
 
+  const lastIdx = Math.max(0, leftoverTabs.length - 1);
+  const exampleObj = leftoverTabs.length >= 3
+    ? `{"0": "Project Alpha", "1": "Project Alpha", "2": "skipped"}`
+    : `{"0": "Project Alpha", "1": "Project Alpha"}`;
+
   return `You are organizing browser tabs that did not fit into any existing tab group. Look at ALL of the ungrouped tabs below together in one shot, invent sensible NEW group names for related tabs, and assign each tab to its new group.
 ${existingNote}
-Ungrouped Tabs:
+Ungrouped Tabs (indices 0 to ${lastIdx}):
 ${renderTabList(leftoverTabs, snippets)}
 
 Each tab line may include a Summary with bracketed page signals:
@@ -65,9 +70,21 @@ Guidelines:
 - If a tab is an isolated outlier/exotic singleton that does not share a meaningful group with any other tab in this list, assign it "skipped" so it stays ungrouped.
 - Do not echo a tab's full title or raw hostname as the group name.
 - Do not include meta words like "new", "category", "label", "topic", or "group" in the group name.
-- Return raw JSON only. Do not use markdown code fences, prose, or explanations.
 
-Output ONLY a JSON object mapping EVERY tab number shown above (as a string key) to either its chosen new group name or "skipped". Do not omit any tab.`;
+STRICT OUTPUT SCHEMA:
+- Return ONLY a valid raw JSON object (no markdown fences, no \`\`\`json, no prose before or after).
+- Every tab index from "0" to "${lastIdx}" MUST be present as a string key.
+- Every value MUST be a non-empty string: either the new group name (1-3 words, Title Case) or "skipped".
+- Example valid output: ${exampleObj}`;
+};
+
+export const buildOneShotSchemaRetryPrompt = (baseInput, schemaError, attemptNumber, tabCount) => {
+  const lastIdx = Math.max(0, tabCount - 1);
+  return `${baseInput}
+
+IMPORTANT — RETRY ATTEMPT ${attemptNumber}/3 (PREVIOUS RESPONSE FAILED SCHEMA VALIDATION):
+Reason: ${schemaError}
+You MUST respond with ONLY a single flat JSON object mapping every string key from "0" through "${lastIdx}" to a non-empty string value (either a 1-3 word Title Case group name or "skipped"). Do not wrap in markdown code blocks and do not omit any index.`;
 };
 
 // ─── Classify (Phase 3: fit into existing) ──────────────────────────────────
@@ -107,14 +124,6 @@ Output ONLY a JSON object with this exact shape:
 }`;
 
 // ─── Unified (Phase 4b: single-call classify + invent) ──────────────────────
-//
-// Prompt design notes for small local models:
-//   - Avoid imperative phrases the model might literally echo back (it has
-//     returned "New Category: Gaming", "Recipes", "Skipped" verbatim before).
-//   - Prefer descriptive phrasing over directive labels.
-//   - State the "prefer broad clusters" constraint as a concrete observation
-//     (3 gaming tabs → 1 category) rather than abstract instruction.
-//   - Never include the literal word "category" in surrounding example text.
 
 export const buildUnifiedPrompt = (rules, unmatched, snippets) =>
   `Sort the tabs below into a small number of buckets. Look at all of them together before deciding.
@@ -174,10 +183,6 @@ Guidelines:
 Output ONLY a JSON object mapping EVERY tab number shown above (string key) to the chosen category name or "skipped". Do not omit any tab.`;
 
 // ─── Merge (Phase 4b polish: consolidate over-specialized categories) ───────
-//
-// The schema is a flat key-value map (original → target) rather than nested
-// arrays of objects. Small LLMs reliably emit this shape; nested arrays of
-// {name, from:[]} consistently produced bad JSON in testing.
 
 export const buildMergePrompt = (newGroups) => {
   const categoryLines = newGroups.map((g) => {

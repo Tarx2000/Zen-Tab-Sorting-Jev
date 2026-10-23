@@ -2,7 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { buildProviderRequest } from "../modules/provider-requests.mjs";
-import { runPass2JevHybrid } from "../modules/remote-provider.mjs";
+import {
+  runOneShotFallbackNewGroups,
+  runPass2JevHybrid,
+  validateFallbackSchema,
+} from "../modules/remote-provider.mjs";
 
 test("Given PrimaLabs provider When building request Then api.primalabs.ai/v1/chat/completions and DeepSeek model are used", () => {
   const req = buildProviderRequest(
@@ -21,6 +25,107 @@ test("Given PrimaLabs provider When building request Then api.primalabs.ai/v1/ch
   assert.equal(req.init.headers.authorization, "Bearer sk-test");
   const body = JSON.parse(req.init.body);
   assert.equal(body.model, "primalabs-ai/DeepSeek-V4.1-Flash-1017");
+});
+
+test("Given Fallback-LLM output When validateFallbackSchema runs Then missing tab keys or non-string labels are rejected", () => {
+  assert.deepEqual(validateFallbackSchema({ "0": "Design", "1": "skipped" }, 2), { ok: true });
+  assert.equal(validateFallbackSchema({ "0": "Design" }, 2).ok, false);
+  assert.equal(validateFallbackSchema({ "0": "Design", "1": 123 }, 2).ok, false);
+  assert.equal(validateFallbackSchema({ "0": "Design", "1": "   " }, 2).ok, false);
+});
+
+test("Given Fallback-LLM returns broken schema on first 2 attempts and valid schema on 3rd attempt When runOneShotFallbackNewGroups runs Then it retries with repair instructions and succeeds on attempt 3", async () => {
+  const leftoverTabs = [
+    { hostname: "figma.com", title: "App Wireframe", url: "" },
+    { hostname: "dribbble.com", title: "UI Inspiration", url: "" },
+  ];
+
+  let calls = 0;
+  const result = await runOneShotFallbackNewGroups({
+    leftoverTabs,
+    snippets: ["[type: design]", "[type: design]"],
+    existingGroupNames: ["Dev"],
+    fallbackSettings: {
+      provider: "primalabs",
+      consentToSendData: true,
+      endpoint: "https://api.primalabs.ai/v1",
+      apiKey: "sk-test",
+      model: "primalabs-ai/DeepSeek-V4.1-Flash-1017",
+    },
+    fetchImpl: async (_url, init) => {
+      calls += 1;
+      const bodyObj = JSON.parse(init.body);
+      const userContent = bodyObj.messages[0].content;
+
+      if (calls === 1) {
+        // Attempt 1: non-JSON prose
+        return new Response(
+          JSON.stringify({ choices: [{ message: { content: "Sorry, I cannot format that as JSON." } }] }),
+          { status: 200 },
+        );
+      }
+      if (calls === 2) {
+        // Verify retry prompt mentions attempt 2/3 and the previous failure
+        assert.match(userContent, /RETRY ATTEMPT 2\/3/);
+        // Attempt 2: valid JSON, but missing tab index "1" (invalid schema!)
+        return new Response(
+          JSON.stringify({ choices: [{ message: { content: JSON.stringify({ "0": "UI Design" }) } }] }),
+          { status: 200 },
+        );
+      }
+      // Attempt 3: valid schema with all tab indices "0" and "1"
+      assert.match(userContent, /RETRY ATTEMPT 3\/3/);
+      assert.match(userContent, /Missing required tab index key "1"/);
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: JSON.stringify({ "0": "UI Design", "1": "UI Design" }) } }],
+        }),
+        { status: 200 },
+      );
+    },
+  });
+
+  assert.equal(calls, 3);
+  assert.equal(result.attempts, 3);
+  assert.equal(result.failed, undefined);
+  assert.equal(result.newGroups.length, 1);
+  assert.equal(result.newGroups[0].name, "UI Design");
+  assert.deepEqual(result.newGroups[0].tabs, leftoverTabs);
+});
+
+test("Given Fallback-LLM fails schema validation on all 3 attempts When runOneShotFallbackNewGroups runs Then it stops after 3 attempts, reports schema_validation_failed, and leaves tabs ungrouped", async () => {
+  const leftoverTabs = [
+    { hostname: "a.example", title: "Tab A", url: "" },
+    { hostname: "b.example", title: "Tab B", url: "" },
+  ];
+
+  let calls = 0;
+  const result = await runOneShotFallbackNewGroups({
+    leftoverTabs,
+    snippets: ["", ""],
+    existingGroupNames: [],
+    fallbackSettings: {
+      provider: "primalabs",
+      consentToSendData: true,
+      endpoint: "https://api.primalabs.ai/v1",
+      apiKey: "sk-test",
+      model: "primalabs-ai/DeepSeek-V4.1-Flash-1017",
+    },
+    fetchImpl: async () => {
+      calls += 1;
+      // Always returns incomplete schema missing key "1"
+      return new Response(
+        JSON.stringify({ choices: [{ message: { content: JSON.stringify({ "0": "OnlyZero" }) } }] }),
+        { status: 200 },
+      );
+    },
+  });
+
+  assert.equal(calls, 3);
+  assert.equal(result.attempts, 3);
+  assert.match(result.failed, /^schema_validation_failed:/);
+  assert.deepEqual(result.newGroups, []);
+  assert.deepEqual(result.skipped, leftoverTabs);
 });
 
 test("Given JEV + Fallback-LLM hybrid mode When sorting ungrouped tabs Then JEV assigns existing groups, Fallback-LLM groups >=2 leftovers in one shot, and 1-tab outliers stay skipped", async () => {
@@ -53,28 +158,24 @@ test("Given JEV + Fallback-LLM hybrid mode When sorting ungrouped tabs Then JEV 
       return new Response(
         JSON.stringify({
           answers: {
-            // Tab 0 (GitHub PR) -> confident match for "Work Dev"
             tab_0: {
               type: "choice",
               choice: "Work Dev",
               probabilities: { "Work Dev": 0.91, "Business Marketing": 0.05, __none__: 0.04 },
               confidence: 0.91,
             },
-            // Tab 1 (Canva Wedding Invitation) -> does NOT fit "Business Marketing" because context is private!
             tab_1: {
               type: "choice",
               choice: "__none__",
               probabilities: { __none__: 0.78, "Business Marketing": 0.18, "Work Dev": 0.04 },
               confidence: 0.78,
             },
-            // Tab 2 (Pinterest Wedding Flowers) -> __none__
             tab_2: {
               type: "choice",
               choice: "__none__",
               probabilities: { __none__: 0.89, "Business Marketing": 0.07, "Work Dev": 0.04 },
               confidence: 0.89,
             },
-            // Tab 3 (Exotic tool) -> __none__
             tab_3: {
               type: "choice",
               choice: "__none__",
@@ -87,11 +188,8 @@ test("Given JEV + Fallback-LLM hybrid mode When sorting ungrouped tabs Then JEV 
       );
     }
 
-    // Call 2: One-Shot Fallback-LLM (ChatGPT SIWC /v1/responses or PrimaLabs)
-    // Receives the 3 leftover tabs (indices 0, 1, 2 of leftoverTabs = original tabs 1, 2, 3)
+    // Call 2: One-Shot Fallback-LLM (ChatGPT SIWC /v1/responses)
     if (url === "https://api.openai.com/v1/responses") {
-      // Suppose the LLM proposes "Wedding Planning" for tabs 0 & 1, and even if it proposes
-      // a 1-tab group "Calculators" for tab 2, the >=2 rule demotes "Calculators" to skipped!
       const sse = [
         'data: {"type":"response.output_text.delta","delta":"{\\"0\\": \\"Wedding Planning\\", \\"1\\": \\"Wedding Planning\\", \\"2\\": \\"Calculators\\"}"}',
         'data: [DONE]',
@@ -130,21 +228,17 @@ test("Given JEV + Fallback-LLM hybrid mode When sorting ungrouped tabs Then JEV 
     fetchImpl: fakeFetch,
   });
 
-  // Exactly 2 calls total: 1 JEV batch + 1 One-Shot Fallback-LLM call
   assert.equal(networkCalls.length, 2);
   assert.equal(networkCalls[0].url, "https://api.typesafe.ai/v1/systemone");
   assert.equal(networkCalls[1].url, "https://api.openai.com/v1/responses");
 
-  // Tab 0 assigned to existing group "Work Dev"
   assert.equal(result.assignedToExisting.length, 1);
   assert.equal(result.assignedToExisting[0].groupName, "Work Dev");
   assert.equal(result.assignedToExisting[0].tabInfo, ungroupedTabs[0]);
 
-  // Tabs 1 & 2 grouped into new group "Wedding Planning" (Canva + Pinterest by private context!)
   assert.equal(result.newGroups.length, 1);
   assert.equal(result.newGroups[0].name, "Wedding Planning");
   assert.deepEqual(result.newGroups[0].tabs, [ungroupedTabs[1], ungroupedTabs[2]]);
 
-  // Tab 3 (exotic singleton) stayed ungrouped in skipped
   assert.deepEqual(result.skipped, [ungroupedTabs[3]]);
 });

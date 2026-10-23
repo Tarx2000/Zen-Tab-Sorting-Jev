@@ -7,7 +7,7 @@
 //      - Stage 2: All remaining ungrouped tabs are sent in a single One-Shot call
 //        to the configured Fallback-LLM (ChatGPT SIWC, PrimaLabs, OpenAI-compatible,
 //        Gemini, Ollama, or Custom) to create new groups (min 2 tabs per new group)
-//        and leave true outliers ungrouped (`skipped`).
+//        with strict JSON schema validation and up to 3 automatic retry attempts.
 //   2. Standalone remote providers (`openai`, `primalabs`, `chatgpt`, `gemini`, `custom`).
 
 import { LOG } from "./config.mjs";
@@ -30,6 +30,7 @@ import {
   buildUnifiedPrompt,
   buildFreshPrompt,
   buildOneShotNewGroupsPrompt,
+  buildOneShotSchemaRetryPrompt,
 } from "./ollama-prompts.mjs";
 import { consolidateNewGroups } from "./new-group-consolidation.mjs";
 import { chunkTabsForProvider, PROVIDER_TAB_BATCH_SIZE } from "./provider-batching.mjs";
@@ -42,15 +43,69 @@ const PROVIDER_JSON_MAX_TOKENS = 4096;
 const PROVIDER_FRESH_JSON_MAX_TOKENS = 4096;
 const PROVIDER_FRESH_TAB_BATCH_SIZE = 35;
 export const FALLBACK_MIN_NEW_GROUP_TABS = 2;
+export const MAX_FALLBACK_SCHEMA_ATTEMPTS = 3;
 
 const stripMetaPrefix = (s) => s
   .replace(/^\s*(?:new\s+)?(?:category|label|topic|bucket|group)\s*[:\-–]\s*/i, "")
   .trim();
 
-// One-click connectivity probe for the settings dialog's "Test connection"
-// button. Runs the SAME readiness gate as a real sort (consent stays required —
-// a test request still sends data to the provider), then issues a minimal
-// probe. Returns a plain result object; never throws.
+/**
+ * Validate that a parsed JSON object from the Fallback-LLM strictly conforms to
+ * our expected tab-grouping schema for `tabCount` tabs.
+ *
+ * Accepted schema:
+ *   1. Primary flat map: `{ "0": "Group Name", "1": "skipped", ... }` where EVERY
+ *      index from `"0"` to `"${tabCount - 1}"` is present and mapped to a non-empty string.
+ *   2. Structured groups object: `{ "groups": [{ "name": string, "tabs": number[] }], "skipped"?: number[] }`
+ *      with valid group names and valid tab indices.
+ *
+ * @returns {{ ok: true } | { ok: false, error: string }}
+ */
+export const validateFallbackSchema = (parsed, tabCount) => {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { ok: false, error: "Response is not a JSON object" };
+  }
+
+  if (Array.isArray(parsed.groups)) {
+    if (parsed.groups.length === 0 && !Array.isArray(parsed.skipped)) {
+      return { ok: false, error: "JSON 'groups' array is empty and 'skipped' is missing" };
+    }
+    for (let gIdx = 0; gIdx < parsed.groups.length; gIdx++) {
+      const grp = parsed.groups[gIdx];
+      if (!grp || typeof grp !== "object") {
+        return { ok: false, error: `groups[${gIdx}] is not an object` };
+      }
+      if (typeof grp.name !== "string" || !grp.name.trim() || grp.name.trim().length > 80) {
+        return { ok: false, error: `groups[${gIdx}].name must be a non-empty string (<= 80 chars)` };
+      }
+      if (!Array.isArray(grp.tabs) || grp.tabs.some((idx) => !Number.isInteger(Number(idx)) || Number(idx) < 0 || Number(idx) >= tabCount)) {
+        return { ok: false, error: `groups[${gIdx}].tabs must be an array of valid tab indices (0..${tabCount - 1})` };
+      }
+    }
+    return { ok: true };
+  }
+
+  for (let i = 0; i < tabCount; i++) {
+    const key = String(i);
+    if (!(key in parsed)) {
+      return { ok: false, error: `Missing required tab index key "${key}" (expected all keys "0".."${tabCount - 1}")` };
+    }
+    const val = parsed[key];
+    if (typeof val !== "string") {
+      return { ok: false, error: `Value for tab "${key}" must be a string, got ${typeof val}` };
+    }
+    const trimmed = stripMetaPrefix(val.trim());
+    if (!trimmed) {
+      return { ok: false, error: `Value for tab "${key}" is empty` };
+    }
+    if (trimmed.length > 80) {
+      return { ok: false, error: `Value for tab "${key}" exceeds maximum group name length (80 chars)` };
+    }
+  }
+
+  return { ok: true };
+};
+
 export const testProviderConnection = async (settings = readProviderSettings(globalThis.Services?.prefs)) => {
   const readiness = getProviderReadiness(settings);
   if (!readiness.ok) {
@@ -66,14 +121,15 @@ export const testProviderConnection = async (settings = readProviderSettings(glo
 
 // Stage 2: One-Shot Fallback-LLM for tabs that JEV did not confidently place into
 // an existing workspace group (or all ungrouped tabs when 0 groups exist).
-// Sends all leftover tabs together in ONE request so the LLM has full context,
-// and enforces `minGroupSize` (default 2) so isolated singletons stay ungrouped.
+// Includes a up-to-3x retry mechanism with strict schema validation and clear user
+// error notifications if all 3 attempts fail.
 export const runOneShotFallbackNewGroups = async ({
   leftoverTabs,
   snippets = [],
   existingGroupNames = [],
   fallbackSettings = readFallbackProviderSettings(globalThis.Services?.prefs),
   minGroupSize = FALLBACK_MIN_NEW_GROUP_TABS,
+  maxAttempts = MAX_FALLBACK_SCHEMA_ATTEMPTS,
   fetchImpl,
 }) => {
   if (!Array.isArray(leftoverTabs) || leftoverTabs.length === 0) {
@@ -82,8 +138,6 @@ export const runOneShotFallbackNewGroups = async ({
   if (fallbackSettings?.provider === "off") {
     return { newGroups: [], skipped: [...leftoverTabs] };
   }
-  // If fewer tabs remain than the minimum group size (e.g. only 1 tab left),
-  // it cannot form a multi-tab group, so leave it ungrouped without an extra API call.
   if (leftoverTabs.length < minGroupSize) {
     return { newGroups: [], skipped: [...leftoverTabs] };
   }
@@ -91,8 +145,8 @@ export const runOneShotFallbackNewGroups = async ({
   const readiness = getProviderReadiness(fallbackSettings);
   if (!readiness.ok) {
     const msg = readiness.reason === "consent_required"
-      ? "Fallback LLM needs data-sending consent before creating new groups."
-      : `Fallback LLM (${fallbackSettings?.provider || "unknown"}) is not ready: ${readiness.reason}`;
+      ? "Fallback-LLM benötigt Daten-Freigabe (Consent Checkbox) in den Einstellungen."
+      : `Fallback-LLM (${fallbackSettings?.provider || "unknown"}) ist nicht bereit: ${readiness.reason}`;
     showToast(msg);
     return { newGroups: [], skipped: [...leftoverTabs], failed: readiness.reason };
   }
@@ -101,13 +155,48 @@ export const runOneShotFallbackNewGroups = async ({
     (existingGroupNames || []).map((n) => String(n || "").trim().toLowerCase()).filter(Boolean),
   );
 
-  const oneShotInput = buildOneShotNewGroupsPrompt(leftoverTabs, snippets, existingGroupNames);
-  const parsed = await providerJson(readiness.value, oneShotInput, PROVIDER_JSON_MAX_TOKENS, fetchImpl);
+  const baseInput = buildOneShotNewGroupsPrompt(leftoverTabs, snippets, existingGroupNames);
+  let parsed = null;
+  let lastError = "";
+  let attemptsUsed = 0;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    attemptsUsed = attempt;
+    const currentInput = attempt === 1
+      ? baseInput
+      : buildOneShotSchemaRetryPrompt(baseInput, lastError, attempt, leftoverTabs.length);
+
+    try {
+      const candidate = await providerJson(readiness.value, currentInput, PROVIDER_JSON_MAX_TOKENS, fetchImpl);
+      const validation = validateFallbackSchema(candidate, leftoverTabs.length);
+      if (validation.ok) {
+        parsed = candidate;
+        lastError = "";
+        break;
+      }
+      lastError = validation.error;
+      console.warn(`${LOG} Fallback-LLM attempt ${attempt}/${maxAttempts} failed schema check: ${lastError}`);
+    } catch (e) {
+      lastError = e?.message || String(e);
+      console.warn(`${LOG} Fallback-LLM attempt ${attempt}/${maxAttempts} failed: ${lastError}`);
+    }
+  }
+
+  if (!parsed) {
+    const userMessage = `Fallback-LLM Schema-Fehler nach ${attemptsUsed} Versuchen (${lastError}). Übrige Tabs bleiben ungruppiert.`;
+    console.error(`${LOG} ${userMessage}`);
+    showToast(userMessage);
+    return {
+      newGroups: [],
+      skipped: [...leftoverTabs],
+      failed: `schema_validation_failed: ${lastError}`,
+      attempts: attemptsUsed,
+    };
+  }
 
   const groupsByLower = new Map();
   const skipped = [];
 
-  // Support both flat map `{"0": "Group", "1": "skipped"}` and `{"groups": [...]}`
   if (Array.isArray(parsed?.groups)) {
     const seen = new Set();
     for (const grp of parsed.groups) {
@@ -152,16 +241,10 @@ export const runOneShotFallbackNewGroups = async ({
     }
   }
 
-  return { newGroups, skipped };
+  return { newGroups, skipped, attempts: attemptsUsed };
 };
 
 // Complete 2-stage JEV + One-Shot Fallback-LLM pipeline:
-//   1. Enrich ungrouped tabs with page snippets (`fetchPageSnippet`).
-//   2. If workspace has existing `<tab-group>` folders, run JEV (`classifyExistingGroupsWithJev`)
-//      to place tabs that match existing groups with high probability & margin.
-//   3. Send all leftover tabs in ONE shot to the Fallback-LLM (`runOneShotFallbackNewGroups`)
-//      to invent new group names and group related tabs (>= 2 tabs per group), while leaving
-//      true exotic singletons ungrouped (`skipped`).
 export const runPass2JevHybrid = async (
   unmatchedTabs,
   existingGroups = [],
@@ -169,6 +252,7 @@ export const runPass2JevHybrid = async (
     jevSettings = readJevSettings(globalThis.Services?.prefs),
     fallbackSettings = readFallbackProviderSettings(globalThis.Services?.prefs),
     minGroupSize = FALLBACK_MIN_NEW_GROUP_TABS,
+    maxAttempts = MAX_FALLBACK_SCHEMA_ATTEMPTS,
     fetchImpl,
     preFetchedSnippets,
   } = {},
@@ -211,7 +295,7 @@ export const runPass2JevHybrid = async (
         );
       } catch (e) {
         console.error(`${LOG} JEV Stage 1 failed, falling through to Fallback-LLM:`, e);
-        showToast(`JEV classification error: ${e.message || e}`);
+        showToast(`JEV Fehler (Stufe 1): ${e.message || e} — übergebe an Fallback-LLM.`);
       }
     } else {
       console.warn(`${LOG} JEV key not configured; skipping Stage 1 and sending tabs to Fallback-LLM`);
@@ -233,6 +317,7 @@ export const runPass2JevHybrid = async (
       existingGroupNames,
       fallbackSettings,
       minGroupSize,
+      maxAttempts,
       fetchImpl,
     });
     console.log(
@@ -243,10 +328,11 @@ export const runPass2JevHybrid = async (
       newGroups: stage2.newGroups,
       skipped: stage2.skipped,
       ...(stage2.failed ? { failed: stage2.failed } : {}),
+      ...(stage2.attempts ? { attempts: stage2.attempts } : {}),
     };
   } catch (e) {
     console.error(`${LOG} Fallback-LLM Stage 2 failed:`, e);
-    showToast(`Fallback-LLM failed: ${e.message || e}`);
+    showToast(`Fallback-LLM Fehler: ${e.message || e}`);
     return {
       assignedToExisting,
       newGroups: [],
@@ -458,12 +544,6 @@ const extractJsonObjectText = (text) => {
   return raw;
 };
 
-// Resolve which fetch to use. In the about:preferences context (where the
-// "Test connection" button lives) the document's CSP can block fetches to
-// external provider hosts with a bare "NetworkError" — so route requests
-// through the main browser window's fetch instead. In the browser window this
-// resolves to the same fetch as before, and in Node (tests stub
-// globalThis.fetch) Services is undefined so the global is used unchanged.
 const resolveFetch = (customFetch) => {
   if (typeof customFetch === "function") return customFetch;
   try {
@@ -490,10 +570,6 @@ const sendProviderRequest = async (request, fetchImpl) => {
   }
 };
 
-// Which OpenAI parameter shape an endpoint and model accepted, remembered so a
-// sort pays the extra round trip once rather than on every batch. In-memory on
-// purpose: the shape belongs to the model, not to the user's settings, and
-// re-learning it after a restart costs one rejected request.
 const paramStyleByTarget = new Map();
 
 const providerText = async (settings, inputStr, maxTokens, fetchImpl) => {
@@ -508,8 +584,6 @@ const providerText = async (settings, inputStr, maxTokens, fetchImpl) => {
   }
 
   const kind = getProviderKind(effectiveSettings);
-  // Only the OpenAI-shaped kinds have the parameter split. Gemini, ChatGPT SIWC,
-  // and Ollama take their own parameters and are left alone.
   const adaptive = kind === "openai";
   const target = `${effectiveSettings.endpoint || ""}\x00${effectiveSettings.model || ""}`;
   const cached = adaptive ? paramStyleByTarget.get(target) : null;
@@ -522,8 +596,6 @@ const providerText = async (settings, inputStr, maxTokens, fetchImpl) => {
   let response;
   let body;
   let style;
-  // Walk the ladder while the provider is specifically rejecting the shape of
-  // the request. Any other failure is the caller's problem, not ours.
   for (const candidate of ladder) {
     style = candidate;
     ({ response, body } = await sendProviderRequest(
