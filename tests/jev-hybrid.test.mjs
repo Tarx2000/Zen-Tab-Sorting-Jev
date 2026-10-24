@@ -335,3 +335,23 @@ test("Given JEV Stage 1 matches tabs but Fallback-LLM hits ChatGPT subscription 
   assert.equal(result.failed, "quota_exceeded");
   assert.match(result.failedMessage, /Subscription-Sharing-Limit/);
 });
+
+test("A terminal ChatGPT refresh error stops the fallback without schema repair retries", async () => {
+  let calls = 0;
+  const tabs = [{ title: "One" }, { title: "Two" }];
+  const result = await runOneShotFallbackNewGroups({
+    leftoverTabs: tabs,
+    fallbackSettings: { provider: "chatgpt", consentToSendData: true, model: "test-model",
+      clientId: "fallback-revoked-client", accessToken: "expired", refreshToken: "revoked", expiresAt: 1 },
+    fetchImpl: async () => {
+      calls++;
+      return Response.json({ error: "invalid_grant" }, { status: 400 });
+    },
+  });
+  assert.equal(calls, 1);
+  assert.equal(result.attempts, 1);
+  assert.equal(result.failed, "chatgpt_sign_in_required");
+  assert.match(result.failedMessage, /erneut mit ChatGPT anmelden/);
+  assert.doesNotMatch(result.failedMessage, /Schema/);
+  assert.deepEqual(result.skipped, tabs);
+});

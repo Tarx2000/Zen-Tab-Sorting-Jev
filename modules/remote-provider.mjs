@@ -11,7 +11,7 @@
 //   2. Standalone remote providers (`openai`, `primalabs`, `chatgpt`, `gemini`, `custom`).
 
 import { LOG } from "./config.mjs";
-import { ensureValidChatGPTToken } from "./chatgpt-auth.mjs";
+import { ChatGPTSignInRequiredError, ensureValidChatGPTToken } from "./chatgpt-auth.mjs";
 import { classifyExistingGroupsWithJev, readJevSettings } from "./jev.mjs";
 import { getProviderReadiness } from "./provider-readiness.mjs";
 import {
@@ -146,6 +146,11 @@ export const runOneShotFallbackNewGroups = async ({
 
   const readiness = getProviderReadiness(fallbackSettings);
   if (!readiness.ok) {
+    if (fallbackSettings?.provider === "chatgpt" && readiness.missingFields?.includes("accessToken")) {
+      const error = new ChatGPTSignInRequiredError();
+      showToast(error.message, { type: "warning" });
+      return { newGroups: [], skipped: [...leftoverTabs], failed: error.code, failedMessage: error.message };
+    }
     const msg = readiness.reason === "consent_required"
       ? "Fallback-LLM benötigt Daten-Freigabe (Consent Checkbox) in den Einstellungen."
       : `Fallback-LLM (${fallbackSettings?.provider || "unknown"}) ist nicht bereit: ${readiness.reason}`;
@@ -180,6 +185,11 @@ export const runOneShotFallbackNewGroups = async ({
       console.warn(`${LOG} Fallback-LLM attempt ${attempt}/${maxAttempts} failed schema check: ${lastError}`);
     } catch (e) {
       lastError = e?.message || String(e);
+      if (e?.requiresSignIn) {
+        showToast(lastError, { type: "warning" });
+        return { newGroups: [], skipped: [...leftoverTabs], failed: e.code,
+          failedMessage: lastError, attempts: attempt };
+      }
       recordDebugEvent("STAGE-2-ERROR", `Attempt ${attempt}/${maxAttempts} error: ${lastError}`);
       const quotaCheck = detectQuotaOrRateLimit(e?.status, e?.body, lastError);
       if (quotaCheck.isQuota) {

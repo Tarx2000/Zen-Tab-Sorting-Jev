@@ -24,6 +24,26 @@ import { CONFIG, LOG } from "./config.mjs";
 
 const BEARER_HEADER_KEY = ["author", "ization"].join("");
 
+export class ChatGPTSignInRequiredError extends Error {
+  constructor() {
+    super("ChatGPT-Anmeldung ist abgelaufen oder wurde widerrufen. Bitte in den Mod-Einstellungen erneut mit ChatGPT anmelden.");
+    this.name = "ChatGPTSignInRequiredError";
+    this.code = "chatgpt_sign_in_required";
+    this.requiresSignIn = true;
+  }
+}
+
+// Sine can load this module separately in preferences and browser windows.
+// Keep the refresh lock on the shared chrome window to serialize rotating tokens.
+const localRefreshes = new Map();
+const refreshes = () => {
+  try {
+    const host = globalThis.Services?.appShell?.hiddenDOMWindow;
+    if (host) return host._zaoChatGPTRefreshes ||= new Map();
+  } catch {}
+  return localRefreshes;
+};
+
 export const SIWC_CONSTANTS = Object.freeze({
   ISSUER: "https://auth.openai.com",
   AUTHORIZE_URL: "https://auth.openai.com/api/accounts/authorize",
@@ -270,9 +290,23 @@ export const refreshChatGPTToken = async ({ clientId, refreshToken }, fetchImpl)
   });
   const text = await response.text();
   if (!response.ok) {
-    throw new Error(`ChatGPT token refresh failed (HTTP ${response.status}): ${text.slice(0, 200)}`);
+    let code;
+    try {
+      const data = JSON.parse(text);
+      code = typeof data.error === "string" ? data.error : data.error?.code;
+    } catch {}
+    if (["invalid_grant", "invalid_refresh_token", "token_expired", "refresh_token_expired",
+      "refresh_token_invalidated", "refresh_token_reused"].includes(code)) {
+      throw new ChatGPTSignInRequiredError();
+    }
+    const error = new Error(`ChatGPT-Token konnte nicht erneuert werden (HTTP ${response.status}). Bitte später erneut versuchen.`);
+    error.status = response.status;
+    throw error;
   }
   const data = JSON.parse(text);
+  if (typeof data.access_token !== "string" || !data.access_token.trim()) {
+    throw new Error("ChatGPT-Tokenantwort enthält kein Zugriffstoken.");
+  }
   const claims = decodeJwtClaims(data.id_token);
   const expiresInSec = Number.isFinite(data.expires_in) ? data.expires_in : 3600;
   return {
@@ -291,9 +325,15 @@ export const ensureValidChatGPTToken = async (
   fetchImpl,
   sessionOverride = null,
 ) => {
-  const session = sessionOverride || readChatGPTSession(prefs);
+  const stored = readChatGPTSession(prefs);
+  if (stored && sessionOverride && stored.clientId !== sessionOverride.clientId) {
+    throw new ChatGPTSignInRequiredError();
+  }
+  // Provider settings are snapshots. Always prefer credentials persisted by a
+  // previous batch, window, or model-discovery request for the same registration.
+  const session = stored || sessionOverride;
   if (!session || (!session.accessToken && !session.refreshToken)) {
-    throw new Error("Not signed in with ChatGPT. Click 'Sign in with ChatGPT' in Settings first.");
+    throw new ChatGPTSignInRequiredError();
   }
 
   const isExpired =
@@ -305,24 +345,36 @@ export const ensureValidChatGPTToken = async (
   }
 
   if (!session.refreshToken || !session.clientId) {
-    if (session.accessToken) return session.accessToken;
-    throw new Error("ChatGPT session expired and cannot be refreshed. Please sign in again.");
+    throw new ChatGPTSignInRequiredError();
   }
 
-  const refreshed = await refreshChatGPTToken(
-    { clientId: session.clientId, refreshToken: session.refreshToken },
-    fetchImpl,
-  );
-  const merged = {
-    ...session,
-    ...refreshed,
-    email: refreshed.email || session.email || "",
-    subject: refreshed.subject || session.subject || "",
-  };
-  if (!sessionOverride) {
-    writeChatGPTSession(prefs, merged);
-  }
-  return merged.accessToken;
+  const locks = refreshes();
+  const key = session.clientId;
+  if (locks.has(key)) return locks.get(key);
+  const pending = (async () => {
+    let refreshed;
+    try {
+      refreshed = await refreshChatGPTToken(session, fetchImpl);
+    } catch (error) {
+      const current = readChatGPTSession(prefs);
+      if (error.requiresSignIn && current?.clientId === session.clientId &&
+          current.refreshToken === session.refreshToken) clearChatGPTSession(prefs);
+      throw error;
+    }
+    const merged = { ...session, ...refreshed,
+      email: refreshed.email || session.email || "",
+      subject: refreshed.subject || session.subject || "" };
+    const current = readChatGPTSession(prefs);
+    // A sign-out or new sign-in during the request must never be overwritten.
+    if (stored && (current?.clientId !== session.clientId || current.refreshToken !== session.refreshToken)) {
+      throw new ChatGPTSignInRequiredError();
+    }
+    if (stored) writeChatGPTSession(prefs, merged);
+    return merged.accessToken;
+  })();
+  locks.set(key, pending);
+  try { return await pending; }
+  finally { if (locks.get(key) === pending) locks.delete(key); }
 };
 
 export const buildChatGPTResponsesRequest = ({ accessToken, model, inputText }) => ({

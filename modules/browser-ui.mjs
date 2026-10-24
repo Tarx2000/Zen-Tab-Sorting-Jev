@@ -5,6 +5,47 @@ import { CONFIG, LOG } from "./config.mjs";
 import { domCache } from "./tabs.mjs";
 import { handleOrganizeClick } from "./click-handler.mjs";
 
+const LIBRARY_CARD = ".zen-library-space[data-uuid]";
+const BUTTONS = `[id^="${CONFIG.BUTTON_ID}"]`;
+const isOrganizeButton = (node) => node?.hasAttribute?.("data-zao-library-organize") || node?.id === CONFIG.BUTTON_ID ||
+  /^tab-wand-button(?:-copy)+$/.test(node?.id || "");
+const libraryCard = (node) => node?.closest?.(LIBRARY_CARD);
+
+// Library strips clone sidebar markup, including our icon, but not listeners.
+// Replace those copies with one persistent header action. The native separator
+// is hidden when all tabs are grouped, so it cannot host an always-usable icon.
+export const reconcileLibraryButtons = () => {
+  for (const card of document.querySelectorAll(LIBRARY_CARD)) {
+    const header = card.querySelector(".zen-library-space-header");
+    if (!header) continue;
+    const buttons = [...card.querySelectorAll(BUTTONS)].filter(isOrganizeButton);
+    let button = buttons.find((node) => node.hasAttribute("data-zao-library-organize"));
+    if (!button) {
+      button = window.MozXULElement.parseXULToFragment(buttonXul()).firstChild;
+      button.id = `${CONFIG.BUTTON_ID}-library-${card.dataset.uuid}`;
+      button.setAttribute("data-zao-library-organize", "true");
+    }
+    for (const duplicate of buttons) if (duplicate !== button) duplicate.remove();
+    if (button.parentElement !== header) header.insertBefore(button, header.querySelector("toolbarbutton"));
+    button.classList.add("zao-organize-button");
+    button.removeAttribute("command");
+    button.setAttribute("tooltiptext", "Tabs in diesem Space automatisch sortieren");
+    button.disabled = Boolean(window._zaoSortSession);
+  }
+};
+
+const dispatchOrganize = (event) => {
+  const button = event.target?.closest?.(BUTTONS);
+  if (!isOrganizeButton(button) || (event.type === "click" && event.button !== 0)) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  if (button.disabled || window._zaoSortSession) return;
+  const card = libraryCard(button);
+  recordDebugEvent("BUTTON-CLICK", card ? "Library-Space sortieren" : "Aktiven Space sortieren");
+  void handleOrganizeClick(card ? { workspaceId: card.dataset.uuid, fromLibrary: true } : {})
+    .catch((error) => console.error(`${LOG} organize command failed:`, error));
+};
+
 // Lucide "wand-sparkles" — the magic wand with a sparkle around the tip.
 // Inline SVG (not an icon-font / external file) so it inherits currentColor from
 // the toolbar theme and animates cleanly with the .zao-wiggling class.
@@ -23,7 +64,7 @@ const WAND_ICON_SVG = `
 const buttonXul = () => `
   <toolbarbutton
     id="${CONFIG.BUTTON_ID}"
-    class="toolbarbutton-1 chromeclass-toolbar-additional"
+    class="toolbarbutton-1 chromeclass-toolbar-additional zao-organize-button"
     command="${CONFIG.COMMAND_ID}"
     tooltiptext="Auto Sort Tabs">
     <hbox class="toolbarbutton-box" align="center">
@@ -33,8 +74,9 @@ const buttonXul = () => `
 `;
 
 export const ensureOrganizeButton = (target) => {
-  if (!target) return null;
-  const existing = target.querySelector?.(`#${CONFIG.BUTTON_ID}`);
+  if (!target || libraryCard(target)) return null;
+  const scope = target.matches?.(".zen-workspace-close-unpinned-tabs-button") ? target.parentElement : target;
+  const existing = scope?.querySelector?.(`#${CONFIG.BUTTON_ID}`);
   if (existing) return existing;
 
   try {
@@ -44,15 +86,6 @@ export const ensureOrganizeButton = (target) => {
 
     const buttonFragment = window.MozXULElement.parseXULToFragment(buttonXul());
     const button = buttonFragment.firstChild;
-
-    const onBtnClick = (event) => {
-      event?.preventDefault?.();
-      event?.stopPropagation?.();
-      recordDebugEvent("BUTTON-CLICK", "Klick auf #tab-wand-button registriert");
-      handleOrganizeClick();
-    };
-    button.addEventListener("click", onBtnClick);
-    button.addEventListener("command", onBtnClick);
 
     if (nativeClearButton && nativeClearButton.parentNode) {
       nativeClearButton.parentNode.insertBefore(button, nativeClearButton);
@@ -75,6 +108,7 @@ export const addButtonToAllSeparators = () => {
     // 1. Every native Clear button in the sidebar (places wand button directly to its left)
     const clearButtons = document.querySelectorAll(".zen-workspace-close-unpinned-tabs-button");
     for (const clearBtn of clearButtons) {
+      if (libraryCard(clearBtn)) continue;
       if (!clearBtn.parentElement?.querySelector(`#${CONFIG.BUTTON_ID}`)) {
         ensureOrganizeButton(clearBtn);
       }
@@ -98,6 +132,7 @@ export const addButtonToAllSeparators = () => {
       const periphery = document.querySelector("#tabbrowser-arrowscrollbox-periphery");
       if (periphery) ensureOrganizeButton(periphery);
     }
+    reconcileLibraryButtons();
   } catch (e) {
     console.error(`${LOG} addButtonToAllSeparators error:`, e);
   }
@@ -105,17 +140,16 @@ export const addButtonToAllSeparators = () => {
 
 export const setupCommand = () => {
   if (typeof window !== "undefined" && !window._zaoGlobalClickListener) {
-    window._zaoGlobalClickListener = (event) => {
-      const btn = event.target?.closest?.(`#${CONFIG.BUTTON_ID}`);
-      if (btn) {
-        event.preventDefault();
-        event.stopPropagation();
-        recordDebugEvent("CAPTURE-CLICK", "Globaler Window-Klick auf #tab-wand-button registriert");
-        handleOrganizeClick();
-      }
-    };
+    window._zaoGlobalClickListener = dispatchOrganize;
     window.addEventListener("click", window._zaoGlobalClickListener, true);
     window.addEventListener("command", window._zaoGlobalClickListener, true);
+  }
+
+  const library = document.querySelector("zen-library");
+  if (library && !window._zaoLibraryButtonObserver) {
+    window._zaoLibraryButtonObserver = new window.MutationObserver(reconcileLibraryButtons);
+    window._zaoLibraryButtonObserver.observe(library, { childList: true, subtree: true });
+    reconcileLibraryButtons();
   }
 
   const zenCommands = domCache.getCommandSet();
@@ -141,6 +175,16 @@ export const setupCommand = () => {
     };
     zenCommands.addEventListener("command", listener);
     zenCommands._zaoCommandListener = listener;
+  }
+};
+
+export const teardownOrganizeUI = () => {
+  window._zaoLibraryButtonObserver?.disconnect();
+  delete window._zaoLibraryButtonObserver;
+  if (window._zaoGlobalClickListener) {
+    window.removeEventListener("click", window._zaoGlobalClickListener, true);
+    window.removeEventListener("command", window._zaoGlobalClickListener, true);
+    delete window._zaoGlobalClickListener;
   }
 };
 

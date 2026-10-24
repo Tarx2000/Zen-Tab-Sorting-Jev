@@ -85,3 +85,27 @@ PNG captures verify intermediate motion in addition to final membership.
 The exact edge coordinate is additionally probed using the active native drag
 payload to avoid OS pointer coalescing. The restart gate checks saved group IDs,
 Spaces, hierarchy and collapsed states after quitting and reopening the lab.
+
+## Library Autosort
+
+Each Library Space card has one persistent wand icon in its header, next to the
+theme button. Copied sidebar icons are removed, so even completely grouped or
+empty Spaces retain one visible action. It
+sorts the real tabs in that card’s Space into groups using the normal Autosort
+settings. It does not run the cross-Space sorter. The previous Space and selected
+tab are restored afterward unless the user navigates during the sort. The
+Library refreshes its copies after native mutations complete.
+
+ChatGPT refreshes save replacement credentials before another provider call and
+share a lock across chrome windows. A terminal `invalid_grant` requires a new
+**Sign in with ChatGPT** in the mod settings; revoked credentials cannot be
+recovered locally. The issued client ID is retained for reconnecting. Temporary
+network/server failures retain the credentials. This follows OpenAI’s
+[session refresh](https://developers.openai.com/siwc/token-sharing-open-source/profiles-and-sessions)
+and [error recovery](https://developers.openai.com/siwc/token-sharing-open-source/errors-and-recovery) guidance.
+
+Run the native Library and simulated OAuth regression with:
+
+```sh
+npm run e2e:library -- --headed
+```

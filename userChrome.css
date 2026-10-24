@@ -31,7 +31,7 @@ tab-group.zao-minimal {
 }
 
 /* --- Toolbar button: Zen Tab Sorting wand button next to Clear --- */
-#tab-wand-button {
+:is(#tab-wand-button, .zao-organize-button) {
   appearance: none !important;
   background: transparent !important;
   background-color: transparent !important;
@@ -49,16 +49,16 @@ tab-group.zao-minimal {
   justify-content: center !important;
 }
 
-#tab-wand-button,
-#tab-wand-button *,
-#tab-wand-button svg,
-#tab-wand-button path {
+:is(#tab-wand-button, .zao-organize-button),
+:is(#tab-wand-button, .zao-organize-button) *,
+:is(#tab-wand-button, .zao-organize-button) svg,
+:is(#tab-wand-button, .zao-organize-button) path {
   cursor: default !important;
 }
 
-#tab-wand-button:hover,
-#tab-wand-button:hover:active,
-#tab-wand-button:focus-visible {
+:is(#tab-wand-button, .zao-organize-button):hover,
+:is(#tab-wand-button, .zao-organize-button):hover:active,
+:is(#tab-wand-button, .zao-organize-button):focus-visible {
   background: transparent !important;
   background-color: transparent !important;
   box-shadow: none !important;
@@ -67,15 +67,15 @@ tab-group.zao-minimal {
   color: #ffffff !important;
 }
 
-#tab-wand-button svg {
+:is(#tab-wand-button, .zao-organize-button) svg {
   display: block !important;
   stroke: currentColor !important;
   transition: stroke 120ms ease, opacity 120ms ease, transform 120ms ease !important;
   pointer-events: none !important;
 }
 
-#tab-wand-button:hover svg,
-#tab-wand-button:hover:active svg {
+:is(#tab-wand-button, .zao-organize-button):hover svg,
+:is(#tab-wand-button, .zao-organize-button):hover:active svg {
   stroke: #ffffff !important;
   color: #ffffff !important;
 }
@@ -91,7 +91,7 @@ tab-group.zao-minimal {
   100% { transform: scale(1) rotate(0deg); filter: drop-shadow(0 0 0px #fff); }
 }
 
-#tab-wand-button.zao-wiggling svg {
+:is(#tab-wand-button, .zao-organize-button).zao-wiggling svg {
   animation: zao-wand-wiggle 650ms cubic-bezier(0.25, 1, 0.5, 1) !important;
   transform-origin: 25% 75% !important;
   color: #ffffff !important;
@@ -105,7 +105,7 @@ tab-group.zao-minimal {
   70%  { opacity: 1;    transform: scale(1.35); filter: drop-shadow(0 0 12px #ffffff); color: #ffffff; stroke: #ffffff; }
   100% { opacity: 1;    transform: scale(1);    filter: drop-shadow(0 0 0px rgba(255, 255, 255, 0)); }
 }
-#tab-wand-button.zao-thinking svg {
+:is(#tab-wand-button, .zao-organize-button).zao-thinking svg {
   animation: zao-thinking-pulse 1s cubic-bezier(0.4, 0, 0.2, 1) infinite !important;
   transform-origin: center !important;
   color: #ffffff !important;
@@ -1043,7 +1043,7 @@ dialog.zao-warning-dialog::backdrop {
   will-change: transform, opacity;
 }
 .zao-sort-background { width: max-content; max-width: 280px; font-size: 12px; }
-#tab-wand-button[disabled="true"] { opacity: 0.45 !important; }
+:is(#tab-wand-button, .zao-organize-button)[disabled="true"] { opacity: 0.45 !important; }
 .zao-workspace-errors {
   position: fixed;
   right: 24px;
@@ -1065,5 +1065,5 @@ dialog.zao-warning-dialog::backdrop {
 .zao-workspace-errors ul { padding-left: 20px; }
 .zao-workspace-errors li { margin: 8px 0; overflow-wrap: anywhere; }
 @media (prefers-reduced-motion: reduce) {
-  #tab-wand-button.zao-thinking svg, #tab-wand-button.zao-wiggling svg { animation: none !important; }
+  :is(#tab-wand-button, .zao-organize-button).zao-thinking svg, :is(#tab-wand-button, .zao-organize-button).zao-wiggling svg { animation: none !important; }
 }

@@ -6,7 +6,7 @@ export const withSortSession = async (kind, run, win = globalThis.window) => {
   const session = { kind, controller: new AbortController() };
   win._zaoSortSession = session;
   const update = () => {
-    for (const button of win.document.querySelectorAll("#tab-wand-button, #zao-sort-workspaces")) {
+    for (const button of win.document.querySelectorAll(".zao-organize-button, #tab-wand-button, #zao-sort-workspaces")) {
       button.disabled = isSortRunning(win);
       button.setAttribute("aria-busy", String(isSortRunning(win)));
     }

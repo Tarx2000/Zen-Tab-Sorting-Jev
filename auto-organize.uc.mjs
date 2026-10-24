@@ -13,6 +13,7 @@ import {
   setupCommand,
   setupWorkspaceHooks,
   addButtonToAllSeparators,
+  teardownOrganizeUI,
 } from "./modules/browser-ui.mjs";
 import { handleOrganizeClick } from "./modules/click-handler.mjs";
 import { organizeWorkspaces, setupWorkspaceSortMenu, teardownWorkspaceSortMenu } from "./modules/workspace-sort.mjs";
@@ -145,6 +146,7 @@ const cleanup = () => {
     teardownTabContextMenu();
     teardownTabGroupContextMenu();
     teardownWorkspaceSortMenu(window);
+    teardownOrganizeUI();
     teardownGroupDrag(window);
     teardownGroupState(window);
     teardownMinimalStylePrefObserver();

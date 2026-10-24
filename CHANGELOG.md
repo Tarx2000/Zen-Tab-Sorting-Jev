@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.12.1 — 2026-10-24
+
+### Fixed
+- Library cards show one working Autosort icon. Clicks sort the selected card’s
+  real Space, refresh its copied rows, and preserve the previous Space selection.
+- ChatGPT token rotation persists replacement tokens even when provider settings
+  were passed as a snapshot; concurrent refresh requests share a window-wide lock.
+- Terminal refresh errors stop immediately, retain the issued client registration,
+  and ask for a new sign-in instead of retrying them as JSON schema failures.
+- Provider errors display one notification instead of duplicate toasts.
+
+### Tests
+- Isolated native Library click/grouping tests and ChatGPT rotation/recovery cases.
+
 ## 1.12.0 — 2026-10-24
 
 ### Added

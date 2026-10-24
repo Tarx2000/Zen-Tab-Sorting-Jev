@@ -439,9 +439,8 @@ const organizeCurrentWorkspace = async () => {
         } else if (pass2.skipped.length > 0) {
           console.log(`${LOG} Pass 2: nothing to group (skipped ${pass2.skipped.length} ${inputLabel})`);
           recordDebugEvent("RESULT", `Pass 2: nothing to group (skipped ${pass2.skipped.length} tabs)`);
-          if (pass2.failedMessage) {
-            showToast(pass2.failedMessage, { type: "warning" });
-          } else if (!pass2.failed) {
+          // Provider failures already display their actionable notification.
+          if (!pass2.failed) {
             showToast("Keine Tabs zum Gruppieren gefunden oder Konfidenz-Schwelle nicht erreicht.");
           }
         }
@@ -496,4 +495,30 @@ const organizeCurrentWorkspace = async () => {
   console.log(`${LOG} click END`);
 };
 
-export const handleOrganizeClick = () => withSortSession("tabs", organizeCurrentWorkspace, window);
+export const handleOrganizeClick = ({ workspaceId, fromLibrary = false } = {}) => withSortSession("tabs", async () => {
+  const manager = window.gZenWorkspaces;
+  if (!fromLibrary) return organizeCurrentWorkspace();
+  if (!workspaceId || !manager.getWorkspaces().some((space) => space.uuid === workspaceId)) {
+    showToast("Dieser Space ist nicht mehr verfügbar.", { type: "warning" });
+    return;
+  }
+  const originalSpace = manager.activeWorkspace;
+  const originalTab = window.gBrowser.selectedTab;
+  let sortTab;
+  try {
+    // Existing grouping APIs operate on the active native strip, never on the
+    // Library's copies. Activate the requested card inside the shared sort lock.
+    if (originalSpace !== workspaceId) await manager.changeWorkspaceWithID(workspaceId);
+    sortTab = window.gBrowser.selectedTab;
+    return await organizeCurrentWorkspace();
+  } finally {
+    // Respect navigation while the provider was working.
+    if (originalSpace !== workspaceId && manager.activeWorkspace === workspaceId &&
+        window.gBrowser.selectedTab === sortTab &&
+        manager.getWorkspaces().some((space) => space.uuid === originalSpace)) {
+      await manager.changeWorkspaceWithID(originalSpace);
+      if (originalTab?.isConnected && !originalTab.closing) window.gBrowser.selectedTab = originalTab;
+    }
+    window.document.querySelector("zen-library-spaces-section")?.refreshStripsNow?.();
+  }
+}, window);
