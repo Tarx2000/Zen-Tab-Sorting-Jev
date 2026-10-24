@@ -7,7 +7,6 @@ import { CONFIG, LOG, BUILD_VERSION } from "./config.mjs";
 import {
   loadRules,
   readSkipDomainsPref,
-  isMinimalStyle,
   isStrictRulesEnforced,
   isDomainRulesEnabled,
   getAIEngine,
@@ -17,7 +16,10 @@ import {
   getAINewGroupBehavior,
   getAIExistingBehavior,
 } from "./rules.mjs";
-import { getEligibleTabs } from "./tabs.mjs";
+import { getEligibleTabs, getTabUrl } from "./tabs.mjs";
+import { animateSidebarChanges } from "./sort-animation.mjs";
+import { withSortSession } from "./sort-session.mjs";
+import { saveGroupState } from "./group-state.mjs";
 import {
   consolidateDuplicateGroups,
   dissolveStaleGroups,
@@ -26,6 +28,7 @@ import {
   moveTabsToTop,
   moveUngroupedToTop,
   syncAllGroupColors,
+  collapseGroup,
 } from "./groups.mjs";
 import { runPass1, applyPass1, matchesDomain } from "./pass1.mjs";
 import { runPass2, runPass2Fresh, applyPass2 } from "./ai.mjs";
@@ -91,7 +94,7 @@ const assignmentMapToPlan = (tabs, assignmentMap) => {
   return { assignments, skipped };
 };
 
-export const handleOrganizeClick = async () => {
+const organizeCurrentWorkspace = async () => {
   recordDebugEvent("START", "Zauberstab geklickt — starte Sortierung");
   wiggleButton();
 
@@ -111,10 +114,8 @@ export const handleOrganizeClick = async () => {
   const domainRulesEnabled = isDomainRulesEnabled();
 
   // 1. Merge any duplicate-name groups before lookups assume uniqueness.
-  const consolidation = consolidateDuplicateGroups(workspaceId);
-  if (consolidation.mergedLabels > 0) {
-    console.log(`${LOG} pre-pass consolidation: merged ${consolidation.mergedLabels} duplicate label(s), moved ${consolidation.tabsMoved} tab(s)`);
-  }
+  const mutations = [];
+  mutations.push(() => consolidateDuplicateGroups(workspaceId));
 
   // 2. Load optional domain rules (empty by default when domain rules are disabled).
   const rules = await loadRules();
@@ -123,16 +124,18 @@ export const handleOrganizeClick = async () => {
   //    strict rule enforcement are explicitly enabled. Existing user/AI groups are
   //    preserved as anchor categories for JEV.
   if (!fullAIMode && domainRulesEnabled && isStrictRulesEnforced() && rules.length > 0) {
-    const dissolution = dissolveStaleGroups(workspaceId, rules);
-    if (dissolution.dissolved > 0) {
-      console.log(`${LOG} dissolved ${dissolution.dissolved} stale group(s), ungrouped ${dissolution.ungrouped} tab(s)`);
-    }
+    mutations.push(() => dissolveStaleGroups(workspaceId, rules));
   } else {
     console.log(`${LOG} preserving existing workspace tab groups (domainRules=${domainRulesEnabled})`);
   }
 
   // 4. Enumerate eligible tabs.
   const allTabs = getEligibleTabs().tabs;
+  const originalTabs = allTabs.map((info) => ({ node: info._tab, parent: info._tab.parentElement, url: info.url }));
+  if (!fullAIMode && domainRulesEnabled && isStrictRulesEnforced() && rules.length > 0) {
+    const names = new Set(rules.map((rule) => rule.name));
+    for (const info of allTabs) if (info.currentGroup && !names.has(info.currentGroup)) info.currentGroup = null;
+  }
   if (allTabs.length === 0) {
     recordDebugEvent("TABS", `Keine sortierbaren Tabs im Workspace "${workspaceId}" gefunden.`);
     console.log(`${LOG} no eligible tabs in workspace ${workspaceId}`);
@@ -151,14 +154,16 @@ export const handleOrganizeClick = async () => {
       skipPatterns.some((p) => matchesDomain(t.hostname, p))
     );
     if (skipped.length > 0) {
-      const moved = moveTabsToTop(skipped.map((s) => s._tab), workspaceId);
-      console.log(`${LOG} skip-domains: parked ${moved} tab(s) at the top of the workspace`);
+      mutations.push(() => moveTabsToTop(skipped.map((s) => s._tab), workspaceId));
       const skippedSet = new Set(skipped);
       tabs = allTabs.filter((t) => !skippedSet.has(t));
     }
   }
   if (tabs.length === 0) {
     console.log(`${LOG} no non-skipped eligible tabs in workspace ${workspaceId}`);
+    if (window.gZenWorkspaces.activeWorkspace === workspaceId) {
+      await animateSidebarChanges(window, () => { for (const mutate of mutations) mutate(); });
+    }
     return;
   }
 
@@ -201,20 +206,13 @@ export const handleOrganizeClick = async () => {
     // 6. Apply Pass 1 moves (if any optional domain rules matched).
     const sortingPlan = resolveSortingPlan({ mode: sortMode, tabs, pass1: { byGroup, unmatched } });
     if (sortingPlan.shouldApplyPass1 && sortingPlan.pass1ByGroup.size > 0) {
-      const result = applyPass1(sortingPlan.pass1ByGroup, workspaceId, rules);
-      console.log(`${LOG} Applied: created ${result.createdGroups} new group(s), moved ${result.movedToNew} tab(s) into new groups, ${result.movedToExisting} tab(s) into existing groups.`);
-      if (result.errors.length > 0) {
-        console.warn(`${LOG} ${result.errors.length} error(s) during apply:`, result.errors);
-      }
+      mutations.push(() => applyPass1(sortingPlan.pass1ByGroup, workspaceId, rules));
 
       if (domainRulesEnabled && isStrictRulesEnforced()) {
         const candidates = unmatched.filter((t) => t.currentGroup && t._tab?.isConnected);
         if (candidates.length > 0) {
-          const ejected = moveTabsToTop(candidates.map((t) => t._tab), workspaceId);
-          if (ejected > 0) {
-            console.log(`${LOG} Strict: ejected ${ejected} unmatched tab(s) from rule groups`);
-            for (const t of candidates) t.currentGroup = null;
-          }
+          mutations.push(() => moveTabsToTop(candidates.map((t) => t._tab), workspaceId));
+          for (const t of candidates) t.currentGroup = null;
         }
       }
     }
@@ -248,12 +246,23 @@ export const handleOrganizeClick = async () => {
           // JEV specifically classifies into existing workspace groups; always provide
           // the live workspace groups (or rules if 0 DOM groups exist yet).
           let liveExistingGroups = getWorkspaceExistingGroups(workspaceId);
+          if (!fullAIMode && domainRulesEnabled && isStrictRulesEnforced() && rules.length > 0) {
+            const names = new Set(rules.map((rule) => rule.name));
+            liveExistingGroups = liveExistingGroups.filter((group) => names.has(group.name));
+          }
           if (liveExistingGroups.length === 0 && rules.length > 0) {
             liveExistingGroups = rules.filter((r) => r?.name).map((r) => ({
               name: r.name,
               domains: r.domains || [],
               tabs: [],
             }));
+          }
+          // Pass 1 is planned, not applied yet. Include its future groups as
+          // existing target context without touching the browser during planning.
+          for (const [name, items] of sortingPlan.pass1ByGroup) {
+            if (!liveExistingGroups.some((group) => group.name === name)) {
+              liveExistingGroups.push({ name, domains: [...new Set(items.map((tab) => tab.hostname))], tabs: items });
+            }
           }
           pass2 = await runPass2JevHybrid(pass2Input, liveExistingGroups);
           console.log(`${LOG} JEV + Fallback-LLM Pass 2 took ${Math.round(performance.now() - t0)}ms`);
@@ -389,39 +398,43 @@ export const handleOrganizeClick = async () => {
             });
             if (planToApply === null) {
               console.log(`${LOG} ${modalReason}: user cancelled — no changes applied`);
+              return;
             }
           }
 
           if (planToApply) {
-            const applyOpts = domainRulesEnabled
-              ? resolvePass2ApplyOptions(sortMode)
-              : { existingBehavior: "transient", newGroupBehavior: "transient", persistRules: false };
-            const ai = applyPass2(planToApply, workspaceId, rules, applyOpts);
-            recordDebugEvent("APPLY", `Pass 2 applied: ${ai.movedToExisting} tabs moved into existing groups, ${ai.newGroupsCreated} new groups created`);
-            console.log(`${LOG} Pass 2 applied: ${ai.movedToExisting} tab(s) → existing groups, ${ai.newGroupsCreated} new group(s), ${ai.rulesGrown} rule(s) grown, ${ai.newRulesCreated} new rule(s)`);
-            pass2 = planToApply;
+            const confirmedPlan = planToApply;
+            mutations.push(() => {
+              const applyOpts = domainRulesEnabled
+                ? resolvePass2ApplyOptions(sortMode)
+                : { existingBehavior: "transient", newGroupBehavior: "transient", persistRules: false };
+              const ai = applyPass2(confirmedPlan, workspaceId, rules, applyOpts);
+              recordDebugEvent("APPLY", `Pass 2 applied: ${ai.movedToExisting} tabs moved into existing groups, ${ai.newGroupsCreated} new groups created`);
+              console.log(`${LOG} Pass 2 applied: ${ai.movedToExisting} tab(s) → existing groups, ${ai.newGroupsCreated} new group(s), ${ai.rulesGrown} rule(s) grown, ${ai.newRulesCreated} new rule(s)`);
+              pass2 = confirmedPlan;
 
-            if (isFreshLike) {
-              const tabsContainer = window.gZenWorkspaces?.activeWorkspaceElement?.tabsContainer;
-              if (tabsContainer) {
-                let movedSkipped = 0;
-                for (const tabInfo of pass2.skipped) {
-                  const tab = tabInfo?._tab;
-                  if (!tab?.isConnected) continue;
-                  if (tab.closest("tab-group")) {
-                    try {
-                      tabsContainer.insertBefore(tab, tabsContainer.firstChild);
-                      movedSkipped++;
-                    } catch (e) {
-                      console.error(`${LOG} error ungrouping skipped tab:`, e);
+              if (isFreshLike) {
+                const tabsContainer = window.gZenWorkspaces?.activeWorkspaceElement?.tabsContainer;
+                if (tabsContainer) {
+                  let movedSkipped = 0;
+                  for (const tabInfo of pass2.skipped) {
+                    const tab = tabInfo?._tab;
+                    if (!tab?.isConnected) continue;
+                    if (tab.closest("tab-group")) {
+                      try {
+                        tabsContainer.insertBefore(tab, tabsContainer.firstChild);
+                        movedSkipped++;
+                      } catch (e) {
+                        console.error(`${LOG} error ungrouping skipped tab:`, e);
+                      }
                     }
                   }
+                  if (movedSkipped > 0) console.log(`${LOG} ${newGroupBehavior} mode: ungrouped ${movedSkipped} AI-skipped tab(s) from their previous groups`);
                 }
-                if (movedSkipped > 0) console.log(`${LOG} ${newGroupBehavior} mode: ungrouped ${movedSkipped} AI-skipped tab(s) from their previous groups`);
+                const dropped = dissolveEmptyGroups();
+                if (dropped > 0) console.log(`${LOG} dissolved ${dropped} empty group(s) after re-tidy`);
               }
-              const dropped = dissolveEmptyGroups();
-              if (dropped > 0) console.log(`${LOG} dissolved ${dropped} empty group(s) after re-tidy`);
-            }
+            });
           }
         } else if (pass2.skipped.length > 0) {
           console.log(`${LOG} Pass 2: nothing to group (skipped ${pass2.skipped.length} ${inputLabel})`);
@@ -440,12 +453,25 @@ export const handleOrganizeClick = async () => {
     }
 
     // 8. Push any remaining ungrouped tabs to the top of the list.
-    const movedUp = moveUngroupedToTop(workspaceId);
-    if (movedUp > 0) console.log(`${LOG} moved ${movedUp} ungrouped tab(s) to the top of the list`);
+    mutations.push(() => moveUngroupedToTop(workspaceId));
 
     // 9. Sync styling.
-    const colored = syncAllGroupColors(workspaceId, rules);
-    if (colored > 0) console.log(`${LOG} synced styling on ${colored} group(s) (minimal=${isMinimalStyle()})`);
+    mutations.push(() => syncAllGroupColors(workspaceId, rules));
+
+    if (window.gZenWorkspaces.activeWorkspace !== workspaceId || originalTabs.some(({ node, parent, url }) =>
+      !node.isConnected || node.parentElement !== parent || node.getAttribute("zen-workspace-id") !== workspaceId || getTabUrl(node) !== url)) {
+      showToast("Tabs oder Workspace wurden während der Berechnung verändert. Bitte die Sortierung erneut starten.", { type: "warning" });
+      return;
+    }
+    const collapsed = [...window.gZenWorkspaces.activeWorkspaceElement.querySelectorAll("tab-group[collapsed]")];
+    await animateSidebarChanges(window, () => {
+      for (const mutate of mutations) mutate();
+      collapsed.forEach((group) => { if (group.isConnected) collapseGroup(group); });
+      window.gBrowser.tabContainer._invalidateCachedTabs?.();
+      window.gZenWorkspaces.updateTabsContainers?.();
+      void window.gBrowser.tabs.length;
+      saveGroupState(window);
+    });
 
     try {
       const allGroups = document.querySelectorAll("tab-group").length;
@@ -469,3 +495,5 @@ export const handleOrganizeClick = async () => {
 
   console.log(`${LOG} click END`);
 };
+
+export const handleOrganizeClick = () => withSortSession("tabs", organizeCurrentWorkspace, window);

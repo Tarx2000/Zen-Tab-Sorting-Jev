@@ -30,9 +30,9 @@ const resolveWindow = () => {
  * @param {"info"|"warning"|"error"|"success"} [options.type="info"]
  * @param {number} [options.duration=5500]
  */
-export const showToast = (message, { type = "info", duration = DEFAULT_TOAST_DURATION_MS } = {}) => {
+export const showToast = (message, { type = "info", duration = DEFAULT_TOAST_DURATION_MS, targetWindow } = {}) => {
   if (!message) return;
-  const win = resolveWindow();
+  const win = targetWindow || resolveWindow();
 
   // 1. In-DOM floating toast inside the active browser window
   if (win?.document?.createElement) {

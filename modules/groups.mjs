@@ -5,6 +5,7 @@
 import { CONFIG, LOG, isZenColorName, isValidHex, isUnsetLabel } from "./config.mjs";
 import { isMinimalStyle } from "./rules.mjs";
 import { getTabTitle, getTabUrl, getHostname } from "./tabs.mjs";
+import { isSidebarCopy } from "./sidebar-elements.mjs";
 
 /**
  * Snapshot all existing `<tab-group>` elements in the active workspace, along
@@ -60,7 +61,7 @@ export const getWorkspaceExistingGroups = (workspaceId) => {
   }
 
   for (const groupEl of candidates) {
-    if (!groupEl?.isConnected) continue;
+    if (!groupEl?.isConnected || isSidebarCopy(groupEl)) continue;
     const rawLabel = groupEl.getAttribute("label") || "";
     const name = rawLabel.trim();
     if (isUnsetLabel(name)) continue;
@@ -109,11 +110,11 @@ export const findExistingGroup = (name, workspaceId) => {
     const direct = document.querySelector(
       `tab-group[label="${escapedName}"][zen-workspace-id="${workspaceId}"]`
     );
-    if (direct?.isConnected) return direct;
+    if (direct?.isConnected && !isSidebarCopy(direct)) return direct;
 
     const candidates = document.querySelectorAll(`tab-group[label="${escapedName}"]`);
     for (const candidate of candidates) {
-      if (!candidate.isConnected) continue;
+      if (!candidate.isConnected || isSidebarCopy(candidate)) continue;
       if (candidate.querySelector(`tab[zen-workspace-id="${workspaceId}"]`)) {
         return candidate;
       }
@@ -236,7 +237,7 @@ export const syncAllGroupColors = (workspaceId, rules) => {
 
   let styled = 0;
   for (const groupEl of document.querySelectorAll(selector)) {
-    if (!groupEl?.isConnected) continue;
+    if (!groupEl?.isConnected || isSidebarCopy(groupEl)) continue;
     const label = groupEl.getAttribute("label");
     const rule = ruleByName.get(label);
 
@@ -385,7 +386,7 @@ export const dissolveStaleGroups = (workspaceId, rules) => {
   const topAnchor = tabsContainer.firstChild;
 
   for (const groupEl of groups) {
-    if (!groupEl.isConnected) continue;
+    if (!groupEl.isConnected || isSidebarCopy(groupEl)) continue;
     const label = groupEl.getAttribute("label");
     if (!label || ruleNames.has(label)) continue;
 
@@ -442,9 +443,11 @@ export const findSafeInsertAnchor = () => {
 // Dissolve any empty tab-group in the active workspace.
 export const dissolveEmptyGroups = () => {
   if (typeof document === "undefined") return 0;
+  const scope = window.gZenWorkspaces?.activeWorkspaceElement;
+  if (!scope) return 0;
   let removed = 0;
-  for (const groupEl of document.querySelectorAll("tab-group")) {
-    if (!groupEl?.isConnected) continue;
+  for (const groupEl of scope.querySelectorAll("tab-group")) {
+    if (!groupEl?.isConnected || isSidebarCopy(groupEl)) continue;
     if (groupEl.querySelector("tab")) continue;
     const label = groupEl.getAttribute("label") || "(unnamed)";
     try {
@@ -472,7 +475,7 @@ export const consolidateDuplicateGroups = (workspaceId) => {
 
   const byLabel = new Map();
   for (const groupEl of groups) {
-    if (!groupEl.isConnected) continue;
+    if (!groupEl.isConnected || isSidebarCopy(groupEl)) continue;
     const label = groupEl.getAttribute("label");
     if (!label) continue;
     if (!byLabel.has(label)) byLabel.set(label, []);
@@ -491,7 +494,7 @@ export const consolidateDuplicateGroups = (workspaceId) => {
 
     for (let i = 1; i < groupEls.length; i++) {
       const dup = groupEls[i];
-      if (!dup.isConnected) continue;
+      if (!dup.isConnected || isSidebarCopy(dup)) continue;
 
       const dupTabs = Array.from(
         dup.querySelectorAll(`tab[zen-workspace-id="${workspaceId}"]`)

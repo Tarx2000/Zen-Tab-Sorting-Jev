@@ -15,7 +15,7 @@ export const LOG = "[ZenTabSort]";
 // Build tag — mirrors theme.json's `version` for shipped releases, and gets a
 // `+tag.N` suffix for in-progress iterative builds so the Browser Console
 // reveals which build is actually running (vs. a stale module cache).
-export const BUILD_VERSION = "1.11.0";
+export const BUILD_VERSION = "1.12.0";
 
 export const CONFIG = {
   // Init polling — wait for gBrowser/gZenWorkspaces/separator to appear at startup.
@@ -44,7 +44,7 @@ export const CONFIG = {
   RULES_PREF: "extensions.zen-auto-organize.rules-json",
   USE_DOMAIN_RULES_PREF: "extensions.zen-auto-organize.use-domain-rules",
   SKIP_DOMAINS_PREF: "extensions.zen-auto-organize.skip-domains-json",
-  // Set of tab-group LABELS currently collapsed. JSON-encoded string array.
+  // Set of collapsed tab-group IDs (id:...), with legacy label migration.
   // Updated on every collapse-toggle; re-applied on every TabGroupCreate so
   // session restore preserves collapsed/expanded state across browser
   // restarts (Zen's own session save loses the `collapsed` attribute).

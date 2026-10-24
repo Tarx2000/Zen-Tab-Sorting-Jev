@@ -1,4 +1,5 @@
 // Zen Tab Sorting — tab enumeration + DOM helpers.
+import { isSidebarCopy } from "./sidebar-elements.mjs";
 
 export const getTabTitle = (tab) => {
   if (!tab?.isConnected) return "";
@@ -158,6 +159,7 @@ export const getEligibleTabs = () => {
   const tabs = Array.from(gBrowser.tabs)
     .filter((tab) => {
       if (!tab?.isConnected) return false;
+      if (isSidebarCopy(tab)) return false;
       if (tab.getAttribute("zen-workspace-id") !== workspaceId) return false;
       if (tab.pinned) return false;
       if (tab.hasAttribute("zen-empty-tab")) return false;

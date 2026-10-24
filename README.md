@@ -20,6 +20,18 @@ Don't run this alongside Zen Tab Wand or OpenTabSort Zen. All three share the sa
 
 After installing, a wand button appears in the workspace separator. Left-click sorts the current workspace. Right-click any tab to add its hostname to a rule or to the skip list.
 
+Right-click a Space and choose **Alle Spaces automatisch sortieren** to route
+whole groups and individual tabs into existing Spaces with Jev. Names determine
+each Space's topic. A move requires more than ten percentage points of improvement
+over the current Space. Groups, nested folders, pinned tabs and split views stay
+intact; skip-domain groups stay put. Failed items get one retry and an error report;
+other items continue. This action uses no fallback LLM and offers no Undo.
+See [Workspace sorting](docs/workspace-sorting.md) for its exact behavior.
+
+Sorting now animates tab movements with Zen Motion. Normal groups also receive
+native drag previews and header-edge insertion markers without requiring Advanced
+Tab Groups to be installed.
+
 ## How sorting works
 
 1. Domain rules run first. You define groups in settings, say a `Dev` group matching `github.com` and `stackoverflow.com`, and every open tab whose hostname matches lands in that group.

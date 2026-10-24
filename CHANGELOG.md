@@ -1,5 +1,31 @@
 # Changelog
 
+## 1.12.0 — 2026-10-24
+
+### Added
+- Native Space-menu action to sort all Spaces in the current window with Jev.
+- Indivisible transfer of existing groups, nested folders, empty folders, pinned
+  tabs and split views, preserving their objects, hierarchy and containers.
+- Space-name authority, weak context for generic names, and a strict improvement
+  of more than ten percentage points over the current Space before moving.
+- One retry per failed Workspace operation, partial progress and a final error
+  report without an Undo action or fallback-LLM calls.
+- Zen Motion sorting flights, layout movement, background route summaries and
+  reduced-motion support, shared by ordinary Autosort and Workspace sorting.
+- Isolated native Workspace E2E harness and classification regression tests.
+
+### Fixed
+- Zero-sized native group drag images now use Zen's visible-header source option.
+- Native reorder targeting at group header edges, including current Firefox drag
+  MIME types; nested group headers hide when their parent is collapsed.
+- Browser drag/Library copies no longer participate in grouping/state hooks.
+- Concurrent sort entry points share a window lock. Ordinary Autosort defers all
+  mutations until planning completes; canceling Plan Mode leaves the tabs alone.
+- Collapsed-state persistence uses group IDs instead of colliding group names.
+- Per-window SessionStore metadata preserves normal-group Spaces, nesting and
+  collapsed state when Zen restores a session.
+- Test profiles support current Sine layouts and skip the first-run welcome UI.
+
 ## 1.11.0 — 2026-10-24
 
 ### Added

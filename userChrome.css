@@ -16,6 +16,9 @@
 tab-group[collapsed] tab[aria-hidden="true"] {
   display: none !important;
 }
+tab-group[collapsed] > .tab-group-container > :is(tab-group, zen-folder) {
+  display: none !important;
+}
 
 /* --- Look & Feel: minimal mode for rule-matched tab-groups.
    Overrides Zen's per-group color custom properties with values derived from
@@ -928,8 +931,8 @@ dialog.zao-warning-dialog::backdrop {
   gap: 10px !important;
   padding: 10px 16px !important;
   border-radius: 999px !important;
-  background: var(--zen-colors-tertiary, rgba(28, 28, 34, 0.94)) !important;
-  color: var(--zen-colors-primary, #ffffff) !important;
+  background: Canvas !important;
+  color: CanvasText !important;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
   font-size: 13px !important;
   font-weight: 500 !important;
@@ -994,4 +997,73 @@ dialog.zao-warning-dialog::backdrop {
     opacity: 1;
     transform: translateY(0) scale(1);
   }
+}
+
+/* Compact native drag ghosts. Preserve Zen's own setDragImage and offsets. */
+:is(tab-group, zen-folder)[drag-image] {
+  display: flex !important;
+  flex-direction: column !important;
+  visibility: visible !important;
+  opacity: 1 !important;
+  min-height: 28px !important;
+  max-height: 44px !important;
+}
+:is(tab-group, zen-folder)[drag-image] > .tab-group-container,
+:is(tab-group, zen-folder)[drag-image] > .tab-group-overflow-count-container {
+  display: none !important;
+}
+:is(tab-group, zen-folder)[drag-image] > .tab-group-label-container {
+  visibility: visible !important;
+  opacity: 1 !important;
+}
+
+[data-zao-in-flight] { visibility: hidden !important; }
+.zao-sort-animation-layer {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 2147483646;
+}
+.zao-sort-ghost, .zao-sort-background {
+  position: fixed;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  padding: 5px 10px;
+  border-radius: 8px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  background: var(--toolbar-bgcolor, Canvas);
+  color: var(--toolbar-color, CanvasText);
+  border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+  box-shadow: 0 4px 16px #0003;
+  font: menu;
+  transform-origin: center;
+  will-change: transform, opacity;
+}
+.zao-sort-background { width: max-content; max-width: 280px; font-size: 12px; }
+#tab-wand-button[disabled="true"] { opacity: 0.45 !important; }
+.zao-workspace-errors {
+  position: fixed;
+  right: 24px;
+  bottom: 80px;
+  z-index: 2147483647;
+  box-sizing: border-box;
+  width: min(460px, 90vw);
+  max-height: 50vh;
+  overflow: auto;
+  padding: 16px;
+  background: Canvas;
+  color: CanvasText;
+  border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+  border-radius: 12px;
+  box-shadow: 0 8px 30px #0005;
+  font: menu;
+}
+.zao-workspace-errors button { float: right; margin-left: 12px; cursor: pointer; }
+.zao-workspace-errors ul { padding-left: 20px; }
+.zao-workspace-errors li { margin: 8px 0; overflow-wrap: anywhere; }
+@media (prefers-reduced-motion: reduce) {
+  #tab-wand-button.zao-thinking svg, #tab-wand-button.zao-wiggling svg { animation: none !important; }
 }

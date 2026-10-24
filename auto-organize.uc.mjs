@@ -15,6 +15,9 @@ import {
   addButtonToAllSeparators,
 } from "./modules/browser-ui.mjs";
 import { handleOrganizeClick } from "./modules/click-handler.mjs";
+import { organizeWorkspaces, setupWorkspaceSortMenu, teardownWorkspaceSortMenu } from "./modules/workspace-sort.mjs";
+import { setupGroupDrag, teardownGroupDrag } from "./modules/group-drag.mjs";
+import { setupGroupState, teardownGroupState } from "./modules/group-state.mjs";
 import {
   setupTabContextMenu,
   teardownTabContextMenu,
@@ -48,16 +51,20 @@ const tryInitializeBrowser = () => {
       setupCommand();
       addButtonToAllSeparators();
       setupWorkspaceHooks();
+      setupWorkspaceSortMenu(window);
+      setupGroupDrag(window);
       setupTabContextMenu();
       setupTabGroupContextMenu();
       setupTabGroupCreateHook();
       setupCollapsedStatePersistence();
+      setupGroupState(window);
       setupMinimalStylePrefObserver();
       window.ZenTabSorting = Object.freeze({
         buildVersion: BUILD_VERSION,
         getDebugEvents,
         clearDebugEvents,
         formatDebugEventsAsText,
+        organizeWorkspaces: () => organizeWorkspaces(window),
         handleOrganizeClick: async () => {
           window.ZenTabSortingLastRun = {
             startedAt: Date.now(),
@@ -137,6 +144,9 @@ const cleanup = () => {
     teardownSettingsObserver();
     teardownTabContextMenu();
     teardownTabGroupContextMenu();
+    teardownWorkspaceSortMenu(window);
+    teardownGroupDrag(window);
+    teardownGroupState(window);
     teardownMinimalStylePrefObserver();
   } catch (e) {
     console.error(`${LOG} cleanup error:`, e);

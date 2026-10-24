@@ -25,7 +25,11 @@ export const createLabProfile = async (repoRoot, sineProfile) => {
   await mkdir(modsDir, { recursive: true });
 
   for (const name of ["JS", "locales", "utils"]) {
-    await cp(join(sineProfile, "chrome", name), join(chromeDir, name), { recursive: true });
+    const source = join(sineProfile, "chrome", name);
+    // Recent Sine installs no longer ship the optional locale/util directories.
+    try { await access(source); }
+    catch (error) { if (name !== "JS" && error.code === "ENOENT") continue; throw error; }
+    await cp(source, join(chromeDir, name), { recursive: true });
   }
 
   await cp(repoRoot, join(modsDir, "zen-tab-sorting"), {
@@ -63,6 +67,7 @@ export const scenarioPrefs = ({ scenario, providerPort, marionettePort }) => {
     ["sine.engine.auto-update", false],
     ["browser.startup.cache", false],
     ["browser.startup.page", 0],
+    ["zen.welcome-screen.seen", true],
     ["marionette.port", marionettePort],
     ["extensions.zen-auto-organize.ai-engine", "custom"],
     ["extensions.zen-auto-organize.ai-provider-consent", true],

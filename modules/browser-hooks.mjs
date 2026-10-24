@@ -22,6 +22,7 @@
 
 import { CONFIG, LOG, BUILD_VERSION, isZenColorName, isUnsetLabel, pipMetrics } from "./config.mjs";
 import { getTabUrl, getHostname } from "./tabs.mjs";
+import { isSidebarCopy } from "./sidebar-elements.mjs";
 import { readRulesPref, writeRulesPref, readSkipDomainsPref, writeSkipDomainsPref, readCollapsedGroupsPref, writeCollapsedGroupsPref, isMinimalStyle, getPipShape, getPipSize, getPipOpenBehavior } from "./rules.mjs";
 import { applyGroupColor, syncAllGroupColors, moveTabsToTop } from "./groups.mjs";
 
@@ -337,9 +338,11 @@ export const teardownTabGroupContextMenu = () => {
 // collapsed-set pref, and re-apply its rule color. Used both as the
 // TabGroupCreate event handler (for newly-created groups) and at install
 // time (for groups Zen restored before our script loaded).
+const collapseKey = (group) => `id:${group.id || `${group.getAttribute("zen-workspace-id")}:${group.getAttribute("label")}`}`;
+
 const applyTabGroupRestoreState = (group) => {
   try {
-    if (!group?.isConnected) return;
+    if (!group?.isConnected || isSidebarCopy(group)) return;
     const label = group.getAttribute?.("label");
     if (!label) return;
 
@@ -348,9 +351,9 @@ const applyTabGroupRestoreState = (group) => {
     // Firefox also updates aria-hidden on inner tabs (which the collapse
     // CSS rule relies on).
     const collapsedSet = readCollapsedGroupsPref();
-    if (collapsedSet.has(label)) {
+    if (collapsedSet.has(collapseKey(group)) || collapsedSet.has(label)) {
       setTimeout(() => {
-        if (!group.isConnected) return;
+        if (!group.isConnected || isSidebarCopy(group)) return;
         let applied = false;
         try { group.collapsed = true; applied = true; } catch {}
         if (!applied) {
@@ -406,18 +409,23 @@ export const setupCollapsedStatePersistence = () => {
   window._zaoCollapseObserverInstalled = true;
 
   const persist = (group) => {
+    if (isSidebarCopy(group)) return;
     const label = group.getAttribute?.("label");
     if (!label) return;
     const isCollapsed = group.hasAttribute("collapsed");
     const set = readCollapsedGroupsPref();
-    const had = set.has(label);
-    if (isCollapsed && !had) set.add(label);
-    else if (!isCollapsed && had) set.delete(label);
+    const key = collapseKey(group);
+    const had = set.has(key);
+    const legacy = set.delete(label);
+    if (isCollapsed && !had) set.add(key);
+    else if (!isCollapsed && had) set.delete(key);
+    else if (legacy) { /* Save the migration from a legacy label. */ }
     else return; // no change
     writeCollapsedGroupsPref(set);
   };
 
   const watch = (group) => {
+    if (isSidebarCopy(group)) return;
     if (group._zaoCollapseAttrObs) return;
     const obs = new MutationObserver((muts) => {
       for (const m of muts) {
@@ -426,6 +434,7 @@ export const setupCollapsedStatePersistence = () => {
     });
     obs.observe(group, { attributes: true, attributeFilter: ["collapsed"] });
     group._zaoCollapseAttrObs = obs;
+    persist(group);
   };
 
   // Existing tab-groups
