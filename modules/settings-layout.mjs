@@ -44,6 +44,11 @@ export const organizeSettingsLayout = (dialog, content) => {
   wrap("Debug & Diagnostics", null, "diagnostics", true);
   const debug = dialog.querySelector(`#${CONFIG.DEBUG_MODE_PREF.replaceAll(".", "-")}`);
   debug?.classList.add("zao-pref-hidden");
+  for (const row of content.querySelectorAll("hbox[id]")) {
+    const label = row.querySelector(".sineItemPreferenceLabel")?.textContent;
+    const control = row.querySelector("input, menulist, checkbox");
+    if (label && control) control.setAttribute("aria-label", label.trim());
+  }
   content.classList.add("zao-settings-layout");
 };
 
