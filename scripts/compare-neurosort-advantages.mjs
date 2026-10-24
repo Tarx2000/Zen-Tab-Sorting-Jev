@@ -53,7 +53,7 @@ const runChecks = async (openRoot, oldRoot) => {
   const oldReadme = readOptional(oldRoot, "README.md");
   const oldPreferences = readOptional(oldRoot, "preferences.json");
   const oldRootAvailable = oldReadme !== null && oldPreferences !== null;
-  const engineValues = preferenceOptionValues(prefs, "extensions.zen-auto-organize.ai-engine");
+  const engineValues = preferenceOptionValues(prefs, "extensions.zen-auto-organize.ai-fallback-provider");
   const sortModeValues = preferenceOptionValues(prefs, "extensions.zen-auto-organize.ai-sort-mode");
   const remoteNoConsentFetchCalls = await probeRemoteNoConsentFetches();
   const buildVersion = config.match(/BUILD_VERSION\s*=\s*"([^"]+)"/)?.[1] || "";
@@ -61,12 +61,9 @@ const runChecks = async (openRoot, oldRoot) => {
   return [
     {
       name: "provider choices",
-      // "None" rather than "Off": the ai-engine dropdown has no explicit off
-      // option, so Sine renders its placeholder as "None" and that is what the
-      // README documents.
-      ok: includesAll(readme, ["None", "Local", "Ollama", "OpenAI-compatible", "Gemini", "Custom"]) &&
-        includesAll(engineValues.join(","), ["local", "ollama", "openai", "gemini", "custom"]) &&
-        prefsUi.includes("Leave AI engine off") &&
+      ok: includesAll(readme, ["Jev", "ChatGPT", "PrimaLabs", "Ollama", "OpenAI-compatible", "Gemini", "Custom"]) &&
+        includesAll(engineValues.join(","), ["chatgpt", "primalabs", "ollama", "openai", "gemini", "custom"]) &&
+        prefsUi.includes("Both stages are part of every normal sort") &&
         providerSettings.includes('return { provider: "off", consentToSendData: false }') &&
         (!oldRootAvailable || oldPreferences.includes("extensions.neurosort.provider")),
     },
@@ -119,7 +116,7 @@ const runChecks = async (openRoot, oldRoot) => {
     },
     {
       name: "sorting mode controls",
-      ok: includesAll(sortModeValues.join(","), ["rules-first", "hybrid", "full-ai"]) &&
+      ok: includesAll(sortModeValues.join(","), ["rules-first", "full-ai"]) &&
         includesAll(sortingMode, ["resolveSortingPlan", "FULL_AI", "HYBRID"]) &&
         clickHandler.includes("getAISortMode") &&
         clickHandler.includes("resolveSortingPlan"),
@@ -146,8 +143,8 @@ const runChecks = async (openRoot, oldRoot) => {
       // the upstream fork's phrasing; the point is that each carried-over
       // feature is still documented somewhere.
       ok: includesAll(readme.toLowerCase(), [
-        "domain rules", "skip domains", "backup & restore",
-        "preview the whole plan", "ollama", "collapsed across restarts",
+        "domain rules", "skip domains", "backup and restore",
+        "preview the plan", "ollama", "collapsed across restarts",
       ]) &&
         includesAll(prefsUi, ["buildRulesEditor", "buildSkipDomainsEditor", "buildBackupRestoreSection"]) &&
         config.includes("collapsed-groups-json"),

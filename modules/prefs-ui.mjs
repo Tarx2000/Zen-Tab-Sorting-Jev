@@ -3,11 +3,11 @@
 // Sign in with ChatGPT (SIWC) widget, and JEV / provider test controls.
 
 import { CONFIG, LOG, DEFAULT_RULES, BUILD_VERSION, h } from "./config.mjs";
+import { ensureHybridPreferences } from "./hybrid-preferences.mjs";
+import { organizeSettingsLayout, maskProviderKeys } from "./settings-layout.mjs";
 import {
   readRulesPref,
   writeRulesPref,
-  getAIEngine,
-  getPipShape,
   isDomainRulesEnabled,
 } from "./rules.mjs";
 import {
@@ -57,7 +57,7 @@ const isOurDialog = (dialog) => {
 
 const injectStylesheet = async () => {
   try {
-    const res = await fetch(`${CONFIG.CSS_URL}?t=${Date.now()}`, { cache: "no-store" });
+    const res = await fetch(new URL("../userChrome.css", import.meta.url).href, { cache: "no-store" });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const css = await res.text();
     const existing = document.querySelector("style[data-zao-style]");
@@ -72,30 +72,15 @@ const injectStylesheet = async () => {
 };
 
 const SECTION_DESCRIPTIONS = [
-  [
-    "Group Rules",
-    "Deterministic domain rules are off by default so JEV and your Fallback-LLM sort dynamically by context. Enable the checkbox below only if you want static domain rules.",
-  ],
-  [
-    "Skip Domains",
-    "Hostnames in this list are never touched by the tidy click — matching tabs are ejected from any group and parked at the top of the workspace. Useful for tabs you want to always keep visible and ungrouped.",
-  ],
-  [
-    "Backup & Restore",
-    "Export your rules and skip list as JSON for safekeeping, or import a previously-saved file to restore them.",
-  ],
-  [
-    "Look & Feel",
-    "Tweaks to how grouped tabs render in Zen's sidebar.",
-  ],
-  [
-    "AI Sorting",
-    "JEV (Stage 1) classifies ungrouped tabs into your existing workspace groups; your Fallback-LLM (Stage 2) clusters remaining tabs into new groups in one shot.",
-  ],
-  [
-    "Remote Provider Settings",
-    "Configure Sign in with ChatGPT, PrimaLabs, OpenAI-compatible, Gemini, or custom providers. Leave AI engine off or use Local/Ollama for local-only sorting.",
-  ],
+  ["AI Sorting", "Jev places tabs into existing groups. Your chosen LLM creates new groups for the remaining tabs. Both stages are part of every normal sort."],
+  ["1. Existing groups", "Choose the Jev service and model used to recognize your existing groups. The same Jev configuration also powers sorting between Spaces."],
+  ["Jev confidence", "Enter confidence as 0.70 or 70%, and the lead as 0.15 or 15 percentage points. These thresholds apply to existing groups. For moving between Spaces, the destination must instead score more than 10 percentage points above the current Space."],
+  ["2. New groups", "Choose the LLM for tabs that Jev could not place. Only this provider’s connection and model settings are shown. New groups contain at least two tabs."],
+  ["3. Sorting behavior", "Keep existing groups and sort loose tabs, or reconsider all tabs. Preview mode lets you review new groups before anything moves."],
+  ["Group Rules", "Optional: match domains to saved groups before Jev runs. Leave this off for sorting by context."],
+  ["Skip Domains", "Exclude sites from sorting. In a normal sort, matching tabs stay loose at the top. When sorting between Spaces, a matching member keeps the entire group in its current Space."],
+  ["Backup & Restore", "Export or import your domain rules and excluded sites. Provider keys and account credentials are not part of this backup."],
+  ["Look & Feel", "Choose how tab groups appear in the sidebar."],
 ];
 
 const tagSeparatorContainers = (dialog) => {
@@ -124,8 +109,6 @@ const findPrefRow = (dialog, prefName) => {
   return dialog.querySelector(`#${CSS.escape(id)}`);
 };
 
-const LOCAL_NEW_GROUP_BEHAVIORS = new Set(["auto-add", "transient", "fresh-categories"]);
-
 const filterDropdownOptions = (row, validValues) => {
   if (!row) return;
   const items = [
@@ -153,177 +136,49 @@ const getFallbackProviderPref = () => {
 };
 
 const updateConditionalFields = (dialog) => {
-  const engine = getAIEngine();
-  const fallbackProvider = getFallbackProviderPref();
+  const activeLlm = getFallbackProviderPref();
   const domainRulesOn = isDomainRulesEnabled();
-
-  // Active LLM target is either the standalone engine or JEV's Fallback-LLM
-  const activeLlm = engine === "jev" ? fallbackProvider : engine;
-  const isLocalOrOllama = activeLlm === "local" || activeLlm === "ollama";
-  const isRemoteProvider =
-    engine === "jev" ||
-    ["chatgpt", "primalabs", "openai", "gemini", "custom"].includes(activeLlm);
-
-  const setHidden = (row, hidden) => {
-    if (!row) return;
-    row.classList.toggle("zao-pref-hidden", hidden);
-  };
-
-  // Hide the Group Rules editor widget unless the user explicitly enables deterministic domain rules
+  const setHidden = (row, hidden) => row?.classList.toggle("zao-pref-hidden", hidden);
+  // The pipeline is fixed; old cached Sine dialogs must not offer a second
+  // competing engine selector either.
+  setHidden(findPrefRow(dialog, CONFIG.AI_ENGINE_PREF), true);
   setHidden(dialog.querySelector(".zao-rules-editor"), !domainRulesOn);
   setHidden(findPrefRow(dialog, CONFIG.STRICT_RULES_PREF), !domainRulesOn);
-
-  // JEV fields (visible when engine === "jev")
-  setHidden(findPrefRow(dialog, CONFIG.AI_JEV_PROVIDER_PREF), engine !== "jev");
-  setHidden(findPrefRow(dialog, CONFIG.AI_JEV_API_KEY_PREF), engine !== "jev");
-  setHidden(findPrefRow(dialog, CONFIG.AI_JEV_MODEL_PREF), engine !== "jev");
-  setHidden(findPrefRow(dialog, CONFIG.AI_JEV_MIN_PROB_PREF), engine !== "jev");
-  setHidden(findPrefRow(dialog, CONFIG.AI_JEV_MIN_MARGIN_PREF), engine !== "jev");
-  setHidden(findPrefRow(dialog, CONFIG.AI_FALLBACK_PROVIDER_PREF), engine !== "jev");
-
-  // Domain-rule mutation behaviors (only relevant when domain rules are enabled)
-  setHidden(findPrefRow(dialog, CONFIG.AI_EXISTING_BEHAVIOR_PREF), !domainRulesOn || engine !== "ollama");
-  const newGroupBehaviorRow = findPrefRow(dialog, CONFIG.AI_NEW_GROUP_BEHAVIOR_PREF);
-  setHidden(newGroupBehaviorRow, !domainRulesOn && !isLocalOrOllama);
-  if (engine === "local") {
-    filterDropdownOptions(newGroupBehaviorRow, LOCAL_NEW_GROUP_BEHAVIORS);
-    try {
-      const current = Services.prefs.getStringPref(CONFIG.AI_NEW_GROUP_BEHAVIOR_PREF, "");
-      if (current && !LOCAL_NEW_GROUP_BEHAVIORS.has(current)) {
-        Services.prefs.setStringPref(CONFIG.AI_NEW_GROUP_BEHAVIOR_PREF, "transient");
-      }
-    } catch {}
-  } else if (engine === "ollama") {
-    filterDropdownOptions(
-      newGroupBehaviorRow,
-      new Set(["auto-add", "transient", "prompt", "fresh-categories", "identify-only"]),
-    );
+  setHidden(findPrefRow(dialog, CONFIG.AI_EXISTING_BEHAVIOR_PREF), !domainRulesOn);
+  if (!domainRulesOn && Services.prefs.getStringPref(CONFIG.AI_NEW_GROUP_BEHAVIOR_PREF, "") === "auto-add") {
+    Services.prefs.setStringPref(CONFIG.AI_NEW_GROUP_BEHAVIOR_PREF, "transient");
   }
+  filterDropdownOptions(findPrefRow(dialog, CONFIG.AI_NEW_GROUP_BEHAVIOR_PREF),
+    new Set(domainRulesOn ? ["transient", "identify-only", "auto-add"] : ["transient", "identify-only"]));
 
-  setHidden(findPrefRow(dialog, CONFIG.AI_OLLAMA_HOST_PREF), activeLlm !== "ollama");
-  setHidden(findPrefRow(dialog, CONFIG.AI_OLLAMA_MODEL_PREF), activeLlm !== "ollama");
-  setHidden(findPrefRow(dialog, CONFIG.AI_OLLAMA_WARMUP_PREF), activeLlm !== "ollama");
-  setHidden(findPrefRow(dialog, CONFIG.AI_LOCAL_BATCH_SIZE_PREF), !isLocalOrOllama);
-  setHidden(findPrefRow(dialog, CONFIG.AI_SORT_MODE_PREF), !domainRulesOn || engine === "off");
-  setHidden(findPrefRow(dialog, CONFIG.AI_PROVIDER_CONSENT_PREF), !isRemoteProvider);
-
-  // ChatGPT (Sign in with ChatGPT) fields
-  setHidden(dialog.querySelector(".zao-chatgpt-signin"), activeLlm !== "chatgpt");
-  setHidden(findPrefRow(dialog, CONFIG.AI_CHATGPT_MODEL_PREF), activeLlm !== "chatgpt");
-
-  // PrimaLabs fields
-  setHidden(findPrefRow(dialog, CONFIG.AI_PRIMALABS_ENDPOINT_PREF), activeLlm !== "primalabs");
-  setHidden(findPrefRow(dialog, CONFIG.AI_PRIMALABS_API_KEY_PREF), activeLlm !== "primalabs");
-  setHidden(findPrefRow(dialog, CONFIG.AI_PRIMALABS_MODEL_PREF), activeLlm !== "primalabs");
-
-  // OpenAI-compatible fields
-  setHidden(findPrefRow(dialog, CONFIG.AI_OPENAI_ENDPOINT_PREF), activeLlm !== "openai");
-  setHidden(findPrefRow(dialog, CONFIG.AI_OPENAI_API_KEY_PREF), activeLlm !== "openai");
-  setHidden(findPrefRow(dialog, CONFIG.AI_OPENAI_MODEL_PREF), activeLlm !== "openai");
-
-  // Gemini fields
-  setHidden(findPrefRow(dialog, CONFIG.AI_GEMINI_API_KEY_PREF), activeLlm !== "gemini");
-  setHidden(findPrefRow(dialog, CONFIG.AI_GEMINI_MODEL_PREF), activeLlm !== "gemini");
-
-  // Custom fields
-  setHidden(findPrefRow(dialog, CONFIG.AI_CUSTOM_ENDPOINT_PREF), activeLlm !== "custom");
-  setHidden(findPrefRow(dialog, CONFIG.AI_CUSTOM_API_KEY_PREF), activeLlm !== "custom");
-  setHidden(findPrefRow(dialog, CONFIG.AI_CUSTOM_MODEL_PREF), activeLlm !== "custom");
-  setHidden(findPrefRow(dialog, CONFIG.AI_CUSTOM_FORMAT_PREF), activeLlm !== "custom");
-
-  // Provider test buttons
-  setHidden(dialog.querySelector(".zao-provider-test"), !isRemoteProvider);
-  setHidden(dialog.querySelector(".zao-jev-test-btn"), engine !== "jev");
-
-// Pip settings removed in favor of native Zen folder rendering
-};
-
-const COUNTDOWN_SECONDS = 3;
-
-const showAckModal = ({ ackPref, contentNodes, logTag }) => {
-  let alreadyAck = false;
-  try { alreadyAck = Services.prefs.getBoolPref(ackPref, false); } catch {}
-  if (alreadyAck) return;
-  if (document.querySelector(".zao-warning-dialog[open]")) return;
-
-  const modal = h("dialog", { class: "zao-warning-dialog" });
-  for (const n of contentNodes) modal.appendChild(n);
-
-  const actions = h("div", { class: "zao-warning-actions" });
-  const btn = h("button", { class: "zao-warning-confirm" });
-  btn.type = "button";
-  btn.setAttribute("disabled", "true");
-  let remaining = COUNTDOWN_SECONDS;
-  const updateLabel = () => {
-    btn.textContent = remaining > 0 ? `${remaining}  I Understand` : "I Understand";
+  const fields = {
+    chatgpt: [CONFIG.AI_CHATGPT_MODEL_PREF],
+    primalabs: [CONFIG.AI_PRIMALABS_ENDPOINT_PREF, CONFIG.AI_PRIMALABS_API_KEY_PREF, CONFIG.AI_PRIMALABS_MODEL_PREF],
+    openai: [CONFIG.AI_OPENAI_ENDPOINT_PREF, CONFIG.AI_OPENAI_API_KEY_PREF, CONFIG.AI_OPENAI_MODEL_PREF],
+    gemini: [CONFIG.AI_GEMINI_API_KEY_PREF, CONFIG.AI_GEMINI_MODEL_PREF],
+    ollama: [CONFIG.AI_OLLAMA_HOST_PREF, CONFIG.AI_OLLAMA_MODEL_PREF, CONFIG.AI_OLLAMA_WARMUP_PREF],
+    custom: [CONFIG.AI_CUSTOM_FORMAT_PREF, CONFIG.AI_CUSTOM_ENDPOINT_PREF, CONFIG.AI_CUSTOM_API_KEY_PREF, CONFIG.AI_CUSTOM_MODEL_PREF],
   };
-  updateLabel();
-  const tick = setInterval(() => {
-    remaining--;
-    if (remaining <= 0) {
-      clearInterval(tick);
-      btn.removeAttribute("disabled");
-    }
-    updateLabel();
-  }, 1000);
-
-  btn.addEventListener("click", () => {
-    if (btn.hasAttribute("disabled")) return;
-    try { Services.prefs.setBoolPref(ackPref, true); }
-    catch (e) { console.warn(`${LOG} failed to set ${ackPref}:`, e); }
-    try { modal.close(); } catch {}
-    modal.remove();
-  });
-  modal.addEventListener("close", () => { clearInterval(tick); });
-
-  actions.appendChild(btn);
-  modal.appendChild(actions);
-  document.documentElement.appendChild(modal);
-  try {
-    modal.showModal();
-  } catch (e) {
-    console.warn(`${LOG} [${logTag}] showModal() failed:`, e);
-    modal.remove();
+  for (const [provider, properties] of Object.entries(fields)) {
+    for (const pref of properties) setHidden(findPrefRow(dialog, pref), activeLlm !== provider);
   }
-};
-
-const maybeShowOllamaWarning = () => {
-  const title = h("h3", { class: "zao-warning-title", text: "Heads up: Ollama runs on your machine" });
-  const lead = h("p", { class: "zao-warning-lead" });
-  lead.appendChild(document.createTextNode("Ollama uses your computer's "));
-  lead.appendChild(h("strong", { text: "RAM and VRAM" }));
-  lead.appendChild(document.createTextNode(" to run AI models."));
-  const list = h("ul", { class: "zao-warning-list" });
-  const li1 = h("li");
-  li1.appendChild(h("strong", { text: "Risk: " }));
-  li1.appendChild(document.createTextNode("a model too big for your hardware can slow or crash your system."));
-  const li2 = h("li");
-  li2.appendChild(h("strong", { text: "Safe default: " }));
-  li2.appendChild(document.createTextNode("qwen2.5:1.5b (~1 GB) — runs on most machines."));
-  list.append(li1, li2);
-  showAckModal({
-    ackPref: CONFIG.OLLAMA_ACKNOWLEDGED_PREF,
-    contentNodes: [title, lead, list],
-    logTag: "ollama-warning",
-  });
-};
-
-const maybeShowLocalWarning = () => {
-  const title = h("h3", { class: "zao-warning-title", text: "Heads up: Local AI runs inside Firefox" });
-  const lead = h("p", { class: "zao-warning-lead" });
-  lead.appendChild(document.createTextNode("The Local engine uses "));
-  lead.appendChild(h("strong", { text: "Firefox's built-in ML model" }));
-  lead.appendChild(document.createTextNode(" — no extra setup, but it runs inside the browser."));
-  const list = h("ul", { class: "zao-warning-list" });
-  const li1 = h("li");
-  li1.appendChild(h("strong", { text: "Risk: " }));
-  li1.appendChild(document.createTextNode("with hundreds of tabs, the AI pass can briefly spike CPU and lag the browser."));
-  list.appendChild(li1);
-  showAckModal({
-    ackPref: CONFIG.LOCAL_ACKNOWLEDGED_PREF,
-    contentNodes: [title, lead, list],
-    logTag: "local-warning",
-  });
+  setHidden(dialog.querySelector(".zao-chatgpt-signin"), activeLlm !== "chatgpt");
+  dialog.querySelector(".zao-chatgpt-signin")?._zaoRefreshState?.();
+  for (const name of [CONFIG.AI_JEV_MODEL_PREF, CONFIG.AI_CHATGPT_MODEL_PREF]) {
+    const input = findPrefRow(dialog, name)?.querySelector("input");
+    if (input && document.activeElement !== input) input.value = Services.prefs.getStringPref(name, input.value);
+  }
+  for (const name of [CONFIG.AI_JEV_PROVIDER_PREF, CONFIG.AI_FALLBACK_PROVIDER_PREF,
+    CONFIG.AI_SORT_MODE_PREF, CONFIG.AI_NEW_GROUP_BEHAVIOR_PREF]) {
+    const menu = findPrefRow(dialog, name)?.querySelector("menulist");
+    if (!menu) continue;
+    const value = Services.prefs.getStringPref(name, menu.getAttribute("value") || "");
+    const item = [...menu.querySelectorAll("menuitem")].find(item => item.getAttribute("value") === value);
+    if (item) {
+      menu.setAttribute("value", value);
+      menu.setAttribute("label", item.getAttribute("label"));
+    }
+  }
 };
 
 const OBSERVED_PREFS = [
@@ -332,6 +187,11 @@ const OBSERVED_PREFS = [
   CONFIG.AI_JEV_PROVIDER_PREF,
   CONFIG.USE_DOMAIN_RULES_PREF,
   CONFIG.PIP_SHAPE_PREF,
+  CONFIG.AI_CHATGPT_SESSION_PREF,
+  CONFIG.AI_CHATGPT_MODEL_PREF,
+  CONFIG.AI_JEV_MODEL_PREF,
+  CONFIG.AI_SORT_MODE_PREF,
+  CONFIG.AI_NEW_GROUP_BEHAVIOR_PREF,
 ];
 
 let enginePrefObserver = null;
@@ -356,11 +216,7 @@ const setupEnginePrefObserver = () => {
       for (const d of document.querySelectorAll(".sineItemPreferenceDialog")) {
         if (isOurDialog(d)) {
           updateConditionalFields(d);
-          if (data === CONFIG.AI_ENGINE_PREF) {
-            const engine = getAIEngine();
-            if (engine === "ollama") maybeShowOllamaWarning();
-            else if (engine === "local") maybeShowLocalWarning();
-          }
+
           break;
         }
       }
@@ -398,7 +254,7 @@ const insertAfter = (parent, newNode, refNode) => {
 
 // Interactive "Sign in with ChatGPT" widget for OpenAI SIWC subscription quota.
 const buildChatGPTSignInSection = () => {
-  const container = h("div", { class: "zao-chatgpt-signin zao-provider-test" });
+  const container = h("div", { class: "zao-chatgpt-signin" });
 
   const signInBtn = h("button", { text: "Sign in with ChatGPT" });
   signInBtn.className = "zao-backup-btn";
@@ -507,79 +363,34 @@ const buildChatGPTSignInSection = () => {
     refreshState();
   });
 
+  container._zaoRefreshState = refreshState;
   refreshState();
   return container;
 };
 
-const buildProviderTestSection = () => {
-  const container = h("div", { class: "zao-provider-test" });
-
-  const jevButton = h("button", { text: "Test JEV" });
-  jevButton.className = "zao-backup-btn zao-jev-test-btn";
-
-  const button = h("button", { text: "Test connection" });
-  button.className = "zao-backup-btn";
-
+const buildProviderTestSection = (stage) => {
+  const isJev = stage === "jev";
+  const container = h("div", { class: `zao-provider-test zao-${stage}-test` });
+  const button = h("button", { text: isJev ? "Test Jev connection" : "Test LLM connection", class: "zao-backup-btn" });
   const status = h("span", { class: "zao-provider-test-status" });
-  container.append(jevButton, button, status);
-
-  jevButton.addEventListener("click", async () => {
-    jevButton.disabled = true;
-    status.textContent = "Testing JEV…";
-    status.removeAttribute("data-state");
-    try {
-      const result = await testJevConnection();
-      if (result.ok) {
-        status.textContent = `JEV Connected — ${result.reply}`;
-        status.dataset.state = "ok";
-      } else if (result.reason === "consent_required") {
-        status.textContent = "Consent required — tick the data-sending checkbox above first.";
-        status.dataset.state = "err";
-      } else if (result.reason === "missing_required_config") {
-        status.textContent = "Missing JEV API key.";
-        status.dataset.state = "err";
-      } else {
-        status.textContent = `JEV Failed: ${result.error || result.reason}`;
-        status.dataset.state = "err";
-      }
-    } catch (e) {
-      status.textContent = `JEV Failed: ${e?.message || e}`;
-      status.dataset.state = "err";
-    } finally {
-      jevButton.disabled = false;
-    }
-  });
-
+  status.setAttribute("role", "status");
+  container.append(button, status);
   button.addEventListener("click", async () => {
     button.disabled = true;
     status.textContent = "Testing…";
     status.removeAttribute("data-state");
     try {
-      const result = await testProviderConnection();
-      if (result.ok) {
-        status.textContent = "Connected — provider replied.";
-        status.dataset.state = "ok";
-      } else if (result.reason === "consent_required") {
-        status.textContent = "Consent required — tick the data-sending checkbox above first.";
-        status.dataset.state = "err";
-      } else if (result.reason === "missing_required_config") {
-        status.textContent = `Missing: ${(result.missingFields || []).join(", ")}.`;
-        status.dataset.state = "err";
-      } else if (result.reason === "provider_disabled") {
-        status.textContent = "Select a remote AI engine or Fallback-LLM first.";
-        status.dataset.state = "err";
-      } else {
-        status.textContent = `Failed: ${result.error || result.reason}`;
-        status.dataset.state = "err";
-      }
-    } catch (e) {
-      status.textContent = `Failed: ${e?.message || e}`;
+      const result = await (isJev ? testJevConnection() : testProviderConnection());
+      status.dataset.state = result.ok ? "ok" : "err";
+      status.textContent = result.ok ? "Connected — provider replied."
+        : result.reason === "consent_required" ? "Allow sending tab data in AI Sorting first."
+        : result.reason === "missing_required_config" ? (isJev ? "Enter your Jev API key first." : `Complete the provider settings: ${(result.missingFields || []).join(", ")}.`)
+        : `Connection failed: ${result.error || result.reason}`;
+    } catch (error) {
+      status.textContent = `Connection failed: ${error?.message || error}`;
       status.dataset.state = "err";
-    } finally {
-      button.disabled = false;
-    }
+    } finally { button.disabled = false; }
   });
-
   return container;
 };
 
@@ -675,6 +486,8 @@ const performInject = (dialog) => {
   const content = dialog.querySelector(".sineItemPreferenceDialogContent");
   if (!content) return;
 
+  ensureHybridPreferences(Services.prefs);
+
   // Do NOT pre-populate deterministic domain rules unless the user explicitly adds them.
   let initial = readRulesPref({ keepIncomplete: true });
   if (!initial) {
@@ -685,23 +498,19 @@ const performInject = (dialog) => {
   const skipEditor = buildSkipDomainsEditor();
   const backupSection = buildBackupRestoreSection();
   const chatGptSection = buildChatGPTSignInSection();
-  const testSection = buildProviderTestSection();
+  const jevTest = buildProviderTestSection("jev");
+  const llmTest = buildProviderTestSection("llm");
 
   const rulesCheckboxRow = findPrefRow(dialog, CONFIG.USE_DOMAIN_RULES_PREF) || findSeparatorContainer(dialog, "Group Rules");
   insertAfter(content, rulesEditor, rulesCheckboxRow);
   insertAfter(content, skipEditor, findSeparatorContainer(dialog, "Skip Domains"));
   insertAfter(content, backupSection, findSeparatorContainer(dialog, "Backup & Restore"));
 
-  const fallbackRow = findPrefRow(dialog, CONFIG.AI_FALLBACK_PROVIDER_PREF);
-  if (fallbackRow) {
-    insertAfter(content, testSection, fallbackRow);
-    insertAfter(content, chatGptSection, fallbackRow);
-  } else {
-    const remoteSep = findSeparatorContainer(dialog, "Remote Provider Settings") ||
-                      findSeparatorContainer(dialog, "AI Sorting");
-    insertAfter(content, testSection, remoteSep);
-    insertAfter(content, chatGptSection, remoteSep);
-  }
+  insertAfter(content, jevTest, findPrefRow(dialog, CONFIG.AI_JEV_MODEL_PREF));
+  insertAfter(content, chatGptSection, findPrefRow(dialog, CONFIG.AI_FALLBACK_PROVIDER_PREF));
+  const behaviorHeader = findSeparatorContainer(dialog, "3. Sorting behavior");
+  if (behaviorHeader) content.insertBefore(llmTest, behaviorHeader);
+  else content.appendChild(llmTest);
 
   const debugLogsSection = buildDebugLogsSection(dialog);
   const debugSep = findSeparatorContainer(dialog, "Debug & Diagnostics");
@@ -713,6 +522,8 @@ const performInject = (dialog) => {
 
   tagSeparatorContainers(dialog);
   injectSectionDescriptions(dialog);
+  organizeSettingsLayout(dialog, content);
+  maskProviderKeys(dialog);
   setupEnginePrefObserver();
   updateConditionalFields(dialog);
   console.log(`${LOG} injected rules + skip + backup + ChatGPT SIWC sections into Sine settings dialog`);
@@ -747,7 +558,7 @@ const onOurDialogFound = (dialog) => {
     if (!dialog.isConnected) return;
     if (dialog.querySelector(".zao-rules-editor")) return;
     const content = dialog.querySelector(".sineItemPreferenceDialogContent");
-    const hasPrefs = content && (content.children.length > 2 || dialog.querySelector(".separator-label"));
+    const hasPrefs = content && findPrefRow(dialog, CONFIG.DEBUG_MODE_PREF);
     if (hasPrefs) {
       try { performInject(dialog); }
       catch (e) { console.error(`${LOG} inject failed:`, e); }

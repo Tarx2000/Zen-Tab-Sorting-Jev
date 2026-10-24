@@ -1,264 +1,103 @@
 [
   {
     "type": "separator",
-    "label": "Group Rules"
-  },
-  {
-    "type": "checkbox",
-    "label": "Enable deterministic domain rules (Pass 1) \u2014 off by default so JEV & Fallback-LLM sort dynamically by context",
-    "property": "extensions.zen-auto-organize.use-domain-rules",
-    "defaultValue": false
-  },
-  {
-    "type": "separator",
-    "label": "Skip Domains"
-  },
-  {
-    "type": "separator",
-    "label": "Backup & Restore"
-  },
-  {
-    "type": "separator",
-    "label": "Look & Feel"
-  },
-  {
-    "type": "checkbox",
-    "label": "Minimal style \u2014 strip group colors and match Zen's address-bar styling",
-    "property": "extensions.zen-auto-organize.minimal-style",
-    "defaultValue": false
-  },
-  {
-    "type": "checkbox",
-    "label": "Strict rule enforcement \u2014 eject tabs from a group when their hostname isn't in that group's rule",
-    "property": "extensions.zen-auto-organize.strict-rules",
-    "defaultValue": false
-  },
-  {
-    "type": "separator",
     "label": "AI Sorting"
   },
   {
-    "type": "dropdown",
-    "label": "AI engine",
-    "property": "extensions.zen-auto-organize.ai-engine",
-    "defaultValue": "jev",
-    "options": [
-      {
-        "label": "JEV + Fallback-LLM \u2014 TypeSafe JEV for existing groups + One-Shot LLM for new groups",
-        "value": "jev"
-      },
-      {
-        "label": "ChatGPT (Sign in with ChatGPT) \u2014 Use your ChatGPT Plus/Pro quota",
-        "value": "chatgpt"
-      },
-      {
-        "label": "PrimaLabs \u2014 Fast OpenAI-compatible API (DeepSeek V4.1 Flash)",
-        "value": "primalabs"
-      },
-      {
-        "label": "OpenAI-compatible \u2014 Remote or self-hosted /v1/chat/completions",
-        "value": "openai"
-      },
-      {
-        "label": "Gemini \u2014 Google AI Studio generateContent",
-        "value": "gemini"
-      },
-      {
-        "label": "Ollama \u2014 Stronger model, requires Ollama running locally",
-        "value": "ollama"
-      },
-      {
-        "label": "Local \u2014 Built-in model, limited capability",
-        "value": "local"
-      },
-      {
-        "label": "Custom \u2014 OpenAI or Ollama-compatible endpoint",
-        "value": "custom"
-      }
-    ]
-  },
-  {
     "type": "checkbox",
-    "label": "Allow sending tab titles, URLs, and optional page snippets to the selected provider",
+    "label": "Allow Jev and the selected LLM to receive tab titles, URLs and optional page snippets",
     "property": "extensions.zen-auto-organize.ai-provider-consent",
     "defaultValue": false
   },
   {
+    "type": "separator",
+    "label": "1. Existing groups — Jev"
+  },
+  {
     "type": "dropdown",
-    "label": "JEV provider (Stage 1: classify into existing workspace tab groups)",
+    "label": "Jev provider",
     "property": "extensions.zen-auto-organize.ai-jev-provider",
     "defaultValue": "typesafe",
     "placeholder": false,
     "options": [
       {
-        "label": "Official TypeSafe API \u2014 https://api.typesafe.ai/v1/systemone",
+        "label": "Official TypeSafe API — https://api.typesafe.ai/v1/systemone",
         "value": "typesafe"
       },
       {
-        "label": "OpenRouter Decisions API \u2014 https://openrouter.ai/api/alpha/decisions",
+        "label": "OpenRouter Decisions API — https://openrouter.ai/api/alpha/decisions",
         "value": "openrouter"
       }
     ]
   },
   {
     "type": "string",
-    "label": "JEV API key (TypeSafe or OpenRouter key)",
+    "label": "Jev API key",
     "property": "extensions.zen-auto-organize.ai-jev-api-key",
     "defaultValue": "",
     "placeholder": "Bearer key for TypeSafe or OpenRouter"
   },
   {
     "type": "string",
-    "label": "JEV model",
+    "label": "Jev model",
     "property": "extensions.zen-auto-organize.ai-jev-model",
     "defaultValue": "jev-1.13.0",
     "placeholder": "jev-1.13.0 or typesafe/jev-1.13"
   },
   {
+    "type": "separator",
+    "label": "Jev confidence thresholds"
+  },
+  {
     "type": "string",
-    "label": "JEV Min Probability (0.05\u20130.99 or 5%\u201399% \u2014 minimum confidence to sort into an existing group)",
+    "label": "Minimum confidence",
     "property": "extensions.zen-auto-organize.ai-jev-min-prob",
     "defaultValue": "0.70",
     "placeholder": "0.70 (or 70%)"
   },
   {
     "type": "string",
-    "label": "JEV Min Margin (0.00\u20130.99 or 0%\u201399% \u2014 minimum lead of #1 group over #2 group)",
+    "label": "Lead over the next group",
     "property": "extensions.zen-auto-organize.ai-jev-min-margin",
     "defaultValue": "0.15",
     "placeholder": "0.15 (or 15%)"
   },
   {
+    "type": "separator",
+    "label": "2. New groups — LLM"
+  },
+  {
     "type": "dropdown",
-    "label": "Fallback-LLM for new groups (Stage 2: One-Shot clustering of leftover ungrouped tabs)",
+    "label": "LLM provider",
     "property": "extensions.zen-auto-organize.ai-fallback-provider",
     "defaultValue": "chatgpt",
     "placeholder": false,
     "options": [
       {
-        "label": "ChatGPT (Sign in with ChatGPT \u2014 uses your ChatGPT subscription quota)",
+        "label": "ChatGPT subscription",
         "value": "chatgpt"
       },
       {
-        "label": "PrimaLabs API (https://api.primalabs.ai/v1 \u2014 DeepSeek V4.1 Flash)",
+        "label": "PrimaLabs API",
         "value": "primalabs"
       },
       {
-        "label": "OpenAI-compatible \u2014 Custom Base URL, API key & model",
+        "label": "OpenAI-compatible API",
         "value": "openai"
       },
       {
-        "label": "Gemini \u2014 Google AI Studio generateContent",
+        "label": "Google Gemini",
         "value": "gemini"
       },
       {
-        "label": "Ollama \u2014 Local Ollama model",
+        "label": "Ollama (local LLM)",
         "value": "ollama"
       },
       {
-        "label": "Custom \u2014 OpenAI or Ollama-compatible endpoint",
+        "label": "Custom endpoint",
         "value": "custom"
-      },
-      {
-        "label": "Off \u2014 Nur bestehende Ordner mit JEV (kein Fallback / keine neuen Gruppen)",
-        "value": "off"
       }
     ]
-  },
-  {
-    "type": "dropdown",
-    "label": "Sorting mode",
-    "property": "extensions.zen-auto-organize.ai-sort-mode",
-    "defaultValue": "rules-first",
-    "placeholder": false,
-    "options": [
-      {
-        "label": "Rules first \u2014 Use domain rules, then AI for leftovers",
-        "value": "rules-first"
-      },
-      {
-        "label": "Hybrid \u2014 Fast rules first, then AI-sort unmatched tabs every run",
-        "value": "hybrid"
-      },
-      {
-        "label": "Full AI \u2014 Ignore rules and re-cluster all eligible tabs",
-        "value": "full-ai"
-      }
-    ]
-  },
-  {
-    "type": "dropdown",
-    "label": "When AI assigns a tab to an existing group",
-    "property": "extensions.zen-auto-organize.ai-existing-behavior",
-    "defaultValue": "transient",
-    "placeholder": false,
-    "options": [
-      {
-        "label": "Transient \u2014 Move the tab only, rules untouched",
-        "value": "transient"
-      },
-      {
-        "label": "Always-add \u2014 Append the tab's domain to the matched rule (rules grow)",
-        "value": "always-add"
-      }
-    ]
-  },
-  {
-    "type": "dropdown",
-    "label": "When AI creates a new group",
-    "property": "extensions.zen-auto-organize.ai-new-group-behavior",
-    "defaultValue": "transient",
-    "placeholder": false,
-    "options": [
-      {
-        "label": "Transient \u2014 Create the group only, no rule added",
-        "value": "transient"
-      },
-      {
-        "label": "Auto-add \u2014 Create the group and save it as a new rule",
-        "value": "auto-add"
-      },
-      {
-        "label": "Prompt \u2014 Open Zen's edit modal to confirm name and color",
-        "value": "prompt"
-      },
-      {
-        "label": "Fresh categories \u2014 Re-tidy ALL tabs into AI-invented groups, ignoring rules",
-        "value": "fresh-categories"
-      },
-      {
-        "label": "Plan Mode \u2014 Preview the AI's plan, pick which groups to keep, optionally re-assign",
-        "value": "identify-only"
-      }
-    ]
-  },
-  {
-    "type": "string",
-    "label": "Ollama host",
-    "property": "extensions.zen-auto-organize.ai-ollama-host",
-    "defaultValue": "http://localhost:11434"
-  },
-  {
-    "type": "string",
-    "label": "Ollama model",
-    "property": "extensions.zen-auto-organize.ai-ollama-model",
-    "defaultValue": "qwen2.5:1.5b"
-  },
-  {
-    "type": "checkbox",
-    "label": "Keep Ollama model warm \u2014 preloads at browser start and keeps it loaded between clicks (faster tidy clicks; uses VRAM continuously)",
-    "property": "extensions.zen-auto-organize.ai-ollama-warmup",
-    "defaultValue": true
-  },
-  {
-    "type": "string",
-    "label": "Local AI batch size (only used when >75 unmatched tabs; smaller = gentler on CPU, larger = faster)",
-    "property": "extensions.zen-auto-organize.ai-local-batch-size",
-    "defaultValue": "30"
-  },
-  {
-    "type": "separator",
-    "label": "Remote Provider Settings"
   },
   {
     "type": "string",
@@ -325,6 +164,41 @@
   },
   {
     "type": "string",
+    "label": "Ollama host",
+    "property": "extensions.zen-auto-organize.ai-ollama-host",
+    "defaultValue": "http://localhost:11434"
+  },
+  {
+    "type": "string",
+    "label": "Ollama model",
+    "property": "extensions.zen-auto-organize.ai-ollama-model",
+    "defaultValue": "qwen2.5:1.5b"
+  },
+  {
+    "type": "checkbox",
+    "label": "Keep Ollama model warm — preloads at browser start and keeps it loaded between clicks (faster tidy clicks; uses VRAM continuously)",
+    "property": "extensions.zen-auto-organize.ai-ollama-warmup",
+    "defaultValue": true
+  },
+  {
+    "type": "dropdown",
+    "label": "Custom request format",
+    "property": "extensions.zen-auto-organize.ai-custom-format",
+    "defaultValue": "openai",
+    "placeholder": false,
+    "options": [
+      {
+        "label": "OpenAI-compatible chat",
+        "value": "openai"
+      },
+      {
+        "label": "Ollama generate",
+        "value": "ollama"
+      }
+    ]
+  },
+  {
+    "type": "string",
     "label": "Custom endpoint",
     "property": "extensions.zen-auto-organize.ai-custom-endpoint",
     "defaultValue": "",
@@ -345,21 +219,97 @@
     "placeholder": "model name"
   },
   {
+    "type": "separator",
+    "label": "3. Sorting behavior"
+  },
+  {
     "type": "dropdown",
-    "label": "Custom request format",
-    "property": "extensions.zen-auto-organize.ai-custom-format",
-    "defaultValue": "openai",
+    "label": "Tabs to sort",
+    "property": "extensions.zen-auto-organize.ai-sort-mode",
+    "defaultValue": "rules-first",
     "placeholder": false,
     "options": [
       {
-        "label": "OpenAI-compatible chat",
-        "value": "openai"
+        "label": "Ungrouped tabs only — keep existing groups",
+        "value": "rules-first"
       },
       {
-        "label": "Ollama generate",
-        "value": "ollama"
+        "label": "All tabs — reconsider existing groups",
+        "value": "full-ai"
       }
     ]
+  },
+  {
+    "type": "dropdown",
+    "label": "Apply new groups",
+    "property": "extensions.zen-auto-organize.ai-new-group-behavior",
+    "defaultValue": "transient",
+    "placeholder": false,
+    "options": [
+      {
+        "label": "Create automatically",
+        "value": "transient"
+      },
+      {
+        "label": "Preview the plan before applying",
+        "value": "identify-only"
+      },
+      {
+        "label": "Create and save a domain rule",
+        "value": "auto-add"
+      }
+    ]
+  },
+  {
+    "type": "separator",
+    "label": "Skip Domains"
+  },
+  {
+    "type": "separator",
+    "label": "Group Rules"
+  },
+  {
+    "type": "checkbox",
+    "label": "Use optional domain rules before Jev",
+    "property": "extensions.zen-auto-organize.use-domain-rules",
+    "defaultValue": false
+  },
+  {
+    "type": "checkbox",
+    "label": "Remove tabs that no longer match their domain rule",
+    "property": "extensions.zen-auto-organize.strict-rules",
+    "defaultValue": false
+  },
+  {
+    "type": "dropdown",
+    "label": "When a tab matches an existing domain rule",
+    "property": "extensions.zen-auto-organize.ai-existing-behavior",
+    "defaultValue": "transient",
+    "placeholder": false,
+    "options": [
+      {
+        "label": "Transient — Move the tab only, rules untouched",
+        "value": "transient"
+      },
+      {
+        "label": "Always-add — Append the tab's domain to the matched rule (rules grow)",
+        "value": "always-add"
+      }
+    ]
+  },
+  {
+    "type": "separator",
+    "label": "Look & Feel"
+  },
+  {
+    "type": "checkbox",
+    "label": "Minimal style — strip group colors and match Zen's address-bar styling",
+    "property": "extensions.zen-auto-organize.minimal-style",
+    "defaultValue": false
+  },
+  {
+    "type": "separator",
+    "label": "Backup & Restore"
   },
   {
     "type": "separator",
@@ -367,7 +317,7 @@
   },
   {
     "type": "checkbox",
-    "label": "Enable debug logging (records sorting decisions, JEV scores & Fallback-LLM responses in Settings)",
+    "label": "Record sorting decisions for troubleshooting",
     "property": "extensions.zen-auto-organize.debug-mode",
     "defaultValue": false
   }

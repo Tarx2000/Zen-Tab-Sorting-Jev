@@ -109,3 +109,25 @@ Run the native Library and simulated OAuth regression with:
 ```sh
 npm run e2e:library -- --headed
 ```
+
+## Provider settings
+
+Normal Autosort always uses Jev for existing groups, then the selected LLM for
+new groups. Settings are split into three cards: Jev, LLM and sorting behavior.
+Choose the Jev service/key/model independently from ChatGPT, PrimaLabs,
+OpenAI-compatible, Gemini, Ollama or Custom. Each stage has its own connection
+test. API keys are masked and only the selected LLM’s fields are visible.
+
+Choose loose tabs only or all tabs, and automatic application or preview. The
+Jev probability and runner-up margin controls live in its collapsed confidence
+section; they do not replace the fixed 10-point improvement rule for Spaces.
+Optional domain rules and diagnostics are also collapsed by default.
+
+On update, a former standalone provider becomes the LLM in stage 2. Credentials
+and custom models remain stored. The former duplicate hybrid/rules-first modes
+are unified; old fresh-category and rename prompts migrate to all-tabs and plan
+preview respectively. Turning off the fallback is no longer a settings option.
+
+The settings form can be exercised in a disposable native Sine profile with
+`npm run e2e:settings -- --headed`. This checks all six LLM choices, actual Sine
+field rendering, model persistence and key masking without provider requests.

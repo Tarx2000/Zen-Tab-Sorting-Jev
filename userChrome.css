@@ -1067,3 +1067,62 @@ dialog.zao-warning-dialog::backdrop {
 @media (prefers-reduced-motion: reduce) {
   :is(#tab-wand-button, .zao-organize-button).zao-thinking svg, :is(#tab-wand-button, .zao-organize-button).zao-wiggling svg { animation: none !important; }
 }
+
+/* Settings follow the fixed Jev → LLM flow. Keep native Sine preference nodes
+   and their handlers inside readable cards rather than duplicating controls. */
+.zao-our-dialog .zao-settings-layout {
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 14px;
+  padding: 12px !important;
+}
+.zao-settings-layout .zao-settings-card {
+  display: block;
+  box-sizing: border-box;
+  min-width: 0;
+  border: 1px solid color-mix(in srgb, currentColor 16%, transparent);
+  border-radius: 12px;
+  padding: 16px !important;
+  background: color-mix(in srgb, currentColor 2%, transparent);
+}
+.zao-settings-card .zao-section-header-row { margin: 0 0 8px !important; }
+.zao-settings-card .zao-section-header-row hr { display: none; }
+.zao-settings-card .separator-label { font-size: 16px !important; font-weight: 650; }
+.zao-settings-card .zao-pref-description { margin: 0 0 14px; max-width: 85ch; font-size: 13px; opacity: .8; }
+.zao-settings-card hbox[id]:not(.sineItemPreferenceCheckbox) {
+  display: grid !important;
+  grid-template-columns: minmax(150px, 1fr) minmax(250px, 1.2fr);
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0 !important;
+}
+.zao-settings-card hbox[id] > label { margin: 0 !important; white-space: normal !important; }
+.zao-settings-card hbox[id] > input,
+.zao-settings-card hbox[id] > menulist { min-width: 0 !important; width: 100% !important; box-sizing: border-box; margin: 0 !important; }
+.zao-settings-card .sineItemPreferenceCheckbox { padding: 8px 0 !important; align-items: start; }
+.zao-settings-card .sineItemPreferenceCheckbox label { white-space: normal; }
+.zao-settings-card summary { font-size: 14px; font-weight: 600; cursor: pointer; }
+.zao-settings-card .zao-details-content { margin-top: 14px; }
+.zao-settings-card .zao-settings-card { margin-top: 12px; background: transparent; }
+.zao-secret-control { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.zao-secret-control input { flex: 1; min-width: 0 !important; width: 100% !important; }
+.zao-secret-control button { flex: 0 0 auto; }
+.zao-chatgpt-signin { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 12px 0; }
+.zao-chatgpt-signin .zao-provider-test-status { flex-basis: 100%; }
+.zao-settings-card .zao-provider-test { flex-wrap: wrap; padding: 0 !important; }
+@media (max-width: 700px) {
+  .zao-settings-card hbox[id]:not(.sineItemPreferenceCheckbox) { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+}
+/* Conditional visibility must win over the card's native-row grid layout. */
+.zao-our-dialog .zao-settings-layout .zao-settings-card .zao-pref-hidden {
+  display: none !important;
+}
+.zao-our-dialog .zao-settings-layout { width: auto !important; min-width: 0 !important; max-width: none !important; }
+.zao-settings-card .separator-label {
+  position: static !important;
+  transform: none !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  background: transparent !important;
+  color: inherit !important;
+}

@@ -10,9 +10,12 @@ const REQUIRED_SECTIONS = [
   "AI Sorting",
 ];
 
-const REQUIRED_ENGINE_VALUES = ["local", "ollama", "openai", "gemini", "custom"];
+const REQUIRED_LLM_VALUES = ["chatgpt", "primalabs", "ollama", "openai", "gemini", "custom"];
 const REQUIRED_PROPERTIES = [
-  "extensions.zen-auto-organize.ai-engine",
+  "extensions.zen-auto-organize.ai-jev-provider",
+  "extensions.zen-auto-organize.ai-jev-model",
+  "extensions.zen-auto-organize.ai-jev-api-key",
+  "extensions.zen-auto-organize.ai-fallback-provider",
   "extensions.zen-auto-organize.ai-sort-mode",
   "extensions.zen-auto-organize.ai-provider-consent",
   "extensions.zen-auto-organize.ai-openai-api-key",
@@ -65,19 +68,26 @@ export const validatePreferences = (rootDir = process.cwd()) => {
     if (!properties.has(property)) errors.push(`missing preference ${property}`);
   }
 
-  const engine = findEntry(preferences, "extensions.zen-auto-organize.ai-engine");
-  const engineValues = optionValues(engine);
-  for (const value of REQUIRED_ENGINE_VALUES) {
-    if (!engineValues.includes(value)) errors.push(`AI engine missing option ${value}`);
+  if (findEntry(preferences, "extensions.zen-auto-organize.ai-engine")) {
+    errors.push("the hybrid pipeline is fixed; do not expose an AI engine selector");
   }
-
-  if (engineValues.includes("disabled")) {
-    errors.push("AI engine must use compatibility value off, not disabled");
+  const llm = findEntry(preferences, "extensions.zen-auto-organize.ai-fallback-provider");
+  const llmValues = optionValues(llm);
+  for (const value of REQUIRED_LLM_VALUES) {
+    if (!llmValues.includes(value)) errors.push(`LLM provider missing option ${value}`);
+  }
+  if (llmValues.some(value => ["off", "none", "local"].includes(value))) {
+    errors.push("LLM options must support the mandatory two-stage pipeline");
+  }
+  for (const entry of preferences) {
+    for (const option of entry.options || []) {
+      if (/[&<>\"]/.test(option.label || "")) errors.push(`XML-unsafe dropdown label in ${entry.property}`);
+    }
   }
 
   const sortMode = findEntry(preferences, "extensions.zen-auto-organize.ai-sort-mode");
   const sortModeValues = optionValues(sortMode);
-  for (const value of ["rules-first", "hybrid", "full-ai"]) {
+  for (const value of ["rules-first", "full-ai"]) {
     if (!sortModeValues.includes(value)) errors.push(`AI sorting mode missing option ${value}`);
   }
 

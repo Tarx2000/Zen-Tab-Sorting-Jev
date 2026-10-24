@@ -1,6 +1,6 @@
 {
   "name": "zen-tab-sorting",
-  "version": "1.12.1",
+  "version": "1.13.0",
   "private": true,
   "type": "module",
   "description": "Zen Tab Sorting Sine mod validation and provider safety harness.",
@@ -14,6 +14,7 @@
     "e2e:zen": "node scripts/e2e-zen.mjs",
     "e2e:workspaces": "node scripts/e2e-workspaces.mjs",
     "e2e:library": "node scripts/e2e-library.mjs",
+    "e2e:settings": "node scripts/e2e-settings.mjs",
     "check": "npm run validate && npm test && npm run compare"
   },
   "engines": {

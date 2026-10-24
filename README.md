@@ -38,36 +38,32 @@ Tab Groups to be installed.
 2. Skip domains are pulled out. Anything matching the skip list gets ejected from its group and parked at the top of the workspace, on every click.
 3. The AI pass handles the rest, if you've enabled one. It can file leftover tabs into existing groups or invent new ones.
 
-Three sorting modes control how much work the AI does. Rules first shows it only what the rules missed, hybrid does the same but re-runs on every click, and full AI ignores your rules and re-clusters everything.
+Normal Autosort always uses two stages: Jev classifies tabs into existing groups, then the selected LLM creates new groups for the remaining tabs. Choose whether to sort only loose tabs or reconsider all tabs, and whether to apply new groups automatically or preview the plan first.
 
-When the AI creates new groups you can have it save them as rules, create them once without saving, open Zen's rename dialog for each, or preview the whole plan first and pick what to keep.
+## Jev and the LLM
 
-## AI engines
+Configure **Jev** independently: select TypeSafe or OpenRouter, enter that service’s API key, and choose the Jev model. Confidence thresholds are under its advanced section.
 
-| Engine | Where the data goes | What you need |
-| --- | --- | --- |
-| None | No request | Nothing |
-| Local | Firefox's built-in model, on your machine | Nothing |
-| Ollama | A local daemon, `http://localhost:11434` by default | Ollama installed and a model pulled |
-| OpenAI-compatible | Your configured `/v1/chat/completions` endpoint | Endpoint, API key, model, consent |
-| Gemini | Google's generateContent endpoint | API key, model, consent |
-| Custom | Any OpenAI- or Ollama-shaped endpoint | Endpoint, model, format, consent |
+Then choose the **LLM for new groups**:
 
-The three remote engines send tab titles, URLs and optional page snippets to whichever service you point them at. That only happens after you tick the consent checkbox, which is separate from picking the engine and off by default. Until it's ticked, the remote code paths refuse to make a request. With Local and Ollama nothing leaves your machine, so neither asks for consent.
+| Provider | Connection settings |
+| --- | --- |
+| ChatGPT | Sign in with ChatGPT; load or enter a model |
+| PrimaLabs | API key, endpoint and model |
+| OpenAI-compatible | API key, base URL and model |
+| Gemini | API key and model |
+| Ollama | Local host and model; optional preloading |
+| Custom | OpenAI or Ollama request format, endpoint, key and model |
 
-There's a Test connection button under Remote Provider Settings. It runs one small request through the same checks a real sort uses and reports back what happened, so a wrong key or model shows you the actual error instead of a sort that quietly does nothing.
+Only the chosen LLM’s fields are shown. Both stages have their own connection test. API keys are masked and can be revealed individually. Credentials are retained when switching providers.
 
-The OpenAI-compatible engine covers both OpenAI itself and anything that speaks the same API, local servers like Ollama's OpenAI shim and LM Studio included. Type the model id the service lists, say `gpt-5.6-luna` or `gpt-4o-mini` against `https://api.openai.com/v1`, or whatever name your local server reports. You do not have to care which generation it is. Newer OpenAI models changed the request parameters and reject the ones older models require, so the mod sends one shape, reads the rejection if it comes back, retries with the other, and remembers which one that endpoint and model wanted.
-
-Gemini model names are forgiving: `gemini-2.5-flash`, `models/gemini-2.5-flash` and `Gemini 2.5 Flash` all work, and stray whitespace around keys and endpoints is trimmed.
+Consent to send tab titles, URLs and optional snippets is required before sorting. Jev is a remote service, so choosing a local Ollama LLM still requires consent for stage 1. Space-menu sorting uses Jev only and moves existing groups intact.
 
 ## Settings
 
-![The Zen Tab Sorting settings panel, showing the group rules table, skip domains, and the AI and marker options](assets/options.png)
+The settings follow the sorting order: **1. Existing groups — Jev**, **2. New groups — LLM**, and **3. Sorting behavior**. Existing standalone-provider selections are migrated into stage 2; keys, models and saved ChatGPT sessions remain in place.
 
-Group Rules holds the group name, color and domain list for each rule, and you can drag rows to reorder them. Skip Domains lists the hosts the wand should leave alone. Backup & Restore exports or imports both lists as JSON.
-
-Look & Feel covers minimal styling, strict rule enforcement, and the collapsed-group marker options described below. AI Sorting has the engine, the consent checkbox, the sorting mode, and what happens when the AI matches or creates a group. Remote Provider Settings holds the endpoint, key and model fields for whichever remote engine you picked.
+Excluded sites and appearance options remain directly accessible. Domain rules, backups and diagnostics have collapsible sections. Domain rules are optional and run before Jev when enabled. Group Rules holds names, colors and domain lists; Skip Domains lists excluded hosts; Backup and Restore exports both lists without provider credentials.
 
 ## What this fork changes
 

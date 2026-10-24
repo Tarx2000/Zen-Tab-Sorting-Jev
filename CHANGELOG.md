@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.13.0 — 2026-10-24
+
+### Changed
+- Settings follow the required Jev → LLM flow. Jev service/model selection and
+  the LLM provider/model are configured independently, with a connection test in
+  each stage and only the selected LLM’s fields visible.
+- Replaced the competing engine/mode selectors with a fixed hybrid pipeline,
+  tab scope and apply/preview options. Standalone provider selections migrate to
+  stage 2 while keeping credentials, models and ChatGPT sessions.
+- Confidence thresholds, domain rules, backups and diagnostics are collapsible.
+  API keys are masked with individual reveal buttons.
+
+### Fixed
+- XML-unsafe dropdown labels could stop Sine from building the fallback and all
+  later settings. Added schema validation and a native settings regression.
+- Settings use the stylesheet shipped with the mod, and model fields follow
+  provider defaults without overwriting custom model choices.
+- Ollama preloading now follows the stage-2 provider selection.
+
 ## 1.12.1 — 2026-10-24
 
 ### Fixed

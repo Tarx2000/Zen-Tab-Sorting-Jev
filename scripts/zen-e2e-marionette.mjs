@@ -59,7 +59,7 @@ export class MarionetteClient {
     const packet = await this.readPacket();
     const error = packet[2];
     if (error) throw new Error(`${name}: ${error.message || JSON.stringify(error)}`);
-    return packet[3]?.value;
+    return packet[3] && Object.hasOwn(packet[3], "value") ? packet[3].value : packet[3];
   }
 
   close() {

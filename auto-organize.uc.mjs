@@ -5,6 +5,8 @@ import { getDebugEvents, clearDebugEvents, formatDebugEventsAsText } from "./mod
 // to wire the right submodules in each context.
 
 import { CONFIG, LOG, BUILD_VERSION } from "./modules/config.mjs";
+import { ensureHybridPreferences } from "./modules/hybrid-preferences.mjs";
+import { readFallbackProviderSettings } from "./modules/provider-settings.mjs";
 import { domCache, getEligibleTabs } from "./modules/tabs.mjs";
 import { readRulesPref, getAIEngine, getAISortMode, getOllamaHost, getOllamaModel, isOllamaWarmupEnabled } from "./modules/rules.mjs";
 import { syncAllGroupColors } from "./modules/groups.mjs";
@@ -49,6 +51,7 @@ const tryInitializeBrowser = () => {
     const gZenWorkspacesReady = typeof window.gZenWorkspaces !== "undefined";
 
     if (gBrowserReady && commandSetExists && gZenWorkspacesReady) {
+      ensureHybridPreferences(Services.prefs);
       setupCommand();
       addButtonToAllSeparators();
       setupWorkspaceHooks();
@@ -99,7 +102,7 @@ const tryInitializeBrowser = () => {
       // model in the background so the first tidy click doesn't pay the
       // cold-start cost. Fire-and-forget — silent on failure (daemon may not
       // be running yet).
-      if (getAIEngine() === "ollama" && isOllamaWarmupEnabled()) {
+      if (readFallbackProviderSettings(Services.prefs).provider === "ollama" && isOllamaWarmupEnabled()) {
         warmupOllama(getOllamaHost(), getOllamaModel());
       }
 

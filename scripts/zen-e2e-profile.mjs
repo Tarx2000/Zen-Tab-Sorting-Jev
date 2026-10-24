@@ -78,6 +78,7 @@ export const scenarioPrefs = ({ scenario, providerPort, marionettePort }) => {
     ["extensions.zen-auto-organize.ai-custom-api-key", "zen-tab-sorting-e2e-local-key"],
     ["extensions.zen-auto-organize.ai-custom-model", "zen-tab-sorting-e2e"],
     ["extensions.zen-auto-organize.ai-custom-format", "openai"],
+    ["extensions.zen-auto-organize.use-domain-rules", scenario === "hybrid"],
     ["extensions.zen-auto-organize.rules-json", JSON.stringify(rules)],
   ];
 };
