@@ -29,7 +29,11 @@ const isModernStyle = (paramStyle) =>
   paramStyle === PARAM_STYLE_MODERN || paramStyle === PARAM_STYLE_MODERN_BARE;
 
 export const buildProviderRequest = (provider, prompt, maxTokens, paramStyle = PARAM_STYLE_CLASSIC) => {
-  const boundedTokens = boundMaxTokens(maxTokens, paramStyle);
+  // Reasoning capability and parameter dialect are independent. GLM accepts
+  // classic max_tokens while still spending that budget on hidden thinking.
+  const modelNeedsReasoning = getProviderKind(provider) === "openai" &&
+    /(?:^|\/)glm-5\.3(?:[-.]|$)/i.test(String(provider.model || "").trim());
+  const boundedTokens = boundMaxTokens(maxTokens, paramStyle, modelNeedsReasoning);
   switch (provider.provider) {
     case "openai":
     case "primalabs":
@@ -84,6 +88,13 @@ export const describeEmptyResponse = (kind, text) => {
   const reasoning = parsed?.usage?.completion_tokens_details?.reasoning_tokens;
   if (Number.isFinite(reasoning)) parts.push(`reasoning_tokens=${reasoning}`);
   return parts.join(", ");
+};
+
+export const isEmptyLengthResponse = (kind, text) => {
+  if (kind !== "openai") return false;
+  const choice = parseJson(text)?.choices?.[0];
+  return choice?.finish_reason === "length" && !choice.message?.refusal &&
+    (choice.message?.content == null || (typeof choice.message.content === "string" && !choice.message.content.trim()));
 };
 
 export const getProviderKind = (provider) => {
@@ -153,13 +164,13 @@ const appendPath = (endpoint, path) => {
 // generous headroom and a floor that a short reply cannot starve under.
 const REASONING_HEADROOM = 4096;
 const MODERN_MIN_TOKENS = 2048;
-const MODERN_MAX_TOKENS = 16384;
+const MAX_COMPLETION_TOKENS = 16384;
 
-const boundMaxTokens = (value, paramStyle) => {
+const boundMaxTokens = (value, paramStyle, modelNeedsReasoning = false) => {
   const requested = Number.isFinite(value) ? Math.trunc(value) : 800;
-  return isModernStyle(paramStyle)
-    ? Math.min(Math.max(requested + REASONING_HEADROOM, MODERN_MIN_TOKENS), MODERN_MAX_TOKENS)
-    : Math.min(Math.max(requested, 64), 4096);
+  return isModernStyle(paramStyle) || modelNeedsReasoning
+    ? Math.min(Math.max(requested + REASONING_HEADROOM, MODERN_MIN_TOKENS), MAX_COMPLETION_TOKENS)
+    : Math.min(Math.max(requested, 64), MAX_COMPLETION_TOKENS);
 };
 
 const parseJson = (text) => {

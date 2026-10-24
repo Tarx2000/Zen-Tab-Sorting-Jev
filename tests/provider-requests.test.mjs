@@ -181,3 +181,15 @@ test("Given a reasoning model that spent its budget thinking When describing the
   assert.match(detail, /reasoning_tokens=64/);
   assert.equal(describeEmptyResponse("ollama", body), "");
 });
+
+test("GLM-5.3 reasoning gets headroom without switching away from classic max_tokens", () => {
+  const settings = { provider: "primalabs", endpoint: "https://api.primalabs.test/v1",
+    apiKey: "test-only", model: "primalabs-ai/GLM-5.3-Flash" };
+  for (const [requested, expected] of [[16, 4112], [4096, 8192], [99999, 16384]]) {
+    const body = JSON.parse(buildProviderRequest(settings, "Reply ok", requested).init.body);
+    assert.equal(body.model, settings.model);
+    assert.equal(body.max_tokens, expected);
+    assert.equal("max_completion_tokens" in body, false);
+    assert.equal("thinking" in body, false);
+  }
+});

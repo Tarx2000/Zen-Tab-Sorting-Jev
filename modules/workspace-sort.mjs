@@ -37,8 +37,6 @@ export const organizeWorkspaces = (win = globalThis.window) => withSortSession("
   const run = { startedAt: Date.now(), finished: false, moved: 0, kept: 0, excluded: 0, errors: [], moves: [] };
   win.ZenTabSortingLastWorkspaceRun = run;
   win.document.getElementById("zao-workspace-errors")?.remove();
-  const buttons = [...win.document.querySelectorAll("#tab-wand-button")];
-  buttons.forEach((button) => button.classList.add("zao-thinking"));
   try {
     const snapshot = snapshotWorkspaceUnits(win, readSkipDomainsPref());
     run.excluded = snapshot.skipped.length;
@@ -130,7 +128,11 @@ export const organizeWorkspaces = (win = globalThis.window) => withSortSession("
     toast(run.errors.at(-1).reason, { type: "error" });
     return run;
   } finally {
-    buttons.forEach((button) => button.classList.remove("zao-thinking"));
+    // The native debounced rebuild can run while live units still carry their
+    // flight marker. Reconcile from the settled real strips after animation and
+    // focus changes, so every card reflects the final cross-Space membership.
+    try { win.document.querySelector("zen-library-spaces-section")?.refreshStripsNow?.(); }
+    catch (error) { recordDebugEvent("SPACE-LIBRARY", "Library konnte nach dem Sortieren nicht aktualisiert werden", { message: error.message }); }
     run.finished = true;
     run.finishedAt = Date.now();
   }

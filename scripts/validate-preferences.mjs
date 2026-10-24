@@ -12,6 +12,7 @@ const REQUIRED_SECTIONS = [
 
 const REQUIRED_LLM_VALUES = ["chatgpt", "primalabs", "ollama", "openai", "gemini", "custom"];
 const REQUIRED_PROPERTIES = [
+  "extensions.zen-auto-organize.new-group-color-strength",
   "extensions.zen-auto-organize.ai-jev-provider",
   "extensions.zen-auto-organize.ai-jev-model",
   "extensions.zen-auto-organize.ai-jev-api-key",

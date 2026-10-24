@@ -1,4 +1,6 @@
 import { GROUP_SELECTOR, groupHeader, isSidebarCopy } from "./sidebar-elements.mjs";
+import { activeLibrarySection, animateLibraryChanges } from "./library-sort-animation.mjs";
+import { animateSortElement } from "./sort-motion.mjs";
 
 const HTML = "http://www.w3.org/1999/xhtml";
 const MAX_GHOSTS = 36;
@@ -38,35 +40,18 @@ const spaceAnchor = (win, id) => {
 };
 
 const animate = async (win, node, dx, dy, delay, duration, scale = 1) => {
-  let control;
   try {
-    const motion = win.gZenUIManager?.motion;
-    if (motion?.animate) {
-      control = motion.animate(node, {
-        x: [0, dx], y: [0, dy], scale: [1, scale], opacity: [0.95, 0.95, 0],
-      }, { duration: duration / 1000, delay: delay / 1000, ease: [0.22, 0.7, 0.2, 1] });
-      await Promise.race([
-        Promise.resolve(control.finished || control),
-        new Promise((resolve) => win.setTimeout(resolve, delay + duration + 150)),
-      ]);
-    } else {
-      control = node.animate([
-        { transform: "translate(0, 0) scale(1)", opacity: 0.95 },
-        { transform: `translate(${dx}px, ${dy}px) scale(${scale})`, opacity: 0 },
-      ], { duration, delay, easing: "cubic-bezier(.22,.7,.2,1)", fill: "both" });
-      await control.finished;
-    }
-  } catch { /* Animation must never prevent a completed native move. */ }
-  finally {
-    control?.stop?.();
-    control?.cancel?.();
-    node.remove();
-  }
+    await animateSortElement(win, node, {
+      transform: ["translate(0, 0) scale(1)", `translate(${dx}px, ${dy}px) scale(${scale})`], opacity: [0.95, 0],
+    }, { duration, delay, easing: "cubic-bezier(.22,.8,.2,1)" });
+  } finally { node.remove(); }
 };
 
 /** Native mutations plus a bounded presentation. Never clone live tab elements. */
 export const animateSidebarChanges = async (win, mutate, { entries, budget = 3000 } = {}) => {
   const reducedMotion = Boolean(win.gReduceMotion || win.matchMedia?.("(prefers-reduced-motion: reduce)").matches);
+  const librarySection = activeLibrarySection(win);
+  if (librarySection) return animateLibraryChanges(win, librarySection, mutate, reducedMotion, entries);
   const explicit = Boolean(entries);
   const nodes = entries || [...win.gBrowser.tabs]
     .filter((node) => node.getAttribute("zen-workspace-id") === win.gZenWorkspaces.activeWorkspace && !isSidebarCopy(node))
@@ -79,7 +64,7 @@ export const animateSidebarChanges = async (win, mutate, { entries, budget = 300
     .filter((node) => !isSidebarCopy(node))
     .map((node) => node.matches(GROUP_SELECTOR) ? groupHeader(node) : node)
     .map((node) => ({ node, rect: visibleRect(win, node) })).filter(({ rect }) => rect);
-  const diagnostics = { startedAt: Date.now(), reducedMotion, flyCount: 0, backgroundCount: 0, finished: false };
+  const diagnostics = { startedAt: Date.now(), surface: "sidebar", reducedMotion, flyCount: 0, backgroundCount: 0, finished: false };
   win.ZenTabSortingLastAnimation = diagnostics;
   // Hide explicit moving units before an asynchronous retry can yield a paint.
   const hidden = [];

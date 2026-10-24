@@ -1,3 +1,4 @@
+import { captureNewGroupAppearance } from "./group-appearance.mjs";
 // Zen Tab Sorting — Pass 1: deterministic domain → group matching.
 // Pure logic over rules + tab info; applyPass1 mutates the DOM via gBrowser APIs.
 
@@ -124,6 +125,7 @@ export const applyPass1 = (byGroup, workspaceId, rules) => {
           insertBefore: findSafeInsertAnchor(),
         });
         if (newGroup) {
+          captureNewGroupAppearance(newGroup);
           createdGroups++;
           movedToNew += tabsForGroup.length;
           if (colorByName.has(groupName)) applyGroupColor(newGroup, colorByName.get(groupName));

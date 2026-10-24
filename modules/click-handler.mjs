@@ -1,5 +1,5 @@
 // Zen Tab Sorting — tidy-button click orchestrator.
-// Sequences: wiggle → consolidate → load rules (optional) → enumerate tabs
+// Sequences: consolidate → load rules (optional) → enumerate tabs
 //            → JEV Stage 1 (existing workspace groups) + Fallback-LLM Stage 2 (new groups)
 //            → apply → ungrouped-to-top → sync colors.
 
@@ -46,36 +46,6 @@ import { isFullAIMode, resolveEffectiveSortingMode, resolvePass2ApplyOptions, re
 
 console.log(`${LOG} click-handler.mjs loaded — v${BUILD_VERSION}`);
 
-const getTidyButton = () =>
-  window.gZenWorkspaces?.activeWorkspaceElement?.querySelector?.(`#${CONFIG.BUTTON_ID}`) ||
-  document.querySelector?.(`#${CONFIG.BUTTON_ID}`) ||
-  null;
-
-const wiggleButton = () => {
-  try {
-    const button = getTidyButton();
-    if (!button) return;
-    button.classList.remove("zao-wiggling");
-    void button.offsetWidth;
-    button.classList.add("zao-wiggling");
-    setTimeout(() => {
-      if (button.isConnected) button.classList.remove("zao-wiggling");
-    }, CONFIG.WIGGLE_DURATION_MS);
-  } catch (e) {
-    console.error(`${LOG} wiggle error:`, e);
-  }
-};
-
-const setButtonThinking = (thinking) => {
-  try {
-    const button = getTidyButton();
-    if (!button) return;
-    button.classList.toggle("zao-thinking", !!thinking);
-  } catch (e) {
-    console.error(`${LOG} setButtonThinking error:`, e);
-  }
-};
-
 const actionFor = (currentGroup, targetGroup) => {
   if (!targetGroup) return "leave";
   if (targetGroup === currentGroup) return "stay";
@@ -96,7 +66,6 @@ const assignmentMapToPlan = (tabs, assignmentMap) => {
 
 const organizeCurrentWorkspace = async () => {
   recordDebugEvent("START", "Zauberstab geklickt — starte Sortierung");
-  wiggleButton();
 
   const workspaceId = window.gZenWorkspaces?.activeWorkspace;
   if (!workspaceId) {
@@ -238,7 +207,6 @@ const organizeCurrentWorkspace = async () => {
       const inputLabel = isFreshLike ? "ALL eligible tab(s)" : "ungrouped tab(s)";
       const modeSuffix = isIdentifyOnly ? " (identify-only)" : isFreshMode ? ` (${sortMode === "full-ai" ? "full-ai" : "fresh-categories"})` : "";
       console.log(`${LOG} Pass 2 — running ${aiEngine}${modeSuffix} AI over ${inputCount} ${inputLabel}...`);
-      setButtonThinking(true);
       try {
         let pass2;
         if (aiEngine === "jev") {
@@ -446,8 +414,6 @@ const organizeCurrentWorkspace = async () => {
         }
       } catch (e) {
         console.error(`${LOG} Pass 2 failed:`, e);
-      } finally {
-        setButtonThinking(false);
       }
     }
 
@@ -521,4 +487,4 @@ export const handleOrganizeClick = ({ workspaceId, fromLibrary = false } = {}) =
     }
     window.document.querySelector("zen-library-spaces-section")?.refreshStripsNow?.();
   }
-}, window);
+}, window, { workspaceId });

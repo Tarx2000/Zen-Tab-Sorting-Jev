@@ -302,6 +302,13 @@
     "label": "Look & Feel"
   },
   {
+    "type": "string",
+    "label": "Color intensity for new groups",
+    "property": "extensions.zen-auto-organize.new-group-color-strength",
+    "defaultValue": "20",
+    "placeholder": "0–100%"
+  },
+  {
     "type": "checkbox",
     "label": "Minimal style — strip group colors and match Zen's address-bar styling",
     "property": "extensions.zen-auto-organize.minimal-style",

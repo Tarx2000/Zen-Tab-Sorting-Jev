@@ -1,14 +1,22 @@
 // One sort at a time per browser window, including all command entry points.
 export const isSortRunning = (win = globalThis.window) => Boolean(win?._zaoSortSession);
 
-export const withSortSession = async (kind, run, win = globalThis.window) => {
+export const updateSortButtonState = (button, win = globalThis.window) => {
+  const session = win?._zaoSortSession;
+  const space = button.closest?.(".zen-library-space[data-uuid], zen-workspace");
+  const id = space?.dataset?.uuid || space?.id;
+  const busy = Boolean(session && (session.kind === "workspaces" || !id || id === session.workspaceId));
+  button.disabled = Boolean(session);
+  button.setAttribute("aria-busy", String(busy));
+};
+
+export const withSortSession = async (kind, run, win = globalThis.window, { workspaceId } = {}) => {
   if (!win || isSortRunning(win)) return { busy: true };
-  const session = { kind, controller: new AbortController() };
+  const session = { kind, workspaceId: workspaceId || win.gZenWorkspaces?.activeWorkspace, controller: new AbortController() };
   win._zaoSortSession = session;
   const update = () => {
     for (const button of win.document.querySelectorAll(".zao-organize-button, #tab-wand-button, #zao-sort-workspaces")) {
-      button.disabled = isSortRunning(win);
-      button.setAttribute("aria-busy", String(isSortRunning(win)));
+      updateSortButtonState(button, win);
     }
   };
   const abort = () => session.controller.abort();

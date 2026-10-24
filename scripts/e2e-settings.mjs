@@ -70,6 +70,17 @@ try {
   for (const key of ["visible", "complete", "keyMasked", "advancedClosed", "jevTest", "llmTest", "localStyle"]) assert.equal(initial[key], true, key);
   assert.equal(initial.oldEngine, false);
   assert.equal(initial.provider, "primalabs");
+  const strengthControl = await execute(`
+    const row = document.getElementById("extensions-zen-auto-organize-new-group-color-strength");
+    const input = row.querySelector("input");
+    const initial = { type: input.type, value: input.value, output: row.querySelector("output").textContent };
+    input.value = "42";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    if (row.querySelector("output").textContent !== "42%") throw new Error("Color strength output did not follow slider");
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    return initial;
+  `);
+  assert.deepEqual(strengthControl, { type: "range", value: "20", output: "20%" });
   const cases = { chatgpt: "ai-chatgpt-model", primalabs: "ai-primalabs-model", openai: "ai-openai-model", gemini: "ai-gemini-model", ollama: "ai-ollama-model", custom: "ai-custom-model" };
   for (const [provider, field] of Object.entries(cases)) {
     const result = await execute(`
@@ -116,15 +127,20 @@ try {
     await delay(150);
     const llm = await client.command("WebDriver:TakeScreenshot", { full: true });
     await writeFile(process.env.ZEN_SETTINGS_SCREENSHOT.replace(/\.png$/, "-llm.png"), Buffer.from(llm, "base64"));
+    await execute(`document.querySelector('[data-zao-section="appearance"]').scrollIntoView({ block: "start" });`);
+    await delay(150);
+    const appearance = await client.command("WebDriver:TakeScreenshot", { full: true });
+    await writeFile(process.env.ZEN_SETTINGS_SCREENSHOT.replace(/\.png$/, "-appearance.png"), Buffer.from(appearance, "base64"));
   }
   await client.setChromeContext();
   const persisted = await execute(`return {
     engine: Services.prefs.getStringPref("extensions.zen-auto-organize.ai-engine"),
     provider: Services.prefs.getStringPref("extensions.zen-auto-organize.ai-fallback-provider"),
     jevModel: Services.prefs.getStringPref("extensions.zen-auto-organize.ai-jev-model"),
-    llmModel: Services.prefs.getStringPref("extensions.zen-auto-organize.ai-custom-model")
+    llmModel: Services.prefs.getStringPref("extensions.zen-auto-organize.ai-custom-model"),
+    strength: Services.prefs.getStringPref("extensions.zen-auto-organize.new-group-color-strength")
   };`);
-  assert.deepEqual(persisted, { engine: "jev", provider: "chatgpt", jevModel: "custom-jev-test", llmModel: "custom-llm-test" });
+  assert.deepEqual(persisted, { engine: "jev", provider: "chatgpt", jevModel: "custom-jev-test", llmModel: "custom-llm-test", strength: "42" });
   console.log("settings-e2e: PASS complete Sine form, six LLM providers, models, masked keys, collapsed advanced settings and persistence");
 
 } finally {

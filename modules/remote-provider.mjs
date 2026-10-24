@@ -17,6 +17,7 @@ import { getProviderReadiness } from "./provider-readiness.mjs";
 import {
   buildProviderRequest,
   describeEmptyResponse,
+  isEmptyLengthResponse,
   getProviderKind,
   isParamStyleError,
   paramStyleLadder,
@@ -687,9 +688,22 @@ const providerText = async (settings, inputStr, maxTokens, fetchImpl) => {
 
   if (!response.ok) throw new Error(`HTTP ${response.status}: ${body.slice(0, 200)}`);
   if (adaptive) paramStyleByTarget.set(target, style);
-  const text = parseProviderResponse(kind, body);
+  let text = parseProviderResponse(kind, body);
+  if (isEmptyLengthResponse(kind, body)) {
+    // A valid HTTP response with only hidden reasoning is not a connection or
+    // schema failure. Retry once, retaining the accepted parameter dialect.
+    const largerBudget = Math.min(16384, Math.max(4096, maxTokens * 2));
+    ({ response, body } = await sendProviderRequest(
+      buildProviderRequest(effectiveSettings, inputStr, largerBudget, style), fetchImpl,
+    ));
+    if (!response.ok) throw new Error(`HTTP ${response.status}: ${body.slice(0, 200)}`);
+    text = parseProviderResponse(kind, body);
+  }
   if (typeof text !== "string" || !text.trim()) {
     const detail = describeEmptyResponse(kind, body);
+    if (isEmptyLengthResponse(kind, body)) {
+      throw new Error(`Provider output budget exhausted before a visible answer${detail ? ` (${detail})` : ""}`);
+    }
     throw new Error(`Provider response did not contain text${detail ? ` (${detail})` : ""}`);
   }
   return text.trim();

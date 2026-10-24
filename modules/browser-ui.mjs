@@ -4,6 +4,7 @@ import { recordDebugEvent } from "./debug-journal.mjs";
 import { CONFIG, LOG } from "./config.mjs";
 import { domCache } from "./tabs.mjs";
 import { handleOrganizeClick } from "./click-handler.mjs";
+import { updateSortButtonState } from "./sort-session.mjs";
 
 const LIBRARY_CARD = ".zen-library-space[data-uuid]";
 const BUTTONS = `[id^="${CONFIG.BUTTON_ID}"]`;
@@ -15,6 +16,10 @@ const libraryCard = (node) => node?.closest?.(LIBRARY_CARD);
 // Replace those copies with one persistent header action. The native separator
 // is hidden when all tabs are grouped, so it cannot host an always-usable icon.
 export const reconcileLibraryButtons = () => {
+  // Native Library clones arbitrary tab/group attributes during TabMove. The
+  // original's animation cleanup cannot reach those copies, so discard its
+  // transient marker when a strip is rebuilt (including previously stale rows).
+  for (const copy of document.querySelectorAll(`zen-library [data-zao-in-flight]`)) copy.removeAttribute("data-zao-in-flight");
   for (const card of document.querySelectorAll(LIBRARY_CARD)) {
     const header = card.querySelector(".zen-library-space-header");
     if (!header) continue;
@@ -30,7 +35,7 @@ export const reconcileLibraryButtons = () => {
     button.classList.add("zao-organize-button");
     button.removeAttribute("command");
     button.setAttribute("tooltiptext", "Tabs in diesem Space automatisch sortieren");
-    button.disabled = Boolean(window._zaoSortSession);
+    updateSortButtonState(button, window);
   }
 };
 
@@ -46,18 +51,19 @@ const dispatchOrganize = (event) => {
     .catch((error) => console.error(`${LOG} organize command failed:`, error));
 };
 
-// Lucide "wand-sparkles" — the magic wand with a sparkle around the tip.
-// Inline SVG (not an icon-font / external file) so it inherits currentColor from
-// the toolbar theme and animates cleanly with the .zao-wiggling class.
-// Minimalist Zen magic wand icon with clean star sparkle
+// Both shapes share one fixed footprint; session state drives the soft change.
 const WAND_ICON_SVG = `
-  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24"
+  <svg class="zao-wand-icon" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24"
        fill="none" stroke="currentColor" stroke-width="1.75"
        stroke-linecap="round" stroke-linejoin="round">
     <path d="m4 20 10-10"/>
     <path d="m13 7 4 4"/>
     <path d="M18 2.5v5"/>
     <path d="M15.5 5h5"/>
+  </svg>
+  <svg class="zao-loading-icon" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24"
+       fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round">
+    <path d="M12 3a9 9 0 1 1-9 9"/>
   </svg>
 `;
 
@@ -67,7 +73,7 @@ const buttonXul = () => `
     class="toolbarbutton-1 chromeclass-toolbar-additional zao-organize-button"
     command="${CONFIG.COMMAND_ID}"
     tooltiptext="Auto Sort Tabs">
-    <hbox class="toolbarbutton-box" align="center">
+    <hbox class="toolbarbutton-box zao-organize-icon" align="center">
       ${WAND_ICON_SVG}
     </hbox>
   </toolbarbutton>
@@ -86,6 +92,7 @@ export const ensureOrganizeButton = (target) => {
 
     const buttonFragment = window.MozXULElement.parseXULToFragment(buttonXul());
     const button = buttonFragment.firstChild;
+    updateSortButtonState(button, window);
 
     if (nativeClearButton && nativeClearButton.parentNode) {
       nativeClearButton.parentNode.insertBefore(button, nativeClearButton);
@@ -133,6 +140,7 @@ export const addButtonToAllSeparators = () => {
       if (periphery) ensureOrganizeButton(periphery);
     }
     reconcileLibraryButtons();
+    for (const button of document.querySelectorAll(".zao-organize-button")) updateSortButtonState(button, window);
   } catch (e) {
     console.error(`${LOG} addButtonToAllSeparators error:`, e);
   }

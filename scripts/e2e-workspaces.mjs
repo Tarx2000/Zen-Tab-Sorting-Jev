@@ -82,6 +82,8 @@ try {
     await manager.changeWorkspaceWithID(source.uuid);
     const shared = browser.addTabGroup([tab("Dev Incoming Shared")], { label: "Shared Dev", color: "cyan", insertBefore: manager.activeWorkspaceElement.tabsContainer.firstChild });
     const normal = browser.addTabGroup([tab("Dev A"), tab("Dev B")], { label: "Dev Group", color: "blue", insertBefore: manager.activeWorkspaceElement.tabsContainer.firstChild });
+    const { applyGroupColorStrength } = ChromeUtils.importESModule("chrome://sine/content/zen-tab-sorting/modules/group-appearance.mjs");
+    applyGroupColorStrength(normal, 18);
     normal.collapsed = true;
     const parent = browser.addTabGroup([tab("Dev Parent")], { label: "Dev Parent", color: "orange", insertBefore: manager.activeWorkspaceElement.tabsContainer.firstChild });
     const child = browser.addTabGroup([tab("Dev Child")], { label: "Dev Child", color: "green", insertBefore: manager.activeWorkspaceElement.tabsContainer.firstChild });
@@ -381,13 +383,18 @@ try {
     const saved = await execute(`
       const state = win.__workspaceLab;
       const groups = [state.normal, state.parent, state.child, state.folder, state.subfolder, state.empty, state.genericFolder];
-      const snapshot = groups.map(group => ({ id: group.id, label: group.getAttribute("label"), space: group.getAttribute("zen-workspace-id"), parent: group.group?.id || null, collapsed: group.collapsed }));
+      const snapshot = groups.map(group => ({ id: group.id, label: group.getAttribute("label"), space: group.getAttribute("zen-workspace-id"), parent: group.group?.id || null, collapsed: group.collapsed,
+        colorStrength: group.getAttribute("data-zao-color-strength"), colorStyle: group.style.getPropertyValue("--zao-group-color-strength") }));
+      Services.prefs.setStringPref("extensions.zen-auto-organize.new-group-color-strength", "80");
       await Promise.all(win.gZenWorkspaces.allStoredTabs.map(tab => tab.linkedBrowser ? win.gBrowser.TabStateFlusher.flush(tab.linkedBrowser) : Promise.resolve()));
       Services.prefs.setIntPref("browser.startup.page", 3);
       Services.prefs.setBoolPref("browser.sessionstore.resume_session_once", true);
       win.setTimeout(() => Services.startup.quit(Ci.nsIAppStartup.eAttemptQuit), 100);
       return snapshot;
     `);
+    assert.equal(saved[0].colorStrength, "18");
+    assert.equal(saved[0].colorStyle, "18%");
+    assert.equal(saved[1].colorStrength, null);
     client.close();
     client = null;
     const quitDeadline = Date.now() + 5000;
@@ -397,6 +404,7 @@ try {
     await writeUserPrefs(lab.profileDir, [
       ...scenarioPrefs({ scenario: "hybrid", providerPort: 1, marionettePort: nextPort }),
       ["browser.startup.page", 3], ["browser.sessionstore.resume_session_once", true],
+      ["extensions.zen-auto-organize.new-group-color-strength", "80"],
     ]);
     zen = launchZen({ options: { headed, zenBinary: process.env.ZEN_BINARY || "/Applications/Zen.app/Contents/MacOS/zen" }, profileDir: lab.profileDir, marionettePort: nextPort });
     client = await MarionetteClient.connect(nextPort);
@@ -409,13 +417,15 @@ try {
     do {
       restored = await execute(`return ${JSON.stringify(saved)}.map(before => {
         const group = win.document.getElementById(before.id);
-        return { ...before, found: !!group, correctSpace: group?.getAttribute("zen-workspace-id") === before.space, correctParent: (group?.group?.id || null) === before.parent, correctCollapsed: group?.collapsed === before.collapsed };
+        return { ...before, found: !!group, correctSpace: group?.getAttribute("zen-workspace-id") === before.space, correctParent: (group?.group?.id || null) === before.parent, correctCollapsed: group?.collapsed === before.collapsed,
+          correctColorStrength: group?.getAttribute("data-zao-color-strength") === before.colorStrength && group?.style.getPropertyValue("--zao-group-color-strength") === before.colorStyle };
       });`);
-      if (restored.every(group => group.found && group.correctSpace && group.correctParent && group.correctCollapsed)) break;
+      if (restored.every(group => group.found && group.correctSpace && group.correctParent && group.correctCollapsed && group.correctColorStrength)) break;
       await delay(250);
     } while (Date.now() < restoreDeadline);
     console.log(JSON.stringify({ restored }));
-    assert.ok(restored.every(group => group.found && group.correctSpace && group.correctParent && group.correctCollapsed), "Transferred group state must survive browser restart");
+    assert.ok(restored.every(group => group.found && group.correctSpace && group.correctParent && group.correctCollapsed && group.correctColorStrength), "Transferred group state and captured color strength must survive browser restart");
+    assert.equal(await execute(`return Services.prefs.getStringPref("extensions.zen-auto-organize.new-group-color-strength");`), "80");
   }
   console.log("workspace-e2e: PASS native atomic groups/folders/splits, pins, strict margin, retry, partial errors and focus");
 } catch (error) {

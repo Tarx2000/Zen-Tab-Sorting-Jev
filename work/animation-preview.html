@@ -1,0 +1,101 @@
+<div id="zen-motion-comparison">
+  <div class="viz-carousel viz-dotted-background" aria-label="Animationen vergleichen" data-previous-label="Zurück" data-next-label="Weiter">
+    <section data-variant="Weicher Ring" class="am-stage" aria-label="Weicher Ring">
+      <div class="am-space am-morph">
+        <div class="am-header"><span>SocialMedia</span><button class="am-trigger" type="button" aria-label="Sortieren — weicher Ring"><span class="am-icon"><span class="am-wand"><i data-lucide="wand-sparkles" aria-hidden="true"></i></span><span class="am-ring"><i data-lucide="loader-circle" aria-hidden="true"></i></span></span></button><i data-lucide="paintbrush" aria-hidden="true"></i></div>
+        <div class="am-group"><i data-lucide="folder" aria-hidden="true"></i> Social</div>
+        <div class="am-tab"><i data-lucide="globe" aria-hidden="true"></i> Community</div>
+        <div class="am-tab"><i data-lucide="play" aria-hidden="true"></i> Video</div>
+      </div>
+      <div class="am-detail am-morph" aria-hidden="true"><span class="am-icon"><span class="am-wand"><i data-lucide="wand-sparkles"></i></span><span class="am-ring"><i data-lucide="loader-circle"></i></span></span></div>
+      <div class="viz-row"><button type="button" class="btn am-play">Animation starten</button><span class="text-small">Originalgröße oben · Detail unten</span></div>
+    </section>
+    <section data-variant="Tanzende Sparkles" class="am-stage" aria-label="Tanzende Sparkles" hidden>
+      <div class="am-space am-sprinkles">
+        <div class="am-header"><span>SocialMedia</span><button class="am-trigger" type="button" aria-label="Sortieren — tanzende Sparkles"><span class="am-icon"><span class="am-wand"><i data-lucide="wand-sparkles" aria-hidden="true"></i></span><span class="am-spark am-spark-a"><i data-lucide="sparkle" aria-hidden="true"></i></span><span class="am-spark am-spark-b"><i data-lucide="sparkle" aria-hidden="true"></i></span><span class="am-spark am-spark-c"><i data-lucide="sparkle" aria-hidden="true"></i></span></span></button><i data-lucide="paintbrush" aria-hidden="true"></i></div>
+        <div class="am-group"><i data-lucide="folder" aria-hidden="true"></i> Social</div>
+        <div class="am-tab"><i data-lucide="globe" aria-hidden="true"></i> Community</div>
+        <div class="am-tab"><i data-lucide="play" aria-hidden="true"></i> Video</div>
+      </div>
+      <div class="am-detail am-sprinkles" aria-hidden="true"><span class="am-icon"><span class="am-wand"><i data-lucide="wand-sparkles"></i></span><span class="am-spark am-spark-a"><i data-lucide="sparkle"></i></span><span class="am-spark am-spark-b"><i data-lucide="sparkle"></i></span><span class="am-spark am-spark-c"><i data-lucide="sparkle"></i></span></span></div>
+      <div class="viz-row"><button type="button" class="btn am-play">Animation starten</button><span class="text-small">Originalgröße oben · Detail unten</span></div>
+    </section>
+    <section data-variant="Stern-Orbit" class="am-stage" aria-label="Stern-Orbit" hidden>
+      <div class="am-space am-orbit">
+        <div class="am-header"><span>SocialMedia</span><button class="am-trigger" type="button" aria-label="Sortieren — Stern-Orbit"><span class="am-icon"><span class="am-wand"><i data-lucide="wand-sparkles" aria-hidden="true"></i></span><span class="am-orb am-orb-a"><i data-lucide="sparkle" aria-hidden="true"></i></span><span class="am-orb am-orb-b"><i data-lucide="sparkle" aria-hidden="true"></i></span></span></button><i data-lucide="paintbrush" aria-hidden="true"></i></div>
+        <div class="am-group"><i data-lucide="folder" aria-hidden="true"></i> Social</div>
+        <div class="am-tab"><i data-lucide="globe" aria-hidden="true"></i> Community</div>
+        <div class="am-tab"><i data-lucide="play" aria-hidden="true"></i> Video</div>
+      </div>
+      <div class="am-detail am-orbit" aria-hidden="true"><span class="am-icon"><span class="am-wand"><i data-lucide="wand-sparkles"></i></span><span class="am-orb am-orb-a"><i data-lucide="sparkle"></i></span><span class="am-orb am-orb-b"><i data-lucide="sparkle"></i></span></span></div>
+      <div class="viz-row"><button type="button" class="btn am-play">Animation starten</button><span class="text-small">Originalgröße oben · Detail unten</span></div>
+    </section>
+  </div>
+</div>
+<style>
+#zen-motion-comparison { --am-speed: 1.8s; }
+#zen-motion-comparison .am-stage { min-height: 344px; padding: 26px 16px 18px; box-sizing: border-box; }
+#zen-motion-comparison .am-space { --am-surface: light-dark(#f3f1f5, #29272d); --am-ink: light-dark(#333139, #eeecf3); --am-wash: light-dark(#e6e0ed, #37303f); font: 14px/1.45 system-ui, sans-serif; color: var(--am-ink); background: var(--am-surface); max-width: 390px; margin: 0 auto; padding: 20px; border-radius: 14px; }
+#zen-motion-comparison .am-header { display: flex; gap: 14px; align-items: center; margin-bottom: 18px; }
+#zen-motion-comparison .am-header > span { flex: 1; font-weight: 500; }
+#zen-motion-comparison .am-header > svg { width: 14px; height: 14px; opacity: .55; }
+#zen-motion-comparison .am-trigger { display: grid; place-items: center; width: 30px; height: 30px; border: 0; border-radius: 7px; color: inherit; background: transparent; padding: 0; cursor: inherit; }
+#zen-motion-comparison .am-trigger:hover { background: var(--am-wash); }
+#zen-motion-comparison .am-icon { position: relative; display: inline-block; width: 14px; height: 14px; }
+#zen-motion-comparison .am-icon svg { width: 14px; height: 14px; stroke-width: 1.7; }
+#zen-motion-comparison .am-wand, #zen-motion-comparison .am-ring { position: absolute; inset: 0; display: grid; place-items: center; transform-origin: center; transition: opacity 440ms ease, transform 540ms cubic-bezier(.22,.8,.2,1); }
+#zen-motion-comparison .am-ring { opacity: 0; transform: scale(.3) rotate(-100deg); }
+#zen-motion-comparison .am-morph[data-working] .am-wand { opacity: 0; transform: scale(.32) rotate(100deg); }
+#zen-motion-comparison .am-morph[data-working] .am-ring { opacity: 1; transform: scale(1) rotate(0); }
+#zen-motion-comparison .am-morph[data-working] .am-ring svg { animation: am-spin var(--am-speed) linear infinite; }
+#zen-motion-comparison .am-group { display: flex; align-items: center; gap: 8px; background: var(--am-wash); padding: 9px 10px; border-radius: 8px; }
+#zen-motion-comparison .am-group svg, #zen-motion-comparison .am-tab svg { width: 14px; height: 14px; }
+#zen-motion-comparison .am-tab { display: flex; align-items: center; gap: 8px; padding: 9px 10px 0 25px; }
+#zen-motion-comparison .am-detail { height: 80px; display: grid; place-items: center; color: light-dark(#333139, #eeecf3); }
+#zen-motion-comparison .am-detail > .am-icon { transform: scale(3); }
+#zen-motion-comparison .am-stage > .viz-row { justify-content: center; }
+#zen-motion-comparison .am-spark, #zen-motion-comparison .am-orb { position: absolute; display: grid; place-items: center; opacity: 0; pointer-events: none; transition: opacity 360ms ease; }
+#zen-motion-comparison .am-spark svg { width: 6px; height: 6px; stroke-width: 1.5; }
+#zen-motion-comparison .am-spark-a { left: 8px; top: -5px; }
+#zen-motion-comparison .am-spark-b { left: 17px; top: 3px; }
+#zen-motion-comparison .am-spark-c { left: 10px; top: 12px; }
+#zen-motion-comparison .am-sprinkles[data-working] .am-spark { animation: am-sprinkle var(--am-speed) ease-in-out infinite; }
+#zen-motion-comparison .am-sprinkles[data-working] .am-spark-b { animation-delay: -.6s; }
+#zen-motion-comparison .am-sprinkles[data-working] .am-spark-c { animation-delay: -1.2s; }
+#zen-motion-comparison .am-sprinkles[data-working] .am-wand { transform: rotate(-9deg); }
+#zen-motion-comparison .am-orb { inset: -5px; transform-origin: center; }
+#zen-motion-comparison .am-orb svg { position: absolute; top: -1px; width: 5px; height: 5px; stroke-width: 1.4; }
+#zen-motion-comparison .am-orbit[data-working] .am-orb { opacity: 1; animation: am-spin calc(var(--am-speed) * 1.4) linear infinite; }
+#zen-motion-comparison .am-orbit[data-working] .am-orb-b { animation-direction: reverse; animation-duration: calc(var(--am-speed) * 1.9); }
+#zen-motion-comparison .am-orbit[data-working] .am-orb-b svg { top: auto; bottom: -1px; }
+#zen-motion-comparison .am-orbit[data-working] .am-wand { transform: scale(.85); opacity: .7; }
+@keyframes am-spin { to { transform: rotate(360deg); } }
+@keyframes am-sprinkle { 0%,100% { opacity: .15; transform: translate(0,2px) scale(.6) rotate(-15deg); } 45% { opacity: 1; transform: translate(1px,-2px) scale(1) rotate(12deg); } 75% { opacity: .65; transform: translate(-1px,-1px) scale(.85); } }
+@media (prefers-reduced-motion: reduce) { #zen-motion-comparison .am-icon * { animation: none !important; transition: opacity 150ms ease !important; } #zen-motion-comparison [data-working] .am-spark { opacity: .8; } }
+@media (max-width: 400px) { #zen-motion-comparison .am-stage { padding: 18px 4px; } #zen-motion-comparison .am-space { padding: 16px; } }
+</style>
+<script>
+(() => {
+  const root = document.getElementById('zen-motion-comparison');
+  const state = { speed: 1 };
+  root.querySelectorAll('.am-stage').forEach(stage => {
+    let timer;
+    const play = () => {
+      clearTimeout(timer);
+      stage.querySelectorAll('.am-space,.am-detail').forEach(node => node.setAttribute('data-working', ''));
+      const trigger = stage.querySelector('.am-trigger');
+      trigger.setAttribute('aria-busy', 'true');
+      timer = setTimeout(() => {
+        stage.querySelectorAll('[data-working]').forEach(node => node.removeAttribute('data-working'));
+        trigger.setAttribute('aria-busy', 'false');
+      }, 5500);
+    };
+    stage.querySelector('.am-play').addEventListener('click', play);
+    stage.querySelector('.am-trigger').addEventListener('click', play);
+  });
+  if (globalThis.Tweak) {
+    const tweak = new Tweak({ container: root, onChange: () => root.style.setProperty('--am-speed', `${1.8 / state.speed}s`) });
+    tweak.addSlider(state, 'speed', { label: 'Tempo', min: .6, max: 1.5, step: .1 });
+  }
+})();
+</script>

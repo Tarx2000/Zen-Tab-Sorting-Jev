@@ -64,7 +64,7 @@ tab-group.zao-minimal {
   box-shadow: none !important;
   outline: none !important;
   opacity: 1 !important;
-  color: #ffffff !important;
+  color: inherit !important;
 }
 
 :is(#tab-wand-button, .zao-organize-button) svg {
@@ -76,40 +76,45 @@ tab-group.zao-minimal {
 
 :is(#tab-wand-button, .zao-organize-button):hover svg,
 :is(#tab-wand-button, .zao-organize-button):hover:active svg {
-  stroke: #ffffff !important;
-  color: #ffffff !important;
+  stroke: currentColor !important;
+  color: inherit !important;
 }
 
-/* --- Toolbar button: vibrant sparkle click animation --- */
-@keyframes zao-wand-wiggle {
-  0%   { transform: scale(1) rotate(0deg); filter: drop-shadow(0 0 0px #fff); }
-  15%  { transform: scale(1.3) rotate(-26deg); filter: drop-shadow(0 0 8px #ffffff); color: #ffffff; stroke: #ffffff; }
-  30%  { transform: scale(1.4) rotate(26deg); filter: drop-shadow(0 0 12px #ffffff); color: #ffffff; stroke: #ffffff; }
-  45%  { transform: scale(1.25) rotate(-18deg); filter: drop-shadow(0 0 8px #ffffff); color: #ffffff; stroke: #ffffff; }
-  65%  { transform: scale(1.15) rotate(12deg); filter: drop-shadow(0 0 6px #ffffff); color: #ffffff; stroke: #ffffff; }
-  85%  { transform: scale(1.05) rotate(-4deg); filter: drop-shadow(0 0 3px #ffffff); color: #ffffff; stroke: #ffffff; }
-  100% { transform: scale(1) rotate(0deg); filter: drop-shadow(0 0 0px #fff); }
+/* Soft ring: one session-owned state across classification and native moves. */
+:is(#tab-wand-button, .zao-organize-button) .zao-organize-icon {
+  position: relative;
+  width: 14px;
+  height: 14px;
+  min-width: 14px;
 }
-
-:is(#tab-wand-button, .zao-organize-button).zao-wiggling svg {
-  animation: zao-wand-wiggle 650ms cubic-bezier(0.25, 1, 0.5, 1) !important;
-  transform-origin: 25% 75% !important;
-  color: #ffffff !important;
-  stroke: #ffffff !important;
+:is(#tab-wand-button, .zao-organize-button) .zao-organize-icon > svg {
+  position: absolute;
+  inset: 0;
+  transform-origin: center;
+  transition: opacity 440ms ease, transform 540ms cubic-bezier(.22,.8,.2,1) !important;
 }
-
-/* AI Pass 2 in progress — noticeable, vibrant pulsing glow */
-@keyframes zao-thinking-pulse {
-  0%   { opacity: 1;    transform: scale(1);    filter: drop-shadow(0 0 0px rgba(255, 255, 255, 0)); }
-  35%  { opacity: 0.35; transform: scale(0.72); filter: drop-shadow(0 0 1px rgba(255, 255, 255, 0.2)); }
-  70%  { opacity: 1;    transform: scale(1.35); filter: drop-shadow(0 0 12px #ffffff); color: #ffffff; stroke: #ffffff; }
-  100% { opacity: 1;    transform: scale(1);    filter: drop-shadow(0 0 0px rgba(255, 255, 255, 0)); }
+:is(#tab-wand-button, .zao-organize-button) .zao-loading-icon {
+  opacity: 0;
+  transform: scale(.3) rotate(-100deg);
 }
-:is(#tab-wand-button, .zao-organize-button).zao-thinking svg {
-  animation: zao-thinking-pulse 1s cubic-bezier(0.4, 0, 0.2, 1) infinite !important;
-  transform-origin: center !important;
-  color: #ffffff !important;
-  stroke: #ffffff !important;
+:is(#tab-wand-button, .zao-organize-button)[aria-busy="true"] {
+  opacity: .9 !important;
+}
+:is(#tab-wand-button, .zao-organize-button)[aria-busy="true"] .zao-wand-icon {
+  opacity: 0;
+  transform: scale(.32) rotate(100deg);
+}
+:is(#tab-wand-button, .zao-organize-button)[aria-busy="true"] .zao-loading-icon {
+  opacity: 1;
+  transform: scale(1) rotate(0deg);
+}
+:is(#tab-wand-button, .zao-organize-button)[aria-busy="true"] .zao-loading-icon > path {
+  animation: zao-ring-turn 1.8s linear infinite;
+  transform-origin: 12px 12px;
+}
+@keyframes zao-ring-turn {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 
 /* Inline description paragraph injected under a Sine "separator" header.
@@ -1017,7 +1022,9 @@ dialog.zao-warning-dialog::backdrop {
   opacity: 1 !important;
 }
 
-[data-zao-in-flight] { visibility: hidden !important; }
+/* Only the real strip participates in sidebar flights. Native Library rows
+   copy transient attributes while a move is underway and must stay visible. */
+zen-workspace [data-zao-in-flight] { visibility: hidden !important; }
 .zao-sort-animation-layer {
   position: fixed;
   inset: 0;
@@ -1043,7 +1050,7 @@ dialog.zao-warning-dialog::backdrop {
   will-change: transform, opacity;
 }
 .zao-sort-background { width: max-content; max-width: 280px; font-size: 12px; }
-:is(#tab-wand-button, .zao-organize-button)[disabled="true"] { opacity: 0.45 !important; }
+:is(#tab-wand-button, .zao-organize-button)[disabled="true"]:not([aria-busy="true"]) { opacity: 0.45 !important; }
 .zao-workspace-errors {
   position: fixed;
   right: 24px;
@@ -1065,7 +1072,9 @@ dialog.zao-warning-dialog::backdrop {
 .zao-workspace-errors ul { padding-left: 20px; }
 .zao-workspace-errors li { margin: 8px 0; overflow-wrap: anywhere; }
 @media (prefers-reduced-motion: reduce) {
-  :is(#tab-wand-button, .zao-organize-button).zao-thinking svg, :is(#tab-wand-button, .zao-organize-button).zao-wiggling svg { animation: none !important; }
+  :is(#tab-wand-button, .zao-organize-button) .zao-organize-icon > svg { animation: none !important; transition: opacity 150ms ease !important; }
+  :is(#tab-wand-button, .zao-organize-button) .zao-loading-icon > path { animation: none !important; }
+  :is(#tab-wand-button, .zao-organize-button)[aria-busy="true"] .zao-loading-icon { transform: scale(1); }
 }
 
 /* Settings follow the fixed Jev → LLM flow. Keep native Sine preference nodes
@@ -1126,3 +1135,49 @@ dialog.zao-warning-dialog::backdrop {
   background: transparent !important;
   color: inherit !important;
 }
+
+/* Per-creation intensity: only newly generated, explicitly marked groups.
+   Keep native accents and real tab text/selection colors intact. */
+:root :is(zen-workspace, zen-library) tab-group[data-zao-color-strength]:not([split-view-group]):not(.zao-minimal) > .tab-group-label-container .tab-group-label {
+  background-color: color-mix(in srgb, var(--tab-group-color) var(--zao-group-color-strength), transparent) !important;
+  color: var(--toolbox-textcolor, var(--toolbar-color, CanvasText)) !important;
+}
+:root :is(zen-workspace, zen-library) tab-group[data-zao-zia-strength][data-zao-color-strength]:not([split-view-group]):not(.zao-minimal)::before {
+  background-color: color-mix(in srgb, var(--zia-folder-swatch, var(--tab-group-color)) var(--zao-group-color-strength), transparent) !important;
+}
+:root :is(zen-workspace, zen-library) tab-group[data-zao-zia-strength][data-zao-color-strength]:not([split-view-group]):not(.zao-minimal):hover::before {
+  background-color: color-mix(in srgb, var(--zia-folder-swatch, var(--tab-group-color)) var(--zao-group-hover-strength), transparent) !important;
+}
+.zao-group-strength-control { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 12px; }
+.zao-group-strength-control input { min-width: 0; width: 100%; }
+.zao-group-strength-preview { grid-column: 1 / -1; padding: 12px; border-radius: 8px; background: color-mix(in srgb, var(--zen-primary-color, AccentColor) var(--zao-preview-strength, 20%), transparent); color: inherit; }
+.zao-group-strength-note { grid-column: 1 / -1; margin: 0; font-size: 12px; }
+
+/* Privileged Sine presentation layer: no XUL/browser clones or hidden tabs. */
+.zao-library-animation-layer {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 2147483646;
+  contain: layout style;
+}
+.zao-library-flight {
+  position: fixed;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  box-sizing: border-box;
+  padding: 4px 10px;
+  overflow: hidden;
+  white-space: nowrap;
+  border-radius: 8px;
+  background: var(--toolbar-bgcolor, Canvas);
+  color: var(--toolbar-color, CanvasText);
+  box-shadow: 0 3px 12px #0002;
+  transform-origin: left center;
+  will-change: transform, opacity;
+}
+.zao-library-flight > span:last-child { overflow: hidden; text-overflow: ellipsis; }
+.zao-flight-tab, .zao-flight-folder { box-sizing: border-box; width: 14px; height: 14px; flex-shrink: 0; }
+span.zao-flight-tab { border: 1px solid currentColor; border-radius: 3px; opacity: .6; }
+.zao-flight-folder { height: 10px; border: 1.5px solid var(--zao-flight-accent, currentColor); border-radius: 2px; }

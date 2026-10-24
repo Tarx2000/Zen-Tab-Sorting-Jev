@@ -15,7 +15,7 @@ export const LOG = "[ZenTabSort]";
 // Build tag — mirrors theme.json's `version` for shipped releases, and gets a
 // `+tag.N` suffix for in-progress iterative builds so the Browser Console
 // reveals which build is actually running (vs. a stale module cache).
-export const BUILD_VERSION = "1.13.0";
+export const BUILD_VERSION = "1.15.0";
 
 export const CONFIG = {
   // Init polling — wait for gBrowser/gZenWorkspaces/separator to appear at startup.
@@ -28,7 +28,6 @@ export const CONFIG = {
   INJECT_MAX_POLL_ATTEMPTS: 30,
 
   // Toolbar wand button: how long the click animation runs.
-  WIGGLE_DURATION_MS: 600,
 
   // Hex-color application derives lighter "invert" / "pale" variants by mixing
   // the user's hex with white. Lower = lighter result.
@@ -49,6 +48,7 @@ export const CONFIG = {
   // session restore preserves collapsed/expanded state across browser
   // restarts (Zen's own session save loses the `collapsed` attribute).
   COLLAPSED_GROUPS_PREF: "extensions.zen-auto-organize.collapsed-groups-json",
+  NEW_GROUP_COLOR_STRENGTH_PREF: "extensions.zen-auto-organize.new-group-color-strength",
   MINIMAL_STYLE_PREF: "extensions.zen-auto-organize.minimal-style",
   STRICT_RULES_PREF: "extensions.zen-auto-organize.strict-rules",
   DEBUG_MODE_PREF: "extensions.zen-auto-organize.debug-mode",

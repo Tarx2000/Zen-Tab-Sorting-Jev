@@ -96,6 +96,28 @@ settings. It does not run the cross-Space sorter. The previous Space and selecte
 tab are restored afterward unless the user navigates during the sort. The
 Library refreshes its copies after native mutations complete.
 
+The wand softly changes into a rotating ring from the start of a sorting session
+until its native mutations and presentation settle. Only the requested Space is
+marked busy for normal Autosort; the all-Spaces command marks every Space busy.
+Competing commands are disabled, including newly rebuilt actions. Reduced motion
+keeps a static busy ring. Success, empty results and failures restore the wand.
+
+When the Library is open, sorting uses its public `refreshStripsNow()` method
+and Zen's existing row-position animation. Visible transfers between cards use
+ordinary HTML presentations animated through `gZenUIManager.elementAnimate` in
+Sine's browser context. Positions are measured before/after native mutations;
+an atomic group or folder gets one header flight. No tab/browser elements are
+cloned and no live tabs or Library copies are hidden. A native strip rebuild
+cannot detach these presentations. Offscreen arrivals use the shorter native
+entrance when visible, and reduced motion disables both kinds of movement.
+
+At most 24 flights are rendered with bounded staggering. Their transforms and
+opacity animate without per-frame geometry reads. Scrolling, resizing, closing
+the Library, dragging or cancelling ends the presentation; a native helper that
+never resolves still releases the session within a bounded wait. Partial native
+mutation failure still refreshes surviving data. Private Library drag state and
+the Sine loader itself are not patched.
+
 ChatGPT refreshes save replacement credentials before another provider call and
 share a lock across chrome windows. A terminal `invalid_grant` requires a new
 **Sign in with ChatGPT** in the mod settings; revoked credentials cannot be
@@ -131,3 +153,29 @@ preview respectively. Turning off the fallback is no longer a settings option.
 The settings form can be exercised in a disposable native Sine profile with
 `npm run e2e:settings -- --headed`. This checks all six LLM choices, actual Sine
 field rendering, model persistence and key masking without provider requests.
+
+## New-group color intensity
+
+Look & Feel offers a 0–100% color-intensity slider with a live sample (default
+20%). Autosort captures it only when creating a new group, including new groups
+from domain rules. Reusing an existing group does not change its appearance.
+Manual groups and groups created before this setting remain unchanged.
+
+The captured value travels with each group and is saved in window session
+metadata. A later preference change or browser restart cannot recolor it.
+The setting controls group-header fill and, when installed, Zia's folder-body
+fill without reducing the opacity of tab text, favicons or selection. Minimal
+style still takes precedence. Native palette hues remain available as before.
+
+## Reasoning models and connection tests
+
+The connection test requests a short answer, but GLM-5.3 needs room for hidden
+reasoning before it can emit text. The request builder reserves that room while
+keeping PrimaLabs’ accepted `max_tokens` format and the configured model ID.
+Reasoning capability does not imply the GPT-style `max_completion_tokens` dialect.
+
+For an empty OpenAI-compatible response with `finish_reason: length`, the client
+retries once with a larger budget (hard maximum 16,384 completion tokens). It
+does not retry refusals or ordinary empty stopped responses this way, and never
+uses `reasoning_content` as a visible answer. Model behavior is described in the
+[GLM thinking documentation](https://docs.z.ai/guides/capabilities/thinking-mode).

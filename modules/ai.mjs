@@ -1,3 +1,4 @@
+import { captureNewGroupAppearance } from "./group-appearance.mjs";
 // Zen Tab Sorting — Pass 2 (local AI) using Firefox's bundled ML engine.
 //
 // SCOPE: this engine ONLY assigns unmatched tabs into EXISTING rule-matched
@@ -884,6 +885,7 @@ export const applyPass2 = (pass2Result, workspaceId, rules, options = {}) => {
       // Defensive — also set the color via our helper in case Zen's addTabGroup
       // ignored the option (older API), or didn't fully wire the variant vars.
       applyGroupColor(newGroup, color);
+      captureNewGroupAppearance(newGroup);
 
       // Per-behavior persistence:
       if (newGroupBehavior === "auto-add") {

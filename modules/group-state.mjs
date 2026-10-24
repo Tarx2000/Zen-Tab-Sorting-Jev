@@ -1,6 +1,7 @@
 // Firefox persists normal group IDs but Zen can drop their Space/parent metadata.
 // Window values keep this repair scoped to the same window across session restore.
 import { GROUP_SELECTOR, isSidebarCopy } from "./sidebar-elements.mjs";
+import { savedGroupColorStrength, applyGroupColorStrength } from "./group-appearance.mjs";
 
 const KEY = "zen-tab-sorting-groups-v1";
 const groupsInWindow = (win) => win.gZenWorkspaces.getWorkspaces().flatMap((space) => {
@@ -19,6 +20,7 @@ export const saveGroupState = (win) => {
       parentId: group.group?.id || null,
       index: itemsIn(group.parentElement).indexOf(group),
       collapsed: Boolean(group.collapsed),
+      colorStrength: savedGroupColorStrength(group),
     }));
     const setter = state.store.setCustomWindowValue || state.store.setWindowValue;
     setter.call(state.store, win, KEY, JSON.stringify(records));
@@ -77,6 +79,7 @@ export const setupGroupState = (win) => {
       try {
         if (relocating && group.tabs.length && win.gBrowser.zenHandleTabMove) win.gBrowser.zenHandleTabMove(group, update);
         else update();
+        if (Number.isFinite(record.colorStrength)) applyGroupColorStrength(group, record.colorStrength);
         collapsed.set(group, record.collapsed);
       } catch { /* An unrestorable native group must not block other groups. */ }
     }
@@ -109,7 +112,7 @@ export const setupGroupState = (win) => {
   const observer = new win.MutationObserver((mutations) => {
     if (mutations.some((mutation) => !isSidebarCopy(mutation.target))) schedule();
   });
-  observer.observe(win.gBrowser.tabContainer, { subtree: true, childList: true, attributes: true, attributeFilter: ["collapsed", "zen-workspace-id"] });
+  observer.observe(win.gBrowser.tabContainer, { subtree: true, childList: true, attributes: true, attributeFilter: ["collapsed", "zen-workspace-id", "data-zao-color-strength"] });
   const events = ["TabMove", "TabGroupMoved", "TabGroupCreate", "TabGroupRemoved", "ZenWorkspaceChange"];
   for (const name of events) win.addEventListener(name, schedule);
   win.addEventListener("SSWindowStateReady", onReady);

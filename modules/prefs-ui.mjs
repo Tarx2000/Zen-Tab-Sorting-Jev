@@ -4,7 +4,7 @@
 
 import { CONFIG, LOG, DEFAULT_RULES, BUILD_VERSION, h } from "./config.mjs";
 import { ensureHybridPreferences } from "./hybrid-preferences.mjs";
-import { organizeSettingsLayout, maskProviderKeys } from "./settings-layout.mjs";
+import { organizeSettingsLayout, maskProviderKeys, setupNewGroupStrengthControl } from "./settings-layout.mjs";
 import {
   readRulesPref,
   writeRulesPref,
@@ -524,6 +524,7 @@ const performInject = (dialog) => {
   injectSectionDescriptions(dialog);
   organizeSettingsLayout(dialog, content);
   maskProviderKeys(dialog);
+  setupNewGroupStrengthControl(dialog);
   setupEnginePrefObserver();
   updateConditionalFields(dialog);
   console.log(`${LOG} injected rules + skip + backup + ChatGPT SIWC sections into Sine settings dialog`);

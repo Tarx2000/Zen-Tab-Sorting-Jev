@@ -1,5 +1,66 @@
 # Changelog
 
+## 1.15.0 — 2026-10-24
+
+### Changed
+- The wand softly changes into a rotating ring for the entire sorting session,
+  replacing wiggle/glow effects. Single-Space sorting marks that Space's buttons
+  busy; cross-Space sorting marks every Space. Rebuilt Library actions inherit
+  the current state. Success, empty results and failures all restore the wand.
+- Library transfers now glide between visible Space cards through a bounded,
+  inert HTML presentation layer using Zen's public animation helper in Sine's
+  browser context. Atomic groups get one header flight. Native tabs and Library
+  copies are never hidden or cloned for these flights.
+- Scrolling, resizing, closing the Library, dragging or cancelling ends the
+  presentation safely. Native strip refreshes cannot remove the flight layer;
+  stalled animation promises are bounded. Reduced motion uses a static busy
+  ring and no flights. Sidebar flights also use the bounded native helper.
+
+### Tests
+- Native classifier loading state, correct target-card scope and rebuilt actions.
+- Rendered cross-card flights through native strip rebuilds, partial transfer
+  failures, reduced motion, scroll interruption, Library close/reopen and a
+  non-resolving native animation helper. Tab/browser identities remain intact.
+- Session locking, overlapping commands and failure cleanup.
+- An incompatible Library reader falls back to native sorting without replaying
+  completed mutations or leaving loaders active.
+
+## 1.14.0 — 2026-10-24
+
+### Added
+- A color-intensity slider with a live sample under Look & Feel. Autosort captures
+  the value on each new group; changing the slider never recolors existing groups.
+  Captured appearance survives transfers and session restoration. The Zia folder
+  fill uses the same intensity without fading tab text or favicons.
+
+### Changed
+- Sorting in the Library now uses its native strip refresh and row positioning,
+  with short arrivals through Zen's animation helper for visible incoming rows.
+  It honors reduced motion and never hides real tabs for Library presentation.
+  There is no simulated drag state or synthetic flight across Space cards.
+
+### Tests
+- Real Sine slider rendering, preview updates and preference persistence.
+- Native Autosort creation at 20% and 60%, unchanged older/manual groups, Library
+  copies, and session restoration with a different current preference.
+- Library arrivals, reduced motion, partial failures and final native refresh.
+
+## 1.13.1 — 2026-10-24
+
+### Fixed
+- Library copies no longer inherit a lasting invisible state from temporary
+  cross-Space animation markers. Refresh the Library from settled native data
+  after Workspace sorting; retain all real tab/browser objects and groups.
+- GLM-5.3 models receive reasoning headroom even with the classic `max_tokens`
+  dialect, including provider-prefixed model IDs such as PrimaLabs GLM.
+- Empty length-limited model responses get one bounded larger-budget retry using
+  the accepted parameter format. Persistent truncation reports the output limit
+  instead of treating hidden reasoning as a usable answer.
+
+### Tests
+- Native Library rebuild during animation, reduced motion and a failed transfer.
+- GLM connection budgets, retry bounds and stopped/refusal response regressions.
+
 ## 1.13.0 — 2026-10-24
 
 ### Changed

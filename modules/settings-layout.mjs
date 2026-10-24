@@ -1,4 +1,35 @@
 import { CONFIG, h } from "./config.mjs";
+import { normalizeGroupColorStrength } from "./group-appearance.mjs";
+
+export const setupNewGroupStrengthControl = (dialog) => {
+  const row = dialog.querySelector(`#${CONFIG.NEW_GROUP_COLOR_STRENGTH_PREF.replaceAll(".", "-")}`);
+  const input = row?.querySelector("input");
+  if (!input || row.querySelector(".zao-group-strength-control")) return;
+  const control = h("div", { class: "zao-group-strength-control" });
+  input.before(control);
+  control.appendChild(input);
+  const strength = normalizeGroupColorStrength(input.value);
+  input.type = "range";
+  input.min = "0";
+  input.max = "100";
+  input.step = "1";
+  input.value = String(strength);
+  input.id = "zao-new-group-color-strength";
+  const output = h("output");
+  output.setAttribute("for", input.id);
+  const preview = h("div", { class: "zao-group-strength-preview" });
+  preview.append(h("strong", { text: "New group" }), h("div", { text: "Example tab" }));
+  const note = h("p", { class: "zao-group-strength-note", text:
+    "Only new groups created by Autosort use this value. Existing groups keep their saved appearance. Minimal style takes precedence." });
+  const update = () => {
+    output.textContent = `${input.value}%`;
+    preview.style.setProperty("--zao-preview-strength", `${input.value}%`);
+  };
+  input.addEventListener("input", update);
+  input.addEventListener("change", update);
+  control.append(output, preview, note);
+  update();
+};
 
 const separator = (dialog, prefix) => [...dialog.querySelectorAll(".separator-label")]
   .find(label => label.textContent.trim().startsWith(prefix))?.closest("vbox");

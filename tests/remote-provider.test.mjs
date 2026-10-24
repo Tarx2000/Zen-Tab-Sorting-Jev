@@ -271,3 +271,56 @@ test("Given an Ollama provider When a request is sent Then no parameter-shape re
     },
   );
 });
+
+const emptyReasoningBody = (finish = "length", refusal = undefined) => JSON.stringify({
+  choices: [{ message: { content: null, reasoning_content: "private thinking is not an answer", refusal }, finish_reason: finish }],
+  usage: { completion_tokens_details: { reasoning_tokens: 63 } },
+});
+const reasoningSettings = (model) => ({ provider: "primalabs", consentToSendData: true,
+  endpoint: "https://primalabs.test/v1", apiKey: "test-only", model });
+
+test("PrimaLabs GLM connection test leaves room for reasoning and keeps the exact configured model", async () => {
+  await withStubbedFetch(() => new Response(okBody(), { status: 200 }), async (calls) => {
+    const settings = reasoningSettings("primalabs-ai/GLM-5.3-Flash");
+    const result = await testProviderConnection(settings);
+    assert.equal(result.ok, true);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].body.model, settings.model);
+    assert.equal(calls[0].body.max_tokens, 4112);
+    assert.equal("max_completion_tokens" in calls[0].body, false);
+  });
+});
+
+test("An unfamiliar reasoning model with an empty length-limited response gets one larger-budget retry", async () => {
+  await withStubbedFetch(n => new Response(n === 1 ? emptyReasoningBody() : okBody(), { status: 200 }), async (calls) => {
+    const result = await testProviderConnection(reasoningSettings("unfamiliar-reasoner"));
+    assert.equal(result.ok, true);
+    assert.equal(result.reply, "ok");
+    assert.equal(calls.length, 2);
+    assert.equal(calls[0].body.max_tokens, 64);
+    assert.equal(calls[1].body.max_tokens, 4096);
+    assert.equal(calls[1].body.model, calls[0].body.model);
+  });
+});
+
+test("Persistent reasoning truncation stops after one retry and never uses reasoning as the visible answer", async () => {
+  await withStubbedFetch(() => new Response(emptyReasoningBody(), { status: 200 }), async (calls) => {
+    const result = await testProviderConnection(reasoningSettings("primalabs-ai/GLM-5.3-Flash"));
+    assert.equal(result.ok, false);
+    assert.equal(calls.length, 2);
+    assert.equal(calls[0].body.max_tokens, 4112);
+    assert.equal(calls[1].body.max_tokens, 8192);
+    assert.match(result.error, /output budget exhausted/);
+    assert.doesNotMatch(result.error, /private thinking/);
+  });
+});
+
+test("Empty stopped responses and refusals do not trigger a token-budget retry", async () => {
+  for (const body of [emptyReasoningBody("stop"), emptyReasoningBody("length", "Declined")]) {
+    await withStubbedFetch(() => new Response(body, { status: 200 }), async (calls) => {
+      const result = await testProviderConnection(reasoningSettings("refusal-test-model"));
+      assert.equal(result.ok, false);
+      assert.equal(calls.length, 1);
+    });
+  }
+});
