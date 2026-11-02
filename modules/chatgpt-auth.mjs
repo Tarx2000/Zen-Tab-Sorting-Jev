@@ -377,7 +377,7 @@ export const ensureValidChatGPTToken = async (
   finally { if (locks.get(key) === pending) locks.delete(key); }
 };
 
-export const buildChatGPTResponsesRequest = ({ accessToken, model, inputText }) => ({
+export const buildChatGPTResponsesRequest = ({ accessToken, model, inputText, reasoningEffort }) => ({
   url: SIWC_CONSTANTS.RESPONSES_URL,
   init: {
     method: "POST",
@@ -396,6 +396,10 @@ export const buildChatGPTResponsesRequest = ({ accessToken, model, inputText }) 
       ],
       store: false,
       stream: true,
+      // The Responses API carries the effort under `reasoning.effort`.
+      // Omitting it means "model default", which for a reasoning model is the
+      // slow path; the sorting pipeline asks for the cheapest level instead.
+      ...(reasoningEffort ? { reasoning: { effort: reasoningEffort } } : {}),
     }),
   },
 });

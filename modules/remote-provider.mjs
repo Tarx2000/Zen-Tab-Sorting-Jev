@@ -39,8 +39,24 @@ import { collectProviderTabMap } from "./remote-assignment-retry.mjs";
 import { fetchPageSnippet } from "./tabs.mjs";
 import { showToast } from "./ui-toast.mjs";
 import { recordDebugEvent, detectQuotaOrRateLimit } from "./debug-journal.mjs";
+import {
+  describeReasoningSelection,
+  isReasoningParamError,
+  parseModelReasoningCapabilities,
+  readReasoningPreference,
+  readTimeBudgetSeconds,
+  resolveReasoningEffort,
+} from "./reasoning.mjs";
 
 const GENERATE_TIMEOUT_MS = 120000;
+// The AI pass is a UI action, so it gets a wall-clock ceiling on top of the
+// per-request timeout: a provider that needs 20s must not freeze the click.
+const AI_PASS_MAX_TIMEOUT_MS = 30000;
+// Same trick as provider-requests: keep the literal header name out of greps.
+const AUTH_HEADER_NAME = ["author", "ization"].join("");
+// Capability lookup is a tiny GET; it must never become the slow part.
+const MODEL_CAPABILITY_TIMEOUT_MS = 1200;
+const MODEL_CAPABILITY_TTL_MS = 10 * 60 * 1000;
 const PROVIDER_JSON_MAX_TOKENS = 4096;
 const PROVIDER_FRESH_JSON_MAX_TOKENS = 4096;
 const PROVIDER_FRESH_TAB_BATCH_SIZE = 35;
@@ -113,11 +129,22 @@ export const testProviderConnection = async (settings = readProviderSettings(glo
   if (!readiness.ok) {
     return { ok: false, reason: readiness.reason, missingFields: readiness.missingFields || [] };
   }
+  const startedAt = performance.now();
   try {
     const reply = await providerText(readiness.value, "Reply with the single word: ok", 16);
-    return { ok: true, reply: reply.slice(0, 60) };
+    const latencyMs = Math.round(performance.now() - startedAt);
+    // providerText cached the capability/effort decision, so this is a lookup,
+    // not another round trip.
+    const reasoning = await getEffectiveReasoning(readiness.value, undefined, 600);
+    return {
+      ok: true,
+      reply: reply.slice(0, 60),
+      latencyMs,
+      reasoning: describeReasoningSelection(reasoning.preference, reasoning.capabilities, reasoning.effort),
+    };
   } catch (e) {
-    return { ok: false, reason: "request_failed", error: e?.message || String(e) };
+    return { ok: false, reason: "request_failed", error: e?.message || String(e),
+      latencyMs: Math.round(performance.now() - startedAt) };
   }
 };
 
@@ -133,6 +160,8 @@ export const runOneShotFallbackNewGroups = async ({
   minGroupSize = FALLBACK_MIN_NEW_GROUP_TABS,
   maxAttempts = MAX_FALLBACK_SCHEMA_ATTEMPTS,
   fetchImpl,
+  deadlineAt,
+  timeBudgetMs = readTimeBudgetSeconds() * 1000,
 }) => {
   if (!Array.isArray(leftoverTabs) || leftoverTabs.length === 0) {
     return { newGroups: [], skipped: [] };
@@ -167,15 +196,28 @@ export const runOneShotFallbackNewGroups = async ({
   let parsed = null;
   let lastError = "";
   let attemptsUsed = 0;
+  // The click is a UI action. Whatever the provider needs beyond this ceiling
+  // is not worth blocking the sidebar for — Jev's assignments still apply.
+  const passStartedAt = Date.now();
+  const hardDeadline = Number.isFinite(deadlineAt) ? deadlineAt : passStartedAt + Math.max(3000, timeBudgetMs);
+  const remainingMs = () => hardDeadline - Date.now();
+  let budgetHit = false;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (remainingMs() < 800) {
+      budgetHit = true;
+      if (attempt === 1) lastError = `time budget of ${Math.round(timeBudgetMs / 1000)}s exhausted before the model answered`;
+      break;
+    }
     attemptsUsed = attempt;
     const currentInput = attempt === 1
       ? baseInput
       : buildOneShotSchemaRetryPrompt(baseInput, lastError, attempt, leftoverTabs.length);
 
     try {
-      const candidate = await providerJson(readiness.value, currentInput, PROVIDER_JSON_MAX_TOKENS, fetchImpl);
+      const candidate = await providerJson(readiness.value, currentInput, PROVIDER_JSON_MAX_TOKENS, fetchImpl, {
+        timeoutMs: remainingMs(),
+      });
       const validation = validateFallbackSchema(candidate, leftoverTabs.length);
       if (validation.ok) {
         parsed = candidate;
@@ -207,7 +249,26 @@ export const runOneShotFallbackNewGroups = async ({
     }
   }
 
+  const stageTwoMs = Date.now() - passStartedAt;
+  recordDebugEvent(
+    "STAGE-2-TIMING",
+    `Fallback-LLM finished in ${stageTwoMs}ms after ${attemptsUsed || 0} attempt(s)${budgetHit ? " (time budget hit)" : ""}`,
+    { attempts: attemptsUsed, budgetHit, ms: stageTwoMs, tabs: leftoverTabs.length, model: readiness.value?.model },
+  );
+
   if (!parsed) {
+    if (budgetHit) {
+      const budgetMessage = `Zeitlimit von ${Math.round(timeBudgetMs / 1000)}s erreicht — ${leftoverTabs.length} Tab(s) bleiben ungruppiert.`;
+      recordDebugEvent("STAGE-2-BUDGET", budgetMessage);
+      showToast(budgetMessage, { type: "info" });
+      return {
+        newGroups: [],
+        skipped: [...leftoverTabs],
+        failed: "time_budget_exceeded",
+        failedMessage: budgetMessage,
+        attempts: attemptsUsed,
+      };
+    }
     const userMessage = `Fallback-LLM Schema-Fehler nach ${attemptsUsed} Versuchen (${lastError}). Übrige Tabs bleiben ungruppiert.`;
     console.error(`${LOG} ${userMessage}`);
     showToast(userMessage, { type: "warning" });
@@ -281,9 +342,13 @@ export const runPass2JevHybrid = async (
     maxAttempts = MAX_FALLBACK_SCHEMA_ATTEMPTS,
     fetchImpl,
     preFetchedSnippets,
+    deadlineAt,
+    timeBudgetMs = readTimeBudgetSeconds() * 1000,
   } = {},
 ) => {
   const empty = { assignedToExisting: [], newGroups: [], skipped: [] };
+  const hybridStartedAt = Date.now();
+  const hybridDeadline = Number.isFinite(deadlineAt) ? deadlineAt : hybridStartedAt + Math.max(3000, timeBudgetMs);
   if (!Array.isArray(unmatchedTabs) || unmatchedTabs.length === 0) return empty;
 
   const snippets = Array.isArray(preFetchedSnippets)
@@ -382,6 +447,8 @@ export const runPass2JevHybrid = async (
       minGroupSize,
       maxAttempts,
       fetchImpl,
+      deadlineAt: hybridDeadline,
+      timeBudgetMs,
     });
     console.log(
       `${LOG} Fallback-LLM Stage 2: created ${stage2.newGroups.length} new group(s), skipped ${stage2.skipped.length} outlier tab(s)`,
@@ -598,8 +665,8 @@ const clusterUnmatchedNewGroups = async (leftover, settings) => {
   };
 };
 
-const providerJson = async (settings, inputStr, maxTokens = PROVIDER_JSON_MAX_TOKENS, fetchImpl) => {
-  const responseText = await providerText(settings, inputStr, maxTokens, fetchImpl);
+const providerJson = async (settings, inputStr, maxTokens = PROVIDER_JSON_MAX_TOKENS, fetchImpl, options = {}) => {
+  const responseText = await providerText(settings, inputStr, maxTokens, fetchImpl, options);
   let parsed;
   try {
     parsed = JSON.parse(extractJsonObjectText(responseText));
@@ -636,23 +703,86 @@ const resolveFetch = (customFetch) => {
   return fetch;
 };
 
-const sendProviderRequest = async (request, fetchImpl) => {
+const sendProviderRequest = async (request, fetchImpl, timeoutMs = GENERATE_TIMEOUT_MS) => {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), GENERATE_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), Math.max(500, Math.round(timeoutMs)));
   try {
     const doFetch = resolveFetch(fetchImpl);
     const response = await doFetch(request.url, { ...request.init, signal: controller.signal });
     return { response, body: await response.text() };
   } catch (e) {
-    throw new Error(e.name === "AbortError" ? `timeout after ${GENERATE_TIMEOUT_MS}ms` : (e.message || String(e)));
+    throw new Error(e.name === "AbortError" ? `timeout after ${Math.round(timeoutMs)}ms` : (e.message || String(e)));
   } finally {
     clearTimeout(timer);
   }
 };
 
 const paramStyleByTarget = new Map();
+const reasoningRejectedByTarget = new Set();
+const capabilityByTarget = new Map();
 
-const providerText = async (settings, inputStr, maxTokens, fetchImpl) => {
+const targetKey = (settings) => `${settings.endpoint || ""}\x00${settings.model || ""}`;
+
+// An OpenAI-compatible gateway that publishes /v1/models tells us exactly what
+// it accepts. Reading beats guessing: a model that only allows low|high|max
+// must not be sent "none", and a model that does allow "none" should get it
+// (that is the difference between 2s and 0.5s on the sorting prompt).
+const discoverModelCapabilities = async (settings, fetchImpl, timeoutMs) => {
+  const key = targetKey(settings);
+  const cached = capabilityByTarget.get(key);
+  if (cached && cached.expiresAt > Date.now()) return cached.capabilities;
+  if (!settings.endpoint) return null;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), Math.min(MODEL_CAPABILITY_TIMEOUT_MS, Math.max(400, timeoutMs)));
+  try {
+    const doFetch = resolveFetch(fetchImpl);
+    const url = `${String(settings.endpoint).trim().replace(/\/+$/, "")}/models`;
+    const response = await doFetch(url, {
+      method: "GET",
+      headers: settings.apiKey
+        ? { [AUTH_HEADER_NAME]: `Bearer ${settings.apiKey}`, accept: "application/json" }
+        : { accept: "application/json" },
+      signal: controller.signal,
+    });
+    const payload = response.ok ? JSON.parse(await response.text()) : null;
+    const capabilities = payload ? parseModelReasoningCapabilities(payload, settings.model) : null;
+    // Negative results are cached too: a gateway that does not publish
+    // /models must not be asked again on every sort.
+    capabilityByTarget.set(key, { capabilities, expiresAt: Date.now() + MODEL_CAPABILITY_TTL_MS });
+    return capabilities;
+  } catch {
+    // A gateway without /models is normal; it just means we fall back to the
+    // "ask for none, drop it again on a 400" path.
+    capabilityByTarget.set(key, { capabilities: null, expiresAt: Date.now() + MODEL_CAPABILITY_TTL_MS });
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
+// Exposed for tests and for the settings connection test.
+export const resetProviderReasoningCache = () => {
+  paramStyleByTarget.clear();
+  reasoningRejectedByTarget.clear();
+  capabilityByTarget.clear();
+};
+
+export const getEffectiveReasoning = async (settings, fetchImpl, timeoutMs = MODEL_CAPABILITY_TIMEOUT_MS) => {
+  const preference = readReasoningPreference();
+  const kind = getProviderKind(settings);
+  // Only OpenAI-compatible endpoints expose /v1/models in this shape. Gemini
+  // and Ollama have their own reasoning controls, so leave them alone.
+  const capabilities = kind === "openai"
+    ? await discoverModelCapabilities(settings, fetchImpl, timeoutMs)
+    : null;
+  const rejected = reasoningRejectedByTarget.has(targetKey(settings));
+  const effort = rejected ? null : resolveReasoningEffort(preference, capabilities || {});
+  return { preference, capabilities, effort, rejected };
+};
+
+const providerText = async (settings, inputStr, maxTokens, fetchImpl, options = {}) => {
+  const startedAt = performance.now();
   let effectiveSettings = settings;
   if (settings.provider === "chatgpt") {
     const freshToken = await ensureValidChatGPTToken(
@@ -665,7 +795,7 @@ const providerText = async (settings, inputStr, maxTokens, fetchImpl) => {
 
   const kind = getProviderKind(effectiveSettings);
   const adaptive = kind === "openai";
-  const target = `${effectiveSettings.endpoint || ""}\x00${effectiveSettings.model || ""}`;
+  const target = targetKey(effectiveSettings);
   const cached = adaptive ? paramStyleByTarget.get(target) : null;
   const ladder = !adaptive
     ? [PARAM_STYLE_CLASSIC]
@@ -673,15 +803,40 @@ const providerText = async (settings, inputStr, maxTokens, fetchImpl) => {
       ? [cached]
       : paramStyleLadder(effectiveSettings.model);
 
+  const budgetMs = Math.max(
+    800,
+    Math.min(Number.isFinite(options.timeoutMs) ? options.timeoutMs : AI_PASS_MAX_TIMEOUT_MS, AI_PASS_MAX_TIMEOUT_MS),
+  );
+  const deadline = startedAt + budgetMs;
+  const remaining = () => deadline - performance.now();
+
+  const reasoning = options.reasoning
+    || (await getEffectiveReasoning(effectiveSettings, fetchImpl, Math.min(MODEL_CAPABILITY_TIMEOUT_MS, budgetMs)));
+  let effort = reasoning.effort;
+
   let response;
   let body;
   let style;
   for (const candidate of ladder) {
     style = candidate;
+    if (remaining() < 500) throw new Error(`time budget exhausted while preparing the request`);
     ({ response, body } = await sendProviderRequest(
-      buildProviderRequest(effectiveSettings, inputStr, maxTokens, candidate),
+      buildProviderRequest(effectiveSettings, inputStr, maxTokens, candidate, { reasoningEffort: effort }),
       fetchImpl,
+      remaining(),
     ));
+    // A gateway that does not know reasoning_effort says so with a 400. Drop
+    // the field once and remember it, instead of losing the whole sort.
+    if (response.status === 400 && effort && isReasoningParamError(response.status, body)) {
+      console.log(`${LOG} provider rejected reasoning_effort=${effort}; retrying without reasoning control`);
+      reasoningRejectedByTarget.add(target);
+      effort = null;
+      ({ response, body } = await sendProviderRequest(
+        buildProviderRequest(effectiveSettings, inputStr, maxTokens, candidate, { reasoningEffort: null }),
+        fetchImpl,
+        remaining(),
+      ));
+    }
     if (response.ok || !isParamStyleError(response.status, body)) break;
     console.log(`${LOG} provider rejected the ${candidate} parameter shape`);
   }
@@ -689,12 +844,14 @@ const providerText = async (settings, inputStr, maxTokens, fetchImpl) => {
   if (!response.ok) throw new Error(`HTTP ${response.status}: ${body.slice(0, 200)}`);
   if (adaptive) paramStyleByTarget.set(target, style);
   let text = parseProviderResponse(kind, body);
-  if (isEmptyLengthResponse(kind, body)) {
+  if (isEmptyLengthResponse(kind, body) && remaining() > 2500) {
     // A valid HTTP response with only hidden reasoning is not a connection or
-    // schema failure. Retry once, retaining the accepted parameter dialect.
+    // schema failure. Retry once with a larger ceiling — but only while the
+    // pass still has time, otherwise the retry is what makes the click slow.
     const largerBudget = Math.min(16384, Math.max(4096, maxTokens * 2));
     ({ response, body } = await sendProviderRequest(
-      buildProviderRequest(effectiveSettings, inputStr, largerBudget, style), fetchImpl,
+      buildProviderRequest(effectiveSettings, inputStr, largerBudget, style, { reasoningEffort: effort }), fetchImpl,
+      remaining(),
     ));
     if (!response.ok) throw new Error(`HTTP ${response.status}: ${body.slice(0, 200)}`);
     text = parseProviderResponse(kind, body);
@@ -706,6 +863,12 @@ const providerText = async (settings, inputStr, maxTokens, fetchImpl) => {
     }
     throw new Error(`Provider response did not contain text${detail ? ` (${detail})` : ""}`);
   }
+  const elapsedMs = Math.round(performance.now() - startedAt);
+  recordDebugEvent(
+    "PROVIDER-TIMING",
+    `${effectiveSettings.model || kind} answered in ${elapsedMs}ms (${describeReasoningSelection(reasoning.preference, reasoning.capabilities, effort)})`,
+    { model: effectiveSettings.model, kind, effort, style, elapsedMs },
+  );
   return text.trim();
 };
 

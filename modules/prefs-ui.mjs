@@ -75,7 +75,7 @@ const SECTION_DESCRIPTIONS = [
   ["AI Sorting", "Jev places tabs into existing groups. Your chosen LLM creates new groups for the remaining tabs. Both stages are part of every normal sort."],
   ["1. Existing groups", "Choose the Jev service and model used to recognize your existing groups. The same Jev configuration also powers sorting between Spaces."],
   ["Jev confidence", "Enter confidence as 0.70 or 70%, and the lead as 0.15 or 15 percentage points. These thresholds apply to existing groups. For moving between Spaces, the destination must instead score more than 10 percentage points above the current Space."],
-  ["2. New groups", "Choose the LLM for tabs that Jev could not place. Only this provider’s connection and model settings are shown. New groups contain at least two tabs."],
+  ["2. New groups", "Choose the LLM for tabs that Jev could not place. Only this provider’s connection and model settings are shown. New groups contain at least two tabs. Reasoning effort decides how long the model thinks before it answers — “Fast” turns thinking off when the model allows it. The time limit caps the whole AI pass; tabs it could not place stay ungrouped."],
   ["3. Sorting behavior", "Keep existing groups and sort loose tabs, or reconsider all tabs. Preview mode lets you review new groups before anything moves."],
   ["Group Rules", "Optional: match domains to saved groups before Jev runs. Leave this off for sorting by context."],
   ["Skip Domains", "Exclude sites from sorting. In a normal sort, matching tabs stay loose at the top. When sorting between Spaces, a matching member keeps the entire group in its current Space."],
@@ -382,7 +382,8 @@ const buildProviderTestSection = (stage) => {
     try {
       const result = await (isJev ? testJevConnection() : testProviderConnection());
       status.dataset.state = result.ok ? "ok" : "err";
-      status.textContent = result.ok ? "Connected — provider replied."
+      status.textContent = result.ok
+        ? `Connected in ${result.latencyMs} ms — ${result.reasoning}.`
         : result.reason === "consent_required" ? "Allow sending tab data in AI Sorting first."
         : result.reason === "missing_required_config" ? (isJev ? "Enter your Jev API key first." : `Complete the provider settings: ${(result.missingFields || []).join(", ")}.`)
         : `Connection failed: ${result.error || result.reason}`;

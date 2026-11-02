@@ -15,7 +15,7 @@ export const LOG = "[ZenTabSort]";
 // Build tag — mirrors theme.json's `version` for shipped releases, and gets a
 // `+tag.N` suffix for in-progress iterative builds so the Browser Console
 // reveals which build is actually running (vs. a stale module cache).
-export const BUILD_VERSION = "1.15.0";
+export const BUILD_VERSION = "1.16.0";
 
 export const CONFIG = {
   // Init polling — wait for gBrowser/gZenWorkspaces/separator to appear at startup.
@@ -134,6 +134,20 @@ export const CONFIG = {
   AI_OLLAMA_MODEL_PREF: "extensions.zen-auto-organize.ai-ollama-model",
   AI_OLLAMA_WARMUP_PREF: "extensions.zen-auto-organize.ai-ollama-warmup",
   AI_PROVIDER_CONSENT_PREF: "extensions.zen-auto-organize.ai-provider-consent",
+  // Reasoning control for the "New groups" LLM. Reasoning models spend their
+  // first seconds thinking before they emit a single character, which is what
+  // made a sort take 10-90s. "fast" asks the model for its cheapest setting
+  // (off, if the model allows it); "default" sends no reasoning parameter at
+  // all and leaves the provider's own default in charge.
+  AI_REASONING_EFFORT_PREF: "extensions.zen-auto-organize.ai-reasoning-effort",
+  AI_REASONING_EFFORT_DEFAULT: "fast",
+  // Hard ceiling for the AI pass in seconds. A provider that answers slower
+  // must not keep the toolbox waiting: whatever pass 1 and Jev already placed
+  // is applied, the rest stays ungrouped.
+  AI_TIME_BUDGET_PREF: "extensions.zen-auto-organize.ai-time-budget",
+  AI_TIME_BUDGET_DEFAULT: 10,
+  AI_TIME_BUDGET_MIN: 3,
+  AI_TIME_BUDGET_MAX: 120,
   AI_OPENAI_ENDPOINT_PREF: "extensions.zen-auto-organize.ai-openai-endpoint",
   AI_OPENAI_API_KEY_PREF: "extensions.zen-auto-organize.ai-openai-api-key",
   AI_OPENAI_MODEL_PREF: "extensions.zen-auto-organize.ai-openai-model",

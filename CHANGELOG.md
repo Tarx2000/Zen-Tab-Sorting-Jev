@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.16.0 — 2026-11-02
+
+### Fixed
+- Sorting no longer inherits a reasoning model's slow default. The "New groups"
+  request used to send no reasoning control at all on the OpenAI-compatible
+  dialect (PrimaLabs, OpenAI-compatible, Custom), so providers spent seconds in
+  hidden thinking before the first visible token. Measured on the real sorting
+  prompt: 2050 ms / 406 reasoning tokens by default versus 475 ms / 0 with
+  reasoning off.
+- The plugin now reads `reasoning_effort_accepted` and `reasoning_toggle` from
+  the provider's `/v1/models` (PrimaLabs publishes both) and asks for the
+  cheapest level the model actually accepts. GLM-5.3 cannot switch thinking
+  off over `/chat/completions` (low|high|max only) and now gets `low` instead of
+  an invalid `none`; DeepSeek V4.1 / MiMo / Nemotron get `none`.
+- A provider that rejects the reasoning field falls back once without it and
+  that decision is remembered, so a gateway that does not know the parameter
+  still sorts.
+- The empty-answer retry no longer doubles the wait: it only runs while the AI
+  pass still has time.
+
+### Added
+- "Reasoning effort for new groups" setting: Fast (default, reasoning off when
+  the model allows it), Low, Medium, High, or the provider's own default.
+- "Time limit for the AI pass" setting (default 10s). A slow provider is cut
+  off instead of freezing the click; tabs it could not place stay ungrouped and
+  Jev/pass-1 assignments are still applied.
+- The connection test now reports the measured latency and the reasoning level
+  it used, e.g. "Connected in 480 ms — reasoning off".
+
+### Tests
+- Reasoning policy resolution per model capability shape, reasoning parameter
+  rejection, rewording of the connection test, and the AI time limit cutting a
+  slow provider off after one attempt.
+
 ## 1.15.0 — 2026-10-24
 
 ### Changed

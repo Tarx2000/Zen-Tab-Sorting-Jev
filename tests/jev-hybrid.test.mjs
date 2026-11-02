@@ -52,7 +52,10 @@ test("Given Fallback-LLM returns broken schema on first 2 attempts and valid sch
       apiKey: "sk-test",
       model: "primalabs-ai/DeepSeek-V4.1-Flash-1017",
     },
-    fetchImpl: async (_url, init) => {
+    fetchImpl: async (_url, init = {}) => {
+      if ((init.method || "GET").toUpperCase() === "GET") {
+        return new Response("not found", { status: 404 });
+      }
       calls += 1;
       const bodyObj = JSON.parse(init.body);
       const userContent = bodyObj.messages[0].content;

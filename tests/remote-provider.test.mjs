@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   classifyExistingGroupsRemoteBatch,
+  resetProviderReasoningCache,
   runPass2Remote,
   runPass2RemoteFresh,
   testProviderConnection,
@@ -11,7 +12,10 @@ import {
 test("Given ready OpenAI provider When remote Pass 2 runs Then it returns an applyPass2-shaped plan", async () => {
   const originalFetch = globalThis.fetch;
   const calls = [];
-  globalThis.fetch = async (url, init) => {
+  globalThis.fetch = async (url, init = {}) => {
+    if ((init.method || "GET").toUpperCase() === "GET") {
+      return new Response("not found", { status: 404 });
+    }
     calls.push({ url, init });
     return new Response(JSON.stringify({
       choices: [{ message: { content: JSON.stringify({ 0: "Dev", 1: "Recipes" }) } }],
@@ -169,10 +173,20 @@ const unsupportedParamBody = JSON.stringify({
   error: { message: "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead." },
 });
 
-const withStubbedFetch = async (handler, run) => {
+const withStubbedFetch = async (handler, run, { models = null } = {}) => {
+  // Capability/param-style caches are process-wide by design; each test starts
+  // from a clean slate.
+  resetProviderReasoningCache();
   const originalFetch = globalThis.fetch;
   const calls = [];
-  globalThis.fetch = async (url, init) => {
+  globalThis.fetch = async (url, init = {}) => {
+    // Capability discovery is a GET on /models; by default the stub behaves
+    // like a gateway that does not publish it.
+    if ((init.method || "GET").toUpperCase() === "GET") {
+      return models
+        ? new Response(JSON.stringify(models), { status: 200 })
+        : new Response("not found", { status: 404 });
+    }
     calls.push({ url, body: JSON.parse(init.body) });
     return handler(calls.length);
   };
@@ -197,7 +211,10 @@ test("Given a GPT-5 model name When testing the connection Then the first reques
 
       assert.equal(result.ok, true);
       assert.equal(calls.length, 1);
-      assert.equal(calls[0].body.max_completion_tokens, 4112);
+      // Sorting turns reasoning off first, so the model gets the answer
+      // budget itself rather than a reasoning reservation on top.
+      assert.equal(calls[0].body.max_completion_tokens, 64);
+      assert.equal(calls[0].body.reasoning_effort, "none");
       assert.equal("max_tokens" in calls[0].body, false);
     },
   );
@@ -222,7 +239,8 @@ test("Given a server that rejects max_tokens When a request is sent Then it retr
       assert.equal(calls.length, 2);
       assert.equal(calls[0].body.max_tokens, 64);
       assert.equal(calls[0].body.temperature, 0.2);
-      assert.equal(calls[1].body.max_completion_tokens, 4112);
+      assert.equal(calls[1].body.max_completion_tokens, 64);
+      assert.equal(calls[1].body.reasoning_effort, "none");
       assert.equal("temperature" in calls[1].body, false);
 
       // The detected shape is cached, so the second call does not pay for the
@@ -230,7 +248,7 @@ test("Given a server that rejects max_tokens When a request is sent Then it retr
       const second = await testProviderConnection(settings);
       assert.equal(second.ok, true);
       assert.equal(calls.length, 3);
-      assert.equal(calls[2].body.max_completion_tokens, 4112);
+      assert.equal(calls[2].body.max_completion_tokens, 64);
     },
   );
 });
@@ -279,15 +297,43 @@ const emptyReasoningBody = (finish = "length", refusal = undefined) => JSON.stri
 const reasoningSettings = (model) => ({ provider: "primalabs", consentToSendData: true,
   endpoint: "https://primalabs.test/v1", apiKey: "test-only", model });
 
-test("PrimaLabs GLM connection test leaves room for reasoning and keeps the exact configured model", async () => {
-  await withStubbedFetch(() => new Response(okBody(), { status: 200 }), async (calls) => {
+test("PrimaLabs GLM connection test asks for reasoning off, drops the field when the model refuses it, and then leaves room for reasoning", async () => {
+  await withStubbedFetch((n) => n === 1
+    ? new Response(JSON.stringify({ error: { message: "Unsupported value: reasoning_effort does not support 'none' with this model" } }), { status: 400 })
+    : new Response(okBody(), { status: 200 }), async (calls) => {
     const settings = reasoningSettings("primalabs-ai/GLM-5.3-Flash");
     const result = await testProviderConnection(settings);
     assert.equal(result.ok, true);
-    assert.equal(calls.length, 1);
+    assert.equal(calls.length, 2);
     assert.equal(calls[0].body.model, settings.model);
+    assert.equal(calls[0].body.reasoning_effort, "none");
+    assert.equal(calls[0].body.max_tokens, 64);
+    // Retry without any reasoning control: GLM still thinks, so the budget
+    // must keep the headroom that prevents an empty finish_reason=length.
+    assert.equal("reasoning_effort" in calls[1].body, false);
+    assert.equal(calls[1].body.max_tokens, 4112);
+    assert.equal(calls[1].body.model, settings.model);
+    assert.equal("max_completion_tokens" in calls[1].body, false);
+  });
+});
+
+test("A model that publishes its reasoning levels gets the cheapest one it accepts", async () => {
+  await withStubbedFetch(() => new Response(okBody(), { status: 200 }), async (calls) => {
+    const settings = reasoningSettings("primalabs-ai/GLM-5.3-Flash");
+    await testProviderConnection(settings);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].body.reasoning_effort, "low");
     assert.equal(calls[0].body.max_tokens, 4112);
-    assert.equal("max_completion_tokens" in calls[0].body, false);
+  }, {
+    models: {
+      object: "list",
+      data: [{
+        id: "primalabs-ai/GLM-5.3-Flash",
+        supports_reasoning: true,
+        reasoning_toggle: { "/v1/chat/completions": false },
+        reasoning_effort_accepted: { "/v1/chat/completions": ["low", "high", "max"] },
+      }],
+    },
   });
 });
 
@@ -308,8 +354,8 @@ test("Persistent reasoning truncation stops after one retry and never uses reaso
     const result = await testProviderConnection(reasoningSettings("primalabs-ai/GLM-5.3-Flash"));
     assert.equal(result.ok, false);
     assert.equal(calls.length, 2);
-    assert.equal(calls[0].body.max_tokens, 4112);
-    assert.equal(calls[1].body.max_tokens, 8192);
+    assert.equal(calls[0].body.max_tokens, 64);
+    assert.equal(calls[1].body.max_tokens, 4096);
     assert.match(result.error, /output budget exhausted/);
     assert.doesNotMatch(result.error, /private thinking/);
   });

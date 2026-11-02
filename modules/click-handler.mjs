@@ -42,6 +42,7 @@ import {
 import { showToast } from "./ui-toast.mjs";
 import { showPreviewModal } from "./preview-modal.mjs";
 import { recordDebugEvent } from "./debug-journal.mjs";
+import { readTimeBudgetSeconds } from "./reasoning.mjs";
 import { isFullAIMode, resolveEffectiveSortingMode, resolvePass2ApplyOptions, resolveSortingPlan } from "./sorting-mode.mjs";
 
 console.log(`${LOG} click-handler.mjs loaded — v${BUILD_VERSION}`);
@@ -66,6 +67,10 @@ const assignmentMapToPlan = (tabs, assignmentMap) => {
 
 const organizeCurrentWorkspace = async () => {
   recordDebugEvent("START", "Zauberstab geklickt — starte Sortierung");
+  // The budget covers the whole click, not just the provider call: prep,
+  // page snippets and Jev all happen before the LLM is asked anything.
+  const sortStartedAt = Date.now();
+  const aiDeadlineAt = sortStartedAt + Math.round(readTimeBudgetSeconds() * 1000);
 
   const workspaceId = window.gZenWorkspaces?.activeWorkspace;
   if (!workspaceId) {
@@ -232,7 +237,7 @@ const organizeCurrentWorkspace = async () => {
               liveExistingGroups.push({ name, domains: [...new Set(items.map((tab) => tab.hostname))], tabs: items });
             }
           }
-          pass2 = await runPass2JevHybrid(pass2Input, liveExistingGroups);
+          pass2 = await runPass2JevHybrid(pass2Input, liveExistingGroups, { deadlineAt: aiDeadlineAt });
           console.log(`${LOG} JEV + Fallback-LLM Pass 2 took ${Math.round(performance.now() - t0)}ms`);
         } else if (aiEngine === "ollama") {
           const host = getOllamaHost();

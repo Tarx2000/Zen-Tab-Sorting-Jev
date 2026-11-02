@@ -219,6 +219,41 @@
     "placeholder": "model name"
   },
   {
+    "type": "dropdown",
+    "label": "Reasoning effort for new groups",
+    "property": "extensions.zen-auto-organize.ai-reasoning-effort",
+    "defaultValue": "fast",
+    "options": [
+      {
+        "label": "Fast — reasoning off when the model allows it (recommended)",
+        "value": "fast"
+      },
+      {
+        "label": "Low",
+        "value": "low"
+      },
+      {
+        "label": "Medium",
+        "value": "medium"
+      },
+      {
+        "label": "High",
+        "value": "high"
+      },
+      {
+        "label": "Model default — leave it to the provider",
+        "value": "default"
+      }
+    ]
+  },
+  {
+    "type": "string",
+    "label": "Time limit for the AI pass in seconds",
+    "property": "extensions.zen-auto-organize.ai-time-budget",
+    "defaultValue": "10",
+    "placeholder": "10"
+  },
+  {
     "type": "separator",
     "label": "3. Sorting behavior"
   },

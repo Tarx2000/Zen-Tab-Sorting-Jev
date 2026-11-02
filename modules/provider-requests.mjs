@@ -28,21 +28,38 @@ export const paramStyleLadder = (model) =>
 const isModernStyle = (paramStyle) =>
   paramStyle === PARAM_STYLE_MODERN || paramStyle === PARAM_STYLE_MODERN_BARE;
 
-export const buildProviderRequest = (provider, prompt, maxTokens, paramStyle = PARAM_STYLE_CLASSIC) => {
+export const buildProviderRequest = (
+  provider,
+  prompt,
+  maxTokens,
+  paramStyle = PARAM_STYLE_CLASSIC,
+  options = {},
+) => {
+  // `reasoningEffort` is an explicit override:
+  //   undefined — keep the historical behaviour (modern shape defaults to
+  //               "low", classic shape sends nothing)
+  //   null      — send no reasoning field at all
+  //   string    — send that effort ("none", "low", "medium", ...)
+  // Sorting calls always pass it, because the provider default was burning
+  // whole seconds on hidden thinking before the first visible token.
+  const hasEffort = Object.hasOwn(options, "reasoningEffort");
+  const reasoningEffort = hasEffort ? options.reasoningEffort : undefined;
   // Reasoning capability and parameter dialect are independent. GLM accepts
   // classic max_tokens while still spending that budget on hidden thinking.
   const modelNeedsReasoning = getProviderKind(provider) === "openai" &&
+    reasoningEffort !== "none" &&
     /(?:^|\/)glm-5\.3(?:[-.]|$)/i.test(String(provider.model || "").trim());
-  const boundedTokens = boundMaxTokens(maxTokens, paramStyle, modelNeedsReasoning);
+  const boundedTokens = boundMaxTokens(maxTokens, paramStyle, modelNeedsReasoning, reasoningEffort === "none");
   switch (provider.provider) {
     case "openai":
     case "primalabs":
-      return openAiRequest(provider.endpoint, provider.apiKey, provider.model, prompt, boundedTokens, paramStyle);
+      return openAiRequest(provider.endpoint, provider.apiKey, provider.model, prompt, boundedTokens, paramStyle, reasoningEffort, hasEffort);
     case "chatgpt":
       return buildChatGPTResponsesRequest({
         accessToken: provider.accessToken,
         model: provider.model,
         inputText: prompt,
+        ...(hasEffort && reasoningEffort ? { reasoningEffort } : {}),
       });
     case "gemini":
       return geminiRequest(provider.apiKey, provider.model, prompt, boundedTokens);
@@ -51,7 +68,7 @@ export const buildProviderRequest = (provider, prompt, maxTokens, paramStyle = P
     case "custom":
       return provider.format === "ollama"
         ? ollamaRequest(provider.endpoint, provider.model, prompt, boundedTokens)
-        : openAiRequest(provider.endpoint, provider.apiKey, provider.model, prompt, boundedTokens, paramStyle);
+        : openAiRequest(provider.endpoint, provider.apiKey, provider.model, prompt, boundedTokens, paramStyle, reasoningEffort, hasEffort);
     default:
       throw new ProviderRequestError(provider.provider);
   }
@@ -113,26 +130,42 @@ export const parseProviderResponse = (kind, text) => {
   return null;
 };
 
-const openAiRequest = (endpoint, apiKey, model, prompt, maxTokens, paramStyle) => ({
-  url: appendPath(endpoint, "/chat/completions"),
-  init: {
-    method: "POST",
-    headers: { "content-type": "application/json", [AUTH_HEADER_NAME]: `Bearer ${apiKey}` },
-    body: JSON.stringify({
-      model,
-      messages: [{ role: "user", content: prompt }],
-      ...(isModernStyle(paramStyle)
-        ? {
-          max_completion_tokens: maxTokens,
-          // "low" rather than "minimal": at minimal effort these models have
-          // been reported to return nothing at all on extraction-shaped
-          // prompts, which is exactly what sorting asks of them.
-          ...(paramStyle === PARAM_STYLE_MODERN ? { reasoning_effort: "low" } : {}),
-        }
-        : { max_tokens: maxTokens, temperature: 0.2 }),
-    }),
-  },
-});
+const openAiRequest = (
+  endpoint,
+  apiKey,
+  model,
+  prompt,
+  maxTokens,
+  paramStyle,
+  reasoningEffort,
+  hasEffort,
+) => {
+  // Modern models take max_completion_tokens and no temperature; classic ones
+  // take max_tokens and a temperature. Both now carry an explicit reasoning
+  // setting, because an omission means "whatever the provider defaults to" —
+  // for reasoning models that is the slow path.
+  const effortField = !hasEffort
+    // Historical behaviour: the modern shape asked for "low" (at "minimal"
+    // these models have been reported to return nothing at all on
+    // extraction-shaped prompts); the classic shape sent nothing.
+    ? (paramStyle === PARAM_STYLE_MODERN ? { reasoning_effort: "low" } : {})
+    : (reasoningEffort ? { reasoning_effort: reasoningEffort } : {});
+
+  return {
+    url: appendPath(endpoint, "/chat/completions"),
+    init: {
+      method: "POST",
+      headers: { "content-type": "application/json", [AUTH_HEADER_NAME]: `Bearer ${apiKey}` },
+      body: JSON.stringify({
+        model,
+        messages: [{ role: "user", content: prompt }],
+        ...(isModernStyle(paramStyle)
+          ? { max_completion_tokens: maxTokens, ...effortField }
+          : { max_tokens: maxTokens, temperature: 0.2, ...effortField }),
+      }),
+    },
+  };
+};
 
 const geminiRequest = (apiKey, model, prompt, maxTokens) => ({
   url: `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`,
@@ -166,9 +199,12 @@ const REASONING_HEADROOM = 4096;
 const MODERN_MIN_TOKENS = 2048;
 const MAX_COMPLETION_TOKENS = 16384;
 
-const boundMaxTokens = (value, paramStyle, modelNeedsReasoning = false) => {
+const boundMaxTokens = (value, paramStyle, modelNeedsReasoning = false, reasoningOff = false) => {
   const requested = Number.isFinite(value) ? Math.trunc(value) : 800;
-  return isModernStyle(paramStyle) || modelNeedsReasoning
+  // No thinking means no hidden-token reservation: the answer gets exactly the
+  // budget the caller asked for, which also caps a runaway response.
+  const needsReasoningBudget = !reasoningOff && (isModernStyle(paramStyle) || modelNeedsReasoning);
+  return needsReasoningBudget
     ? Math.min(Math.max(requested + REASONING_HEADROOM, MODERN_MIN_TOKENS), MAX_COMPLETION_TOKENS)
     : Math.min(Math.max(requested, 64), MAX_COMPLETION_TOKENS);
 };
