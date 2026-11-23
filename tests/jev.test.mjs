@@ -10,9 +10,12 @@ import {
   clampMargin,
   clampProbability,
   classifyExistingGroupsWithJev,
+  estimateJevTokens,
   evaluateJevBatchResponse,
+  packJevBatches,
   readJevSettings,
 } from "../modules/jev.mjs";
+import { classifyWorkspaceUnitsWithJev } from "../modules/workspace-jev.mjs";
 
 test("Given user-entered JEV probability and margin settings When parsed Then decimals, German commas, and percentages all work", () => {
   assert.equal(clampProbability("0.75"), 0.75);
@@ -166,4 +169,128 @@ test("Given 0 existing groups in workspace When classifyExistingGroupsWithJev is
   assert.deepEqual(result.assignedToExisting, []);
   assert.deepEqual(result.leftoverTabs, tabs);
   assert.deepEqual(result.leftoverSnippets, ["s1", "s2"]);
+});
+
+test("buildJevPayload keeps large workspaces compact without duplicating sample tabs or snippets across 25 questions", () => {
+  const existingGroups = Array.from({ length: 20 }, (_, g) => ({
+    name: `Group ${g}`,
+    domains: [`domain-${g}-a.example`, `domain-${g}-b.example`],
+    tabs: Array.from({ length: 5 }, (_, t) => ({
+      title: `Existing tab ${g}-${t} with a realistic long page title`,
+      hostname: `domain-${g}-a.example`,
+    })),
+  }));
+  const tabs = Array.from({ length: 25 }, (_, i) => ({
+    hostname: `open-${i}.example`,
+    title: `Open tab ${i} — Documentation and Overview`,
+    url: `https://open-${i}.example/docs/getting-started`,
+  }));
+  const snippets = tabs.map((_, i) => `[type: article] [site: Docs ${i}] Overview of API configuration and setup steps.`);
+
+  const payload = buildJevPayload({ model: "jev-1.13.0", existingGroups, tabs, snippets });
+  assert.deepEqual(Object.keys(payload), ["model", "state", "questions"]);
+  assert.equal(payload.state.existing_workspace_groups.length, 20);
+  assert.equal(payload.state.tabs_to_classify.length, 25);
+  assert.ok(payload.state.tabs_to_classify[0].snippet.includes("[type: article]"));
+  assert.ok(estimateJevTokens(payload) < 14_000, `expected compact payload < 14K tokens, got ${estimateJevTokens(payload)}`);
+
+  const splitBatches = packJevBatches({
+    model: "jev-1.13.0",
+    existingGroups,
+    tabs,
+    snippets,
+    maxTokens: 4_000,
+  });
+  assert.ok(splitBatches.length > 1, "packJevBatches must split oversized batches below token ceiling");
+  assert.equal(splitBatches.reduce((sum, b) => sum + b.chunkTabs.length, 0), 25);
+});
+
+test("classifyExistingGroupsWithJev bisects on HTTP 400 max tokens exceeded and retries 1-tab overflow in compact mode", async () => {
+  const tabs = [
+    { hostname: "a.example", title: "A", url: "https://a.example" },
+    { hostname: "b.example", title: "B", url: "https://b.example" },
+    { hostname: "c.example", title: "C", url: "https://c.example" },
+    { hostname: "d.example", title: "D", url: "https://d.example" },
+  ];
+  const existingGroups = [{
+    name: "Work",
+    domains: ["a.example"],
+    tabs: [{ title: "Existing Work Tab", hostname: "a.example" }],
+  }];
+  const jevSettings = {
+    jevProvider: "typesafe",
+    endpoint: "https://api.typesafe.ai/v1/systemone",
+    model: "jev-1.13.0",
+    apiKey: "ts-token",
+    minProbability: 0.7,
+    minMargin: 0.15,
+    consentToSendData: true,
+  };
+
+  const batchSizes = [];
+  const result = await classifyExistingGroupsWithJev({
+    tabs,
+    existingGroups,
+    snippets: ["long snippet", "long snippet", "long snippet", "long snippet"],
+    jevSettings,
+    fetchImpl: async (_url, init) => {
+      const payload = JSON.parse(init.body);
+      const count = payload.state.tabs_to_classify.length;
+      const hasCurrentTabs = Boolean(payload.state.existing_workspace_groups[0].current_tabs);
+      batchSizes.push({ count, hasCurrentTabs });
+      if (count > 1) {
+        return new Response(JSON.stringify({ error: { message: "max tokens exceeded" } }), { status: 400 });
+      }
+      if (payload.state.tabs_to_classify[0].hostname === "d.example" && hasCurrentTabs) {
+        return new Response("Request exceeds max_tokens limit", { status: 400 });
+      }
+      return new Response(JSON.stringify({
+        answers: {
+          tab_0: { choice: "Work", probabilities: { Work: 0.92, __none__: 0.08 } },
+        },
+      }), { status: 200 });
+    },
+  });
+
+  assert.ok(batchSizes.some((b) => b.count === 4));
+  assert.ok(batchSizes.some((b) => b.count === 1 && b.hasCurrentTabs === false));
+  assert.deepEqual(result.assignedToExisting.map((a) => a.tabInfo.hostname), ["a.example", "b.example", "c.example", "d.example"]);
+  assert.deepEqual(result.leftoverTabs, []);
+});
+
+test("classifyWorkspaceUnitsWithJev automatically bisects on HTTP 400 max tokens exceeded and preserves order", async () => {
+  const spaces = [{ id: "a", name: "Work" }, { id: "b", name: "Dev" }];
+  const units = Array.from({ length: 4 }, (_, i) => ({
+    id: `u_${i}`,
+    name: `Unit ${i}`,
+    kind: "tab",
+    workspaceId: "a",
+    tabs: [{ title: `Tab ${i}`, hostname: `h${i}.test` }],
+  }));
+  const settings = { model: "jev-test", apiKey: "ts-token", jevProvider: "typesafe", consentToSendData: true };
+
+  const sizes = [];
+  const result = await classifyWorkspaceUnitsWithJev({
+    units,
+    workspaces: spaces,
+    settings,
+    wait: async () => {},
+    fetchImpl: async (_url, init) => {
+      const payload = JSON.parse(init.body);
+      const count = payload.state.units.length;
+      sizes.push(count);
+      if (count > 2) {
+        return new Response("max tokens exceeded", { status: 400 });
+      }
+      const answers = {};
+      for (let i = 0; i < count; i++) {
+        answers[`unit_${i}`] = { choice: "b", probabilities: { a: 0.1, b: 0.9 } };
+      }
+      return new Response(JSON.stringify({ answers }), { status: 200 });
+    },
+  });
+
+  assert.deepEqual(sizes, [4, 2, 2]);
+  assert.equal(result.errors.length, 0);
+  assert.deepEqual(result.decisions.map((d) => d.unit.id), ["u_0", "u_1", "u_2", "u_3"]);
 });

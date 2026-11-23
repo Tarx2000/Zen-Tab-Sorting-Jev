@@ -16,7 +16,14 @@ const BEARER_HEADER_KEY = ["author", "ization"].join("");
 const JEV_TIMEOUT_MS = 45_000;
 
 export const JEV_MAX_QUESTIONS_PER_BATCH = 25;
+export const JEV_SAFE_MAX_TOKENS_PER_REQUEST = 14_000;
 export const JEV_NONE_CHOICE = "__none__";
+
+export const estimateJevTokens = (payload) => Math.ceil(JSON.stringify(payload).length / 3);
+
+export const isJevTokenLimitError = (status, bodyText) =>
+  (status === 400 || status === 413) &&
+  /max.?tokens|token.?limit|context.?length|too.?(?:long|large|many.?tokens)|exceed/i.test(String(bodyText || ""));
 
 export const normalizeJevProvider = (value) =>
   String(value || "").trim().toLowerCase() === "openrouter" ? "openrouter" : "typesafe";
@@ -101,12 +108,12 @@ export const readJevSettings = (prefs = globalThis.Services?.prefs) => {
 // inside that folder) rather than rigid domain rules.
 export const buildGroupCriterionDescription = (group) => {
   const name = String(group?.name || "").trim();
-  const domains = Array.isArray(group?.domains) ? group.domains.filter(Boolean).slice(0, 6) : [];
+  const domains = Array.isArray(group?.domains) ? group.domains.filter(Boolean).slice(0, 5) : [];
   const sampleTabs = Array.isArray(group?.tabs)
     ? group.tabs
-        .slice(0, 5)
+        .slice(0, 3)
         .map((t) => {
-          const title = String(t?.title || "").slice(0, 70).replace(/\s+/g, " ").trim();
+          const title = String(t?.title || "").slice(0, 50).replace(/\s+/g, " ").trim();
           const host = String(t?.hostname || "").trim();
           return title && host ? `"${title}" (${host})` : title || host;
         })
@@ -134,51 +141,102 @@ export const buildJevCriteria = (existingGroups) => {
   return criteria;
 };
 
-export const buildJevPayload = ({ model, existingGroups, tabs, snippets = [] }) => {
-  const criteria = buildJevCriteria(existingGroups);
+export const buildJevPayload = ({ model, existingGroups, tabs, snippets = [], compact = false }) => {
+  const questionCriteria = {};
+  for (const group of existingGroups) {
+    const name = String(group?.name || "").trim();
+    if (!name || name === JEV_NONE_CHOICE) continue;
+    questionCriteria[name] = `Fits "${name}".`;
+  }
+  questionCriteria[JEV_NONE_CHOICE] = "No confident fit.";
+
   const questions = {};
   const stateTabs = [];
 
   for (let i = 0; i < tabs.length; i++) {
     const tab = tabs[i];
     const qid = `tab_${i}`;
-    const title = String(tab?.title || "").slice(0, 140).replace(/\s+/g, " ").trim();
+    const title = String(tab?.title || "").slice(0, compact ? 90 : 120).replace(/\s+/g, " ").trim();
     const hostname = String(tab?.hostname || "(no hostname)").trim();
-    const snippet = String(snippets?.[i] || "").slice(0, 350).replace(/\s+/g, " ").trim();
+    const snippet = compact ? "" : String(snippets?.[i] || "").slice(0, 220).replace(/\s+/g, " ").trim();
+    const url = String(tab?.url || "").slice(0, compact ? 100 : 160);
 
     stateTabs.push({
       id: qid,
       hostname,
       title,
-      url: String(tab?.url || "").slice(0, 240),
+      ...(url ? { url } : {}),
       ...(snippet ? { snippet } : {}),
     });
 
-    const summaryClause = snippet ? ` | page context: "${snippet}"` : "";
     questions[qid] = {
       type: "choice",
       instructions:
-        `Classify browser tab ${qid} (${hostname} — "${title}"${summaryClause}) into the single best matching existing workspace group based on the user's current intent and context, or choose "${JEV_NONE_CHOICE}" if none of the existing groups is a confident match.`,
-      criteria,
+        `Classify tab ${qid} (${hostname} — "${title}") into the best group from state.existing_workspace_groups, or "${JEV_NONE_CHOICE}".`,
+      criteria: questionCriteria,
     };
   }
+
+  const maxSampleTabs = compact ? 0 : (existingGroups.length > 20 ? 2 : 5);
+  const maxDomains = compact ? 4 : (existingGroups.length > 20 ? 4 : 6);
 
   // JEV API strictly allows only `model`, `state`, and `questions` at the top level.
   return {
     model,
     state: {
-      existing_workspace_groups: existingGroups.map((g) => ({
-        name: g.name,
-        example_domains: (g.domains || []).slice(0, 8),
-        current_tabs: (g.tabs || []).slice(0, 6).map((t) => ({
-          hostname: t.hostname || "",
-          title: String(t.title || "").slice(0, 90),
+      existing_workspace_groups: existingGroups
+        .filter((g) => g && typeof g.name === "string" && g.name.trim() && g.name.trim() !== JEV_NONE_CHOICE)
+        .map((g) => ({
+          name: g.name,
+          example_domains: (g.domains || []).slice(0, maxDomains),
+          ...(maxSampleTabs > 0
+            ? {
+                current_tabs: (g.tabs || []).slice(0, maxSampleTabs).map((t) => ({
+                  hostname: t.hostname || "",
+                  title: String(t.title || "").slice(0, 75),
+                })),
+              }
+            : {}),
         })),
-      })),
       tabs_to_classify: stateTabs,
     },
     questions,
   };
+};
+
+export const packJevBatches = ({
+  model,
+  existingGroups,
+  tabs,
+  snippets = [],
+  maxQuestions = JEV_MAX_QUESTIONS_PER_BATCH,
+  maxTokens = JEV_SAFE_MAX_TOKENS_PER_REQUEST,
+}) => {
+  const chunks = [];
+  let currentTabs = [];
+  let currentSnippets = [];
+
+  for (let i = 0; i < tabs.length; i++) {
+    const nextTabs = [...currentTabs, tabs[i]];
+    const nextSnippets = [...currentSnippets, snippets?.[i] || ""];
+    const wouldExceedCount = nextTabs.length > maxQuestions;
+    const wouldExceedTokens =
+      currentTabs.length > 0 &&
+      estimateJevTokens(buildJevPayload({ model, existingGroups, tabs: nextTabs, snippets: nextSnippets })) > maxTokens;
+
+    if (wouldExceedCount || wouldExceedTokens) {
+      chunks.push({ chunkTabs: currentTabs, chunkSnippets: currentSnippets });
+      currentTabs = [tabs[i]];
+      currentSnippets = [snippets?.[i] || ""];
+    } else {
+      currentTabs = nextTabs;
+      currentSnippets = nextSnippets;
+    }
+  }
+  if (currentTabs.length > 0) {
+    chunks.push({ chunkTabs: currentTabs, chunkSnippets: currentSnippets });
+  }
+  return chunks;
 };
 
 export const buildJevHttpRequest = (jevSettings, payload) => {
@@ -306,6 +364,7 @@ export const classifyExistingGroupsWithJev = async ({
   fetchImpl,
   deadlineAt,
   concurrency = 3,
+  maxTokensPerBatch = JEV_SAFE_MAX_TOKENS_PER_REQUEST,
 }) => {
   if (!Array.isArray(tabs) || tabs.length === 0) {
     return { assignedToExisting: [], leftoverTabs: [], leftoverSnippets: [] };
@@ -330,24 +389,27 @@ export const classifyExistingGroupsWithJev = async ({
   }
 
   const doFetch = resolveFetch(fetchImpl);
-  const chunks = [];
-  for (let start = 0; start < tabs.length; start += JEV_MAX_QUESTIONS_PER_BATCH) {
-    const chunkTabs = tabs.slice(start, start + JEV_MAX_QUESTIONS_PER_BATCH);
-    const chunkSnippets = chunkTabs.map((_, idx) => snippets?.[start + idx] || "");
-    chunks.push({ chunkTabs, chunkSnippets });
-  }
+  const model = jevSettings.model || defaultJevModelForProvider(jevSettings.jevProvider);
+  const chunks = packJevBatches({
+    model,
+    existingGroups: validGroups,
+    tabs,
+    snippets,
+    maxQuestions: JEV_MAX_QUESTIONS_PER_BATCH,
+    maxTokens: maxTokensPerBatch,
+  });
 
   const chunkResults = new Array(chunks.length);
   let cursor = 0;
   const workerCount = Math.max(1, Math.min(concurrency, chunks.length));
 
-  const runChunk = async (chunkIdx) => {
-    const { chunkTabs, chunkSnippets } = chunks[chunkIdx];
+  const executeChunk = async (chunkTabs, chunkSnippets, { compact = false } = {}) => {
     const payload = buildJevPayload({
-      model: jevSettings.model || defaultJevModelForProvider(jevSettings.jevProvider),
+      model,
       existingGroups: validGroups,
       tabs: chunkTabs,
       snippets: chunkSnippets,
+      compact,
     });
     const req = buildJevHttpRequest(jevSettings, payload);
     const timeoutMs = Number.isFinite(deadlineAt)
@@ -366,6 +428,25 @@ export const classifyExistingGroupsWithJev = async ({
     }
 
     if (!response.ok) {
+      if (isJevTokenLimitError(response.status, bodyText)) {
+        if (chunkTabs.length > 1) {
+          const mid = Math.ceil(chunkTabs.length / 2);
+          console.warn(`${LOG} JEV hit token limit for ${chunkTabs.length} tabs; bisecting into ${mid} + ${chunkTabs.length - mid}`);
+          const [left, right] = await Promise.all([
+            executeChunk(chunkTabs.slice(0, mid), chunkSnippets.slice(0, mid), { compact }),
+            executeChunk(chunkTabs.slice(mid), chunkSnippets.slice(mid), { compact }),
+          ]);
+          return {
+            assignedToExisting: [...left.assignedToExisting, ...right.assignedToExisting],
+            leftoverTabs: [...left.leftoverTabs, ...right.leftoverTabs],
+            leftoverSnippets: [...left.leftoverSnippets, ...right.leftoverSnippets],
+          };
+        }
+        if (!compact) {
+          console.warn(`${LOG} JEV hit token limit for single tab; retrying with compact context`);
+          return executeChunk(chunkTabs, chunkSnippets, { compact: true });
+        }
+      }
       throw new Error(`JEV HTTP ${response.status}: ${String(bodyText || "").slice(0, 200)}`);
     }
 
@@ -393,7 +474,7 @@ export const classifyExistingGroupsWithJev = async ({
         chunkLeftoverSnippets.push(chunkSnippets[idx]);
       }
     }
-    chunkResults[chunkIdx] = {
+    return {
       assignedToExisting: batchEval.assignedToExisting,
       leftoverTabs: chunkLeftoverTabs,
       leftoverSnippets: chunkLeftoverSnippets,
@@ -405,7 +486,8 @@ export const classifyExistingGroupsWithJev = async ({
       while (true) {
         const idx = cursor++;
         if (idx >= chunks.length) break;
-        await runChunk(idx);
+        const { chunkTabs, chunkSnippets } = chunks[idx];
+        chunkResults[idx] = await executeChunk(chunkTabs, chunkSnippets);
       }
     }),
   );

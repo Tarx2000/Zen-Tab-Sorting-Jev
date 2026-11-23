@@ -1,5 +1,12 @@
 // Workspace routing deliberately has no grouping pass or fallback provider.
-import { buildJevHttpRequest, readJevSettings, JEV_MAX_QUESTIONS_PER_BATCH } from "./jev.mjs";
+import {
+  buildJevHttpRequest,
+  estimateJevTokens,
+  isJevTokenLimitError,
+  readJevSettings,
+  JEV_MAX_QUESTIONS_PER_BATCH,
+  JEV_SAFE_MAX_TOKENS_PER_REQUEST,
+} from "./jev.mjs";
 
 export const WORKSPACE_MIN_IMPROVEMENT = 0.10;
 export const WORKSPACE_MAX_ATTEMPTS = 2;
@@ -75,25 +82,56 @@ export const evaluateWorkspaceAnswer = (unit, workspaces, answer) => {
   };
 };
 
+export const packWorkspaceJevBatches = ({
+  model,
+  workspaces,
+  units,
+  maxQuestions = JEV_MAX_QUESTIONS_PER_BATCH,
+  maxTokens = JEV_SAFE_MAX_TOKENS_PER_REQUEST,
+}) => {
+  const batches = [];
+  let current = [];
+  for (const unit of units) {
+    const next = [...current, unit];
+    const wouldExceedCount = next.length > maxQuestions;
+    const wouldExceedTokens =
+      current.length > 0 &&
+      estimateJevTokens(buildWorkspaceJevPayload({ model, workspaces, units: next })) > maxTokens;
+
+    if (wouldExceedCount || wouldExceedTokens) {
+      batches.push(current);
+      current = [unit];
+    } else {
+      current = next;
+    }
+  }
+  if (current.length > 0) batches.push(current);
+  return batches;
+};
+
 export const classifyWorkspaceUnitsWithJev = async ({
   units, workspaces, settings = readJevSettings(), fetchImpl = globalThis.fetch,
   wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), signal, concurrency = 1,
+  maxTokensPerBatch = JEV_SAFE_MAX_TOKENS_PER_REQUEST,
 }) => {
   if (workspaces.length < 2 || !units.length) return { decisions: [], errors: [] };
   if (!settings.consentToSendData) throw new Error("Bitte zuerst die Datenfreigabe in den Jev-Einstellungen aktivieren.");
   if (!settings.apiKey?.trim()) throw new Error("Bitte zuerst einen Jev-Zugangsschlüssel hinterlegen.");
 
-  const batches = [];
-  for (let start = 0; start < units.length; start += JEV_MAX_QUESTIONS_PER_BATCH) {
-    batches.push(units.slice(start, start + JEV_MAX_QUESTIONS_PER_BATCH));
-  }
+  const batches = packWorkspaceJevBatches({
+    model: settings.model,
+    workspaces,
+    units,
+    maxQuestions: JEV_MAX_QUESTIONS_PER_BATCH,
+    maxTokens: maxTokensPerBatch,
+  });
 
   const batchOutputs = new Array(batches.length);
   let cursor = 0;
   const workerCount = Math.max(1, Math.min(concurrency, batches.length));
 
-  const runBatch = async (batchIndex) => {
-    let pending = batches[batchIndex];
+  const runUnitGroup = async (initialUnits) => {
+    let pending = initialUnits;
     const batchDecisions = [];
     const batchErrors = [];
     for (let attempt = 0; attempt < WORKSPACE_MAX_ATTEMPTS && pending.length; attempt++) {
@@ -104,18 +142,28 @@ export const classifyWorkspaceUnitsWithJev = async ({
       signal?.addEventListener("abort", abort, { once: true });
       const timer = setTimeout(abort, 45_000);
       const failed = [];
+      let bisected = null;
       try {
         const payload = buildWorkspaceJevPayload({ model: settings.model, workspaces, units: pending });
         const request = buildJevHttpRequest(settings, payload);
         const response = await fetchImpl(request.url, { ...request.init, signal: controller.signal });
-        if (!response.ok) throw new Error(`Jev-Anfrage fehlgeschlagen (HTTP ${response.status})`);
-        let result;
-        try { result = JSON.parse(await response.text()); } catch { throw new Error("Jev-Antwort ist kein gültiges JSON"); }
-        for (const [index, unit] of pending.entries()) {
-          try {
-            batchDecisions.push(evaluateWorkspaceAnswer(unit, workspaces, result?.answers?.[`unit_${index}`]));
-          } catch (error) {
-            failed.push({ unit, reason: error.message });
+        if (!response.ok) {
+          const bodyText = await response.text().catch(() => "");
+          if (isJevTokenLimitError(response.status, bodyText) && pending.length > 1) {
+            const mid = Math.ceil(pending.length / 2);
+            bisected = [pending.slice(0, mid), pending.slice(mid)];
+          } else {
+            throw new Error(`Jev-Anfrage fehlgeschlagen (HTTP ${response.status})`);
+          }
+        } else {
+          let result;
+          try { result = JSON.parse(await response.text()); } catch { throw new Error("Jev-Antwort ist kein gültiges JSON"); }
+          for (const [index, unit] of pending.entries()) {
+            try {
+              batchDecisions.push(evaluateWorkspaceAnswer(unit, workspaces, result?.answers?.[`unit_${index}`]));
+            } catch (error) {
+              failed.push({ unit, reason: error.message });
+            }
           }
         }
       } catch (error) {
@@ -127,10 +175,17 @@ export const classifyWorkspaceUnitsWithJev = async ({
         clearTimeout(timer);
         signal?.removeEventListener("abort", abort);
       }
+      if (bisected) {
+        const [left, right] = await Promise.all(bisected.map(runUnitGroup));
+        batchDecisions.push(...left.batchDecisions, ...right.batchDecisions);
+        batchErrors.push(...left.batchErrors, ...right.batchErrors);
+        pending = [];
+        break;
+      }
       pending = failed.map(({ unit }) => unit);
       if (attempt === WORKSPACE_MAX_ATTEMPTS - 1) batchErrors.push(...failed.map((failure) => ({ ...failure, phase: "classification" })));
     }
-    batchOutputs[batchIndex] = { batchDecisions, batchErrors };
+    return { batchDecisions, batchErrors };
   };
 
   await Promise.all(
@@ -138,7 +193,7 @@ export const classifyWorkspaceUnitsWithJev = async ({
       while (true) {
         const idx = cursor++;
         if (idx >= batches.length) break;
-        await runBatch(idx);
+        batchOutputs[idx] = await runUnitGroup(batches[idx]);
       }
     }),
   );
