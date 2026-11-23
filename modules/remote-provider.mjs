@@ -20,6 +20,7 @@ import {
   isEmptyLengthResponse,
   getProviderKind,
   isParamStyleError,
+  isResponseFormatError,
   paramStyleLadder,
   parseProviderResponse,
   PARAM_STYLE_CLASSIC,
@@ -36,7 +37,7 @@ import {
 import { consolidateNewGroups } from "./new-group-consolidation.mjs";
 import { chunkTabsForProvider, PROVIDER_TAB_BATCH_SIZE } from "./provider-batching.mjs";
 import { collectProviderTabMap } from "./remote-assignment-retry.mjs";
-import { fetchPageSnippet } from "./tabs.mjs";
+import { fetchPageSnippets } from "./tabs.mjs";
 import { showToast } from "./ui-toast.mjs";
 import { recordDebugEvent, detectQuotaOrRateLimit } from "./debug-journal.mjs";
 import {
@@ -363,6 +364,14 @@ export const runPass2JevHybrid = async (
   let leftoverTabs = [...unmatchedTabs];
   let leftoverSnippets = [...snippets];
 
+  const fallbackReadiness = fallbackSettings?.provider && !["off", "none"].includes(fallbackSettings.provider)
+    ? getProviderReadiness(fallbackSettings)
+    : null;
+  const shouldWarmupReasoning = Boolean(
+    fallbackReadiness?.ok && getProviderKind(fallbackReadiness.value) === "openai",
+  );
+  let reasoningWarmup = null;
+
   // Stage 1: JEV Decision Model (only when existing groups are present and JEV key is configured)
   if (validExistingGroups.length > 0) {
     if (!jevSettings.consentToSendData) {
@@ -372,6 +381,13 @@ export const runPass2JevHybrid = async (
     }
     if (jevSettings.apiKey && jevSettings.apiKey.trim()) {
       try {
+        if (shouldWarmupReasoning) {
+          reasoningWarmup = getEffectiveReasoning(
+            fallbackReadiness.value,
+            fetchImpl,
+            Math.min(MODEL_CAPABILITY_TIMEOUT_MS, Math.max(400, hybridDeadline - Date.now())),
+          ).catch(() => null);
+        }
         recordDebugEvent(
           "STAGE-1-JEV",
           `Sending ${unmatchedTabs.length} tab(s) to JEV (${jevSettings.jevProvider}, model: ${jevSettings.model})`,
@@ -386,6 +402,7 @@ export const runPass2JevHybrid = async (
           snippets,
           jevSettings,
           fetchImpl,
+          deadlineAt: hybridDeadline,
         });
         assignedToExisting = jevResult.assignedToExisting;
         leftoverTabs = jevResult.leftoverTabs;
@@ -438,6 +455,7 @@ export const runPass2JevHybrid = async (
   }
 
   try {
+    if (reasoningWarmup) await reasoningWarmup;
     const existingGroupNames = validExistingGroups.map((g) => g.name);
     const stage2 = await runOneShotFallbackNewGroups({
       leftoverTabs,
@@ -666,7 +684,7 @@ const clusterUnmatchedNewGroups = async (leftover, settings) => {
 };
 
 const providerJson = async (settings, inputStr, maxTokens = PROVIDER_JSON_MAX_TOKENS, fetchImpl, options = {}) => {
-  const responseText = await providerText(settings, inputStr, maxTokens, fetchImpl, options);
+  const responseText = await providerText(settings, inputStr, maxTokens, fetchImpl, { ...options, jsonMode: true });
   let parsed;
   try {
     parsed = JSON.parse(extractJsonObjectText(responseText));
@@ -719,6 +737,8 @@ const sendProviderRequest = async (request, fetchImpl, timeoutMs = GENERATE_TIME
 
 const paramStyleByTarget = new Map();
 const reasoningRejectedByTarget = new Set();
+const responseFormatRejectedByTarget = new Set();
+const resolvedEffortByTarget = new Map();
 const capabilityByTarget = new Map();
 
 const targetKey = (settings) => `${settings.endpoint || ""}\x00${settings.model || ""}`;
@@ -765,6 +785,8 @@ const discoverModelCapabilities = async (settings, fetchImpl, timeoutMs) => {
 export const resetProviderReasoningCache = () => {
   paramStyleByTarget.clear();
   reasoningRejectedByTarget.clear();
+  responseFormatRejectedByTarget.clear();
+  resolvedEffortByTarget.clear();
   capabilityByTarget.clear();
 };
 
@@ -776,8 +798,12 @@ export const getEffectiveReasoning = async (settings, fetchImpl, timeoutMs = MOD
   const capabilities = kind === "openai"
     ? await discoverModelCapabilities(settings, fetchImpl, timeoutMs)
     : null;
-  const rejected = reasoningRejectedByTarget.has(targetKey(settings));
-  const effort = rejected ? null : resolveReasoningEffort(preference, capabilities || {});
+  const key = targetKey(settings);
+  const rejected = reasoningRejectedByTarget.has(key);
+  let effort = rejected ? null : resolveReasoningEffort(preference, capabilities || {});
+  if (!rejected && preference !== "default" && resolvedEffortByTarget.has(key)) {
+    effort = resolvedEffortByTarget.get(key);
+  }
   return { preference, capabilities, effort, rejected };
 };
 
@@ -813,6 +839,7 @@ const providerText = async (settings, inputStr, maxTokens, fetchImpl, options = 
   const reasoning = options.reasoning
     || (await getEffectiveReasoning(effectiveSettings, fetchImpl, Math.min(MODEL_CAPABILITY_TIMEOUT_MS, budgetMs)));
   let effort = reasoning.effort;
+  let useJsonMode = Boolean(options.jsonMode) && !responseFormatRejectedByTarget.has(target);
 
   let response;
   let body;
@@ -821,21 +848,38 @@ const providerText = async (settings, inputStr, maxTokens, fetchImpl, options = 
     style = candidate;
     if (remaining() < 500) throw new Error(`time budget exhausted while preparing the request`);
     ({ response, body } = await sendProviderRequest(
-      buildProviderRequest(effectiveSettings, inputStr, maxTokens, candidate, { reasoningEffort: effort }),
+      buildProviderRequest(effectiveSettings, inputStr, maxTokens, candidate, { reasoningEffort: effort, jsonMode: useJsonMode }),
       fetchImpl,
       remaining(),
     ));
-    // A gateway that does not know reasoning_effort says so with a 400. Drop
-    // the field once and remember it, instead of losing the whole sort.
-    if (response.status === 400 && effort && isReasoningParamError(response.status, body)) {
-      console.log(`${LOG} provider rejected reasoning_effort=${effort}; retrying without reasoning control`);
-      reasoningRejectedByTarget.add(target);
-      effort = null;
+    // Recover gracefully when a gateway or model rejects JSON mode or a specific
+    // reasoning_effort value with HTTP 400.
+    for (let recovery = 0; recovery < 3 && response.status === 400; recovery++) {
+      if (useJsonMode && isResponseFormatError(response.status, body)) {
+        console.log(`${LOG} provider rejected response_format; retrying without JSON mode`);
+        responseFormatRejectedByTarget.add(target);
+        useJsonMode = false;
+      } else if (effort && isReasoningParamError(response.status, body)) {
+        if (effectiveSettings.provider === "chatgpt" && effort === "none") {
+          console.log(`${LOG} ChatGPT rejected reasoning.effort=none; retrying with low`);
+          effort = "low";
+        } else {
+          console.log(`${LOG} provider rejected reasoning_effort=${effort}; retrying without reasoning control`);
+          reasoningRejectedByTarget.add(target);
+          effort = null;
+        }
+      } else {
+        break;
+      }
+      if (remaining() < 500) throw new Error(`time budget exhausted while preparing the request`);
       ({ response, body } = await sendProviderRequest(
-        buildProviderRequest(effectiveSettings, inputStr, maxTokens, candidate, { reasoningEffort: null }),
+        buildProviderRequest(effectiveSettings, inputStr, maxTokens, candidate, { reasoningEffort: effort, jsonMode: useJsonMode }),
         fetchImpl,
         remaining(),
       ));
+      if (response.ok && effectiveSettings.provider === "chatgpt" && effort === "low") {
+        resolvedEffortByTarget.set(target, "low");
+      }
     }
     if (response.ok || !isParamStyleError(response.status, body)) break;
     console.log(`${LOG} provider rejected the ${candidate} parameter shape`);
@@ -850,7 +894,7 @@ const providerText = async (settings, inputStr, maxTokens, fetchImpl, options = 
     // pass still has time, otherwise the retry is what makes the click slow.
     const largerBudget = Math.min(16384, Math.max(4096, maxTokens * 2));
     ({ response, body } = await sendProviderRequest(
-      buildProviderRequest(effectiveSettings, inputStr, largerBudget, style, { reasoningEffort: effort }), fetchImpl,
+      buildProviderRequest(effectiveSettings, inputStr, largerBudget, style, { reasoningEffort: effort, jsonMode: useJsonMode }), fetchImpl,
       remaining(),
     ));
     if (!response.ok) throw new Error(`HTTP ${response.status}: ${body.slice(0, 200)}`);
@@ -888,11 +932,7 @@ const dedupeTabs = (tabs) => {
 
 const fetchSnippets = async (tabs, label) => {
   const t0 = performance.now();
-  const snippets = await Promise.all(tabs.map((tab) => {
-    const url = tab.url || "";
-    if (!url.startsWith("http://") && !url.startsWith("https://")) return "";
-    return fetchPageSnippet(url);
-  }));
+  const snippets = await fetchPageSnippets(tabs);
   const hit = snippets.filter(Boolean).length;
   console.log(`${LOG} ${label}: fetched snippets for ${hit}/${tabs.length} tab(s) in ${Math.round(performance.now() - t0)}ms`);
   return snippets;

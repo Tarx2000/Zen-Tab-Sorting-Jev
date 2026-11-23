@@ -240,6 +240,14 @@ export const showPreviewModal = ({ plan, onReassignToNew, onAssignToPlanned, onA
 
     function renderTabRow(tabInfo) {
       const li = h("li", { class: "zao-preview-tab" });
+      const iconSrc = tabInfo?._tab?.image;
+      if (iconSrc) {
+        const icon = h("img", { class: "zao-preview-tab-icon" });
+        icon.src = iconSrc;
+        icon.alt = "";
+        icon.addEventListener("error", () => icon.remove(), { once: true });
+        li.appendChild(icon);
+      }
       li.appendChild(h("span", { class: "zao-preview-tab-host", text: tabInfo.hostname || "(no host)" }));
       const title = (tabInfo.title || "").replace(/\s+/g, " ").trim();
       if (title) li.appendChild(h("span", { class: "zao-preview-tab-title", text: ` — ${title}` }));
@@ -283,11 +291,37 @@ export const showPreviewModal = ({ plan, onReassignToNew, onAssignToPlanned, onA
       const wasDisabled = allBtns.map((b) => b.disabled);
       for (const b of allBtns) b.disabled = true;
       const originalTexts = reassignButtons.map((b) => b.textContent);
+      const createSpinner = () => {
+        const SVG = "http://www.w3.org/2000/svg";
+        if (typeof document.createElementNS === "function") {
+          const svg = document.createElementNS(SVG, "svg");
+          svg.setAttribute("class", "zao-spinner-svg");
+          svg.setAttribute("viewBox", "0 0 24 24");
+          svg.setAttribute("width", "14");
+          svg.setAttribute("height", "14");
+          svg.setAttribute("fill", "none");
+          svg.setAttribute("aria-label", "Working");
+          const track = document.createElementNS(SVG, "circle");
+          track.setAttribute("class", "zao-loading-track");
+          track.setAttribute("cx", "12");
+          track.setAttribute("cy", "12");
+          track.setAttribute("r", "8.5");
+          const arc = document.createElementNS(SVG, "circle");
+          arc.setAttribute("class", "zao-loading-arc");
+          arc.setAttribute("cx", "12");
+          arc.setAttribute("cy", "12");
+          arc.setAttribute("r", "8.5");
+          svg.append(track, arc);
+          return svg;
+        }
+        const s = h("span", { class: "zao-spinner" });
+        s.setAttribute("aria-label", "Working");
+        return s;
+      };
       const spinners = [];
       for (const b of reassignButtons) {
         b.textContent = "";
-        const s = h("span", { class: "zao-spinner" });
-        s.setAttribute("aria-label", "Working");
+        const s = createSpinner();
         b.appendChild(s);
         spinners.push(s);
       }

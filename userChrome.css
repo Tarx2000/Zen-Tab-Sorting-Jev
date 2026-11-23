@@ -80,41 +80,89 @@ tab-group.zao-minimal {
   color: inherit !important;
 }
 
-/* Soft ring: one session-owned state across classification and native moves. */
+/* Soft ring: one session-owned state across classification, native moves, and completion. */
 :is(#tab-wand-button, .zao-organize-button) .zao-organize-icon {
   position: relative;
   width: 14px;
   height: 14px;
   min-width: 14px;
+  transition: transform 140ms cubic-bezier(0.22, 1, 0.36, 1) !important;
+}
+:is(#tab-wand-button, .zao-organize-button):active:not([disabled="true"]) .zao-organize-icon {
+  transform: scale(0.92);
 }
 :is(#tab-wand-button, .zao-organize-button) .zao-organize-icon > svg {
   position: absolute;
   inset: 0;
   transform-origin: center;
-  transition: opacity 440ms ease, transform 540ms cubic-bezier(.22,.8,.2,1) !important;
+  transition: opacity 240ms ease, transform 280ms cubic-bezier(0.22, 1, 0.36, 1) !important;
 }
-:is(#tab-wand-button, .zao-organize-button) .zao-loading-icon {
+:is(#tab-wand-button, .zao-organize-button) .zao-sparkle-1,
+:is(#tab-wand-button, .zao-organize-button) .zao-sparkle-2 {
+  fill: currentColor;
+  stroke: none !important;
+  transform-box: view-box;
+  transform-origin: center;
+}
+:is(#tab-wand-button, .zao-organize-button):hover:not([aria-busy="true"]):not([data-zao-done="true"]):not([disabled="true"]) .zao-wand-icon {
+  transform: rotate(-8deg) scale(1.06);
+}
+:is(#tab-wand-button, .zao-organize-button):hover:not([aria-busy="true"]):not([data-zao-done="true"]):not([disabled="true"]) .zao-sparkle-1 {
+  animation: zao-sparkle-twinkle 1.1s ease-in-out infinite;
+}
+:is(#tab-wand-button, .zao-organize-button):hover:not([aria-busy="true"]):not([data-zao-done="true"]):not([disabled="true"]) .zao-sparkle-2 {
+  animation: zao-sparkle-twinkle 1.1s ease-in-out 0.25s infinite;
+}
+:is(#tab-wand-button, .zao-organize-button) .zao-loading-icon,
+:is(#tab-wand-button, .zao-organize-button) .zao-done-icon {
   opacity: 0;
-  transform: scale(.3) rotate(-100deg);
+  transform: scale(0.45) rotate(-75deg);
+}
+:is(#tab-wand-button, .zao-organize-button) .zao-done-icon {
+  transform: scale(0.5);
 }
 :is(#tab-wand-button, .zao-organize-button)[aria-busy="true"] {
-  opacity: .9 !important;
+  opacity: .95 !important;
 }
-:is(#tab-wand-button, .zao-organize-button)[aria-busy="true"] .zao-wand-icon {
+:is(#tab-wand-button, .zao-organize-button)[aria-busy="true"] .zao-wand-icon,
+:is(#tab-wand-button, .zao-organize-button)[data-zao-done="true"] .zao-wand-icon {
   opacity: 0;
-  transform: scale(.32) rotate(100deg);
+  transform: scale(0.4) rotate(75deg);
 }
 :is(#tab-wand-button, .zao-organize-button)[aria-busy="true"] .zao-loading-icon {
   opacity: 1;
   transform: scale(1) rotate(0deg);
 }
-:is(#tab-wand-button, .zao-organize-button)[aria-busy="true"] .zao-loading-icon > path {
-  animation: zao-ring-turn 1.8s linear infinite;
+:is(#tab-wand-button, .zao-organize-button)[data-zao-done="true"] .zao-done-icon {
+  opacity: 1;
+  transform: scale(1);
+  color: light-dark(#16a34a, #4ade80);
+}
+.zao-loading-track {
+  opacity: 0.22;
+}
+.zao-loading-arc {
+  stroke-dasharray: 42 54;
+  stroke-dashoffset: 0;
+  transform-box: view-box;
   transform-origin: 12px 12px;
+}
+:is(#tab-wand-button, .zao-organize-button)[aria-busy="true"] .zao-loading-arc,
+.zao-spinner-svg .zao-loading-arc {
+  animation: zao-ring-turn 1.1s linear infinite, zao-ring-dash 1.5s ease-in-out infinite;
 }
 @keyframes zao-ring-turn {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
+}
+@keyframes zao-ring-dash {
+  0% { stroke-dasharray: 8 54; stroke-dashoffset: 0; }
+  50% { stroke-dasharray: 36 54; stroke-dashoffset: -14; }
+  100% { stroke-dasharray: 8 54; stroke-dashoffset: -52; }
+}
+@keyframes zao-sparkle-twinkle {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.22); opacity: 0.72; }
 }
 
 /* Inline description paragraph injected under a Sine "separator" header.
@@ -560,91 +608,14 @@ dialog.zao-preview-dialog {
 }
 dialog.zao-preview-dialog[open] {
   display: flex;
+  animation: zao-dialog-enter 200ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 dialog.zao-preview-dialog::backdrop {
   background: rgba(0, 0, 0, 0.45);
 }
-
-/* First-time Local AI warning modal. Single-button countdown-acknowledge
-   pattern: the button label starts as "3  I Understand" and counts down to
-   "I Understand" over 3 seconds, only becoming clickable when the countdown
-   completes. Solid (non-translucent) background regardless of Windows Mica
-   theming. */
-dialog.zao-warning-dialog {
-  padding: 22px 26px;
-  border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
-  border-radius: 12px;
-  max-width: 460px;
-  width: min(460px, 92vw);
-  background: Canvas;
-  color: CanvasText;
-  box-shadow: 0 14px 48px rgba(0, 0, 0, 0.35);
-  font-size: 13px;
-  line-height: 1.5;
-}
-dialog.zao-warning-dialog::backdrop {
-  background: rgba(0, 0, 0, 0.45);
-}
-.zao-warning-title {
-  margin: 0 0 12px 0;
-  font-size: 15px;
-  font-weight: 600;
-}
-.zao-warning-dialog p {
-  margin: 0 0 10px 0;
-}
-.zao-warning-lead {
-  font-size: 13px;
-  opacity: 0.85;
-  margin-bottom: 14px;
-}
-.zao-warning-list {
-  list-style: none;
-  margin: 0 0 18px 0;
-  padding: 0;
-}
-.zao-warning-list li {
-  padding: 8px 12px;
-  margin: 6px 0;
-  background: color-mix(in srgb, currentColor 5%, transparent);
-  border-left: 3px solid color-mix(in srgb, currentColor 25%, transparent);
-  border-radius: 4px;
-  line-height: 1.45;
-}
-.zao-warning-list strong {
-  font-weight: 600;
-}
-.zao-warning-actions {
-  display: flex;
-  justify-content: flex-end;
-  margin-top: 16px;
-}
-.zao-warning-confirm {
-  appearance: none;
-  background: color-mix(in srgb, currentColor 12%, transparent);
-  color: inherit;
-  border: 1px solid color-mix(in srgb, currentColor 22%, transparent);
-  border-radius: 7px;
-  padding: 7px 14px;
-  font-size: 13px;
-  font-weight: 500;
-  cursor: pointer;
-  font-variant-numeric: tabular-nums;
-}
-.zao-warning-confirm:not([disabled]):hover {
-  background: color-mix(in srgb, currentColor 18%, transparent);
-}
-.zao-warning-confirm[disabled] {
-  opacity: 0.55;
-  cursor: default;
-}
-.zao-warning-link {
-  color: LinkText;
-  text-decoration: underline;
-  cursor: pointer;
-}
-.zao-warning-link:hover {
-  filter: brightness(1.15);
+@keyframes zao-dialog-enter {
+  from { opacity: 0; transform: translateY(6px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
 }
 
 .zao-preview-header {
@@ -759,8 +730,18 @@ dialog.zao-warning-dialog::backdrop {
   padding: 0;
 }
 .zao-preview-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   padding: 2px 0;
   font-size: 12.5px;
+}
+.zao-preview-tab-icon {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  border-radius: 3px;
+  object-fit: contain;
 }
 .zao-preview-tab-host {
   font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
@@ -841,6 +822,15 @@ dialog.zao-warning-dialog::backdrop {
 }
 
 /* Spinner shown inside the Re-assign button while the model is working. */
+.zao-spinner-svg {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 1.9;
+  stroke-linecap: round;
+}
 .zao-spinner {
   display: inline-block;
   width: 14px;
@@ -936,13 +926,13 @@ dialog.zao-warning-dialog::backdrop {
   gap: 10px !important;
   padding: 10px 16px !important;
   border-radius: 999px !important;
-  background: Canvas !important;
+  background: color-mix(in srgb, Canvas 86%, transparent) !important;
   color: CanvasText !important;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
   font-size: 13px !important;
   font-weight: 500 !important;
   line-height: 1.4 !important;
-  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45), 0 0 0 1px color-mix(in srgb, currentColor 18%, transparent) !important;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.38), 0 0 0 1px color-mix(in srgb, currentColor 18%, transparent) !important;
   backdrop-filter: blur(16px) !important;
   -webkit-backdrop-filter: blur(16px) !important;
   max-width: 540px !important;
@@ -950,19 +940,29 @@ dialog.zao-warning-dialog::backdrop {
   transition: opacity 0.2s ease, transform 0.2s ease !important;
 }
 
-.zao-toast-warning,
-.zao-toast-error {
-  border-left: 3px solid #f59e0b !important;
+.zao-toast-warning {
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.38), 0 0 0 1px color-mix(in srgb, #f59e0b 45%, transparent) !important;
 }
 
 .zao-toast-error {
-  border-left-color: #ef4444 !important;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.38), 0 0 0 1px color-mix(in srgb, #ef4444 48%, transparent) !important;
+}
+
+.zao-toast-success {
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.38), 0 0 0 1px color-mix(in srgb, #22c55e 40%, transparent) !important;
 }
 
 .zao-toast-icon {
-  font-size: 14px !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  width: 15px !important;
+  height: 15px !important;
   flex: 0 0 auto !important;
 }
+.zao-toast-warning .zao-toast-icon { color: light-dark(#d97706, #fbbf24) !important; }
+.zao-toast-error .zao-toast-icon { color: light-dark(#dc2626, #f87171) !important; }
+.zao-toast-success .zao-toast-icon { color: light-dark(#16a34a, #4ade80) !important; }
 
 .zao-toast-message {
   flex: 1 1 auto !important;
@@ -1036,6 +1036,7 @@ zen-workspace [data-zao-in-flight] { visibility: hidden !important; }
   box-sizing: border-box;
   display: flex;
   align-items: center;
+  gap: 7px;
   padding: 5px 10px;
   border-radius: 8px;
   overflow: hidden;
@@ -1048,6 +1049,21 @@ zen-workspace [data-zao-in-flight] { visibility: hidden !important; }
   font: menu;
   transform-origin: center;
   will-change: transform, opacity;
+}
+.zao-ghost-icon {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  border-radius: 3px;
+  object-fit: contain;
+}
+.zao-ghost-icon-folder {
+  color: var(--zao-flight-accent, currentColor);
+}
+.zao-ghost-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .zao-sort-background { width: max-content; max-width: 280px; font-size: 12px; }
 :is(#tab-wand-button, .zao-organize-button)[disabled="true"]:not([aria-busy="true"]) { opacity: 0.45 !important; }
@@ -1072,9 +1088,18 @@ zen-workspace [data-zao-in-flight] { visibility: hidden !important; }
 .zao-workspace-errors ul { padding-left: 20px; }
 .zao-workspace-errors li { margin: 8px 0; overflow-wrap: anywhere; }
 @media (prefers-reduced-motion: reduce) {
+  :is(#tab-wand-button, .zao-organize-button) .zao-organize-icon,
   :is(#tab-wand-button, .zao-organize-button) .zao-organize-icon > svg { animation: none !important; transition: opacity 150ms ease !important; }
-  :is(#tab-wand-button, .zao-organize-button) .zao-loading-icon > path { animation: none !important; }
-  :is(#tab-wand-button, .zao-organize-button)[aria-busy="true"] .zao-loading-icon { transform: scale(1); }
+  :is(#tab-wand-button, .zao-organize-button):hover:not([aria-busy="true"]):not([data-zao-done="true"]):not([disabled="true"]) .zao-wand-icon { transform: none; }
+  :is(#tab-wand-button, .zao-organize-button) .zao-sparkle-1,
+  :is(#tab-wand-button, .zao-organize-button) .zao-sparkle-2,
+  :is(#tab-wand-button, .zao-organize-button) .zao-loading-arc,
+  .zao-spinner-svg .zao-loading-arc,
+  .zao-spinner,
+  dialog.zao-preview-dialog[open],
+  .zao-toast { animation: none !important; transition: opacity 120ms ease !important; }
+  :is(#tab-wand-button, .zao-organize-button)[aria-busy="true"] .zao-loading-icon,
+  :is(#tab-wand-button, .zao-organize-button)[data-zao-done="true"] .zao-done-icon { transform: scale(1); }
 }
 
 /* Settings follow the fixed Jev → LLM flow. Keep native Sine preference nodes
@@ -1178,6 +1203,7 @@ zen-workspace [data-zao-in-flight] { visibility: hidden !important; }
   will-change: transform, opacity;
 }
 .zao-library-flight > span:last-child { overflow: hidden; text-overflow: ellipsis; }
-.zao-flight-tab, .zao-flight-folder { box-sizing: border-box; width: 14px; height: 14px; flex-shrink: 0; }
+.zao-flight-tab, .zao-flight-folder { box-sizing: border-box; width: 14px; height: 14px; flex-shrink: 0; border-radius: 3px; object-fit: contain; }
+svg.zao-flight-folder { color: var(--zao-flight-accent, currentColor); }
 span.zao-flight-tab { border: 1px solid currentColor; border-radius: 3px; opacity: .6; }
-.zao-flight-folder { height: 10px; border: 1.5px solid var(--zao-flight-accent, currentColor); border-radius: 2px; }
+span.zao-flight-folder { height: 10px; border: 1.5px solid var(--zao-flight-accent, currentColor); border-radius: 2px; }

@@ -12,31 +12,48 @@ const isOrganizeButton = (node) => node?.hasAttribute?.("data-zao-library-organi
   /^tab-wand-button(?:-copy)+$/.test(node?.id || "");
 const libraryCard = (node) => node?.closest?.(LIBRARY_CARD);
 
+let isReconcilingLibrary = false;
+let libraryReconcileRaf = null;
+
 // Library strips clone sidebar markup, including our icon, but not listeners.
 // Replace those copies with one persistent header action. The native separator
 // is hidden when all tabs are grouped, so it cannot host an always-usable icon.
 export const reconcileLibraryButtons = () => {
-  // Native Library clones arbitrary tab/group attributes during TabMove. The
-  // original's animation cleanup cannot reach those copies, so discard its
-  // transient marker when a strip is rebuilt (including previously stale rows).
-  for (const copy of document.querySelectorAll(`zen-library [data-zao-in-flight]`)) copy.removeAttribute("data-zao-in-flight");
-  for (const card of document.querySelectorAll(LIBRARY_CARD)) {
-    const header = card.querySelector(".zen-library-space-header");
-    if (!header) continue;
-    const buttons = [...card.querySelectorAll(BUTTONS)].filter(isOrganizeButton);
-    let button = buttons.find((node) => node.hasAttribute("data-zao-library-organize"));
-    if (!button) {
-      button = window.MozXULElement.parseXULToFragment(buttonXul()).firstChild;
-      button.id = `${CONFIG.BUTTON_ID}-library-${card.dataset.uuid}`;
-      button.setAttribute("data-zao-library-organize", "true");
+  if (isReconcilingLibrary) return;
+  isReconcilingLibrary = true;
+  try {
+    // Native Library clones arbitrary tab/group attributes during TabMove. The
+    // original's animation cleanup cannot reach those copies, so discard its
+    // transient marker when a strip is rebuilt (including previously stale rows).
+    for (const copy of document.querySelectorAll(`zen-library [data-zao-in-flight]`)) copy.removeAttribute("data-zao-in-flight");
+    for (const card of document.querySelectorAll(LIBRARY_CARD)) {
+      const header = card.querySelector(".zen-library-space-header");
+      if (!header) continue;
+      const buttons = [...card.querySelectorAll(BUTTONS)].filter(isOrganizeButton);
+      let button = buttons.find((node) => node.hasAttribute("data-zao-library-organize"));
+      if (!button) {
+        button = window.MozXULElement.parseXULToFragment(buttonXul()).firstChild;
+        button.id = `${CONFIG.BUTTON_ID}-library-${card.dataset.uuid}`;
+        button.setAttribute("data-zao-library-organize", "true");
+      }
+      for (const duplicate of buttons) if (duplicate !== button) duplicate.remove();
+      if (button.parentElement !== header) header.insertBefore(button, header.querySelector("toolbarbutton"));
+      button.classList.add("zao-organize-button");
+      button.removeAttribute("command");
+      button.setAttribute("tooltiptext", "Tabs in diesem Space automatisch sortieren");
+      updateSortButtonState(button, window);
     }
-    for (const duplicate of buttons) if (duplicate !== button) duplicate.remove();
-    if (button.parentElement !== header) header.insertBefore(button, header.querySelector("toolbarbutton"));
-    button.classList.add("zao-organize-button");
-    button.removeAttribute("command");
-    button.setAttribute("tooltiptext", "Tabs in diesem Space automatisch sortieren");
-    updateSortButtonState(button, window);
+  } finally {
+    isReconcilingLibrary = false;
   }
+};
+
+const scheduleLibraryReconcile = () => {
+  if (isReconcilingLibrary || libraryReconcileRaf != null) return;
+  libraryReconcileRaf = window.requestAnimationFrame(() => {
+    libraryReconcileRaf = null;
+    if (!window.closed) reconcileLibraryButtons();
+  });
 };
 
 const dispatchOrganize = (event) => {
@@ -56,14 +73,19 @@ const WAND_ICON_SVG = `
   <svg class="zao-wand-icon" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24"
        fill="none" stroke="currentColor" stroke-width="1.75"
        stroke-linecap="round" stroke-linejoin="round">
-    <path d="m4 20 10-10"/>
-    <path d="m13 7 4 4"/>
-    <path d="M18 2.5v5"/>
-    <path d="M15.5 5h5"/>
+    <path class="zao-wand-shaft" d="M3.5 20.5 17.5 6.5"/>
+    <path class="zao-wand-collar" d="m13.5 7.5 3 3"/>
+    <path class="zao-sparkle-1" d="M6 3Q6 6 3 6Q6 6 6 9Q6 6 9 6Q6 6 6 3Z"/>
+    <path class="zao-sparkle-2" d="M18.5 14Q18.5 16.5 16 16.5Q18.5 16.5 18.5 19Q18.5 16.5 21 16.5Q18.5 16.5 18.5 14Z"/>
   </svg>
   <svg class="zao-loading-icon" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24"
-       fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round">
-    <path d="M12 3a9 9 0 1 1-9 9"/>
+       fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+    <circle class="zao-loading-track" cx="12" cy="12" r="8.5"/>
+    <circle class="zao-loading-arc" cx="12" cy="12" r="8.5"/>
+  </svg>
+  <svg class="zao-done-icon" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24"
+       fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M5 12.5 9.5 17 19 7.5"/>
   </svg>
 `;
 
@@ -155,7 +177,7 @@ export const setupCommand = () => {
 
   const library = document.querySelector("zen-library");
   if (library && !window._zaoLibraryButtonObserver) {
-    window._zaoLibraryButtonObserver = new window.MutationObserver(reconcileLibraryButtons);
+    window._zaoLibraryButtonObserver = new window.MutationObserver(scheduleLibraryReconcile);
     window._zaoLibraryButtonObserver.observe(library, { childList: true, subtree: true });
     reconcileLibraryButtons();
   }
@@ -187,8 +209,16 @@ export const setupCommand = () => {
 };
 
 export const teardownOrganizeUI = () => {
+  if (libraryReconcileRaf != null) {
+    window.cancelAnimationFrame?.(libraryReconcileRaf);
+    libraryReconcileRaf = null;
+  }
   window._zaoLibraryButtonObserver?.disconnect();
   delete window._zaoLibraryButtonObserver;
+  if (window._zaoWorkspaceChangeListener) {
+    window.removeEventListener("ZenWorkspaceChange", window._zaoWorkspaceChangeListener);
+    delete window._zaoWorkspaceChangeListener;
+  }
   if (window._zaoGlobalClickListener) {
     window.removeEventListener("click", window._zaoGlobalClickListener, true);
     window.removeEventListener("command", window._zaoGlobalClickListener, true);
@@ -231,12 +261,9 @@ export const setupWorkspaceHooks = () => {
     addButtonToAllSeparators();
   };
 
-  window.addEventListener("ZenWorkspaceChange", () => {
+  window._zaoWorkspaceChangeListener = () => {
     domCache.invalidate();
     addButtonToAllSeparators();
-  });
-
-  window.addEventListener("TabSelect", () => {
-    addButtonToAllSeparators();
-  });
+  };
+  window.addEventListener("ZenWorkspaceChange", window._zaoWorkspaceChangeListener);
 };

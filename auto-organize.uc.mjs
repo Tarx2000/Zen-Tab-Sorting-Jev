@@ -27,7 +27,9 @@ import {
   setupTabGroupContextMenu,
   teardownTabGroupContextMenu,
   setupTabGroupCreateHook,
+  teardownTabGroupCreateHook,
   setupCollapsedStatePersistence,
+  teardownCollapsedStatePersistence,
   setupMinimalStylePrefObserver,
   teardownMinimalStylePrefObserver,
 } from "./modules/browser-hooks.mjs";
@@ -148,6 +150,8 @@ const cleanup = () => {
     teardownSettingsObserver();
     teardownTabContextMenu();
     teardownTabGroupContextMenu();
+    teardownTabGroupCreateHook();
+    teardownCollapsedStatePersistence();
     teardownWorkspaceSortMenu(window);
     teardownOrganizeUI();
     teardownGroupDrag(window);

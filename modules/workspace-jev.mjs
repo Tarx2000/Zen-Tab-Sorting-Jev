@@ -77,15 +77,25 @@ export const evaluateWorkspaceAnswer = (unit, workspaces, answer) => {
 
 export const classifyWorkspaceUnitsWithJev = async ({
   units, workspaces, settings = readJevSettings(), fetchImpl = globalThis.fetch,
-  wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), signal,
+  wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), signal, concurrency = 1,
 }) => {
   if (workspaces.length < 2 || !units.length) return { decisions: [], errors: [] };
   if (!settings.consentToSendData) throw new Error("Bitte zuerst die Datenfreigabe in den Jev-Einstellungen aktivieren.");
   if (!settings.apiKey?.trim()) throw new Error("Bitte zuerst einen Jev-Zugangsschlüssel hinterlegen.");
-  const decisions = [];
-  const errors = [];
+
+  const batches = [];
   for (let start = 0; start < units.length; start += JEV_MAX_QUESTIONS_PER_BATCH) {
-    let pending = units.slice(start, start + JEV_MAX_QUESTIONS_PER_BATCH);
+    batches.push(units.slice(start, start + JEV_MAX_QUESTIONS_PER_BATCH));
+  }
+
+  const batchOutputs = new Array(batches.length);
+  let cursor = 0;
+  const workerCount = Math.max(1, Math.min(concurrency, batches.length));
+
+  const runBatch = async (batchIndex) => {
+    let pending = batches[batchIndex];
+    const batchDecisions = [];
+    const batchErrors = [];
     for (let attempt = 0; attempt < WORKSPACE_MAX_ATTEMPTS && pending.length; attempt++) {
       if (signal?.aborted) throw new Error("Sortierung abgebrochen");
       if (attempt) await wait(350);
@@ -103,7 +113,7 @@ export const classifyWorkspaceUnitsWithJev = async ({
         try { result = JSON.parse(await response.text()); } catch { throw new Error("Jev-Antwort ist kein gültiges JSON"); }
         for (const [index, unit] of pending.entries()) {
           try {
-            decisions.push(evaluateWorkspaceAnswer(unit, workspaces, result?.answers?.[`unit_${index}`]));
+            batchDecisions.push(evaluateWorkspaceAnswer(unit, workspaces, result?.answers?.[`unit_${index}`]));
           } catch (error) {
             failed.push({ unit, reason: error.message });
           }
@@ -118,8 +128,27 @@ export const classifyWorkspaceUnitsWithJev = async ({
         signal?.removeEventListener("abort", abort);
       }
       pending = failed.map(({ unit }) => unit);
-      if (attempt === WORKSPACE_MAX_ATTEMPTS - 1) errors.push(...failed.map((failure) => ({ ...failure, phase: "classification" })));
+      if (attempt === WORKSPACE_MAX_ATTEMPTS - 1) batchErrors.push(...failed.map((failure) => ({ ...failure, phase: "classification" })));
     }
+    batchOutputs[batchIndex] = { batchDecisions, batchErrors };
+  };
+
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (true) {
+        const idx = cursor++;
+        if (idx >= batches.length) break;
+        await runBatch(idx);
+      }
+    }),
+  );
+
+  const decisions = [];
+  const errors = [];
+  for (const out of batchOutputs) {
+    if (!out) continue;
+    decisions.push(...out.batchDecisions);
+    errors.push(...out.batchErrors);
   }
   // Retries may return decisions out of order; execution follows snapshot order.
   const order = new Map(units.map((unit, index) => [unit, index]));

@@ -43,7 +43,43 @@ export const getHostname = (url) => {
 // than a login wall. CORS doesn't apply at chrome scope.
 
 const SNIPPET_MAX_CHARS = 400;
-const SNIPPET_FETCH_TIMEOUT_MS = 3000;
+const SNIPPET_FETCH_TIMEOUT_MS = 1400;
+const SNIPPET_GLOBAL_BUDGET_MS = 950;
+const SNIPPET_CONCURRENCY = 6;
+const MAX_SNIPPET_HTML_BYTES = 32768;
+const SNIPPET_CACHE_MAX_ENTRIES = 300;
+const SNIPPET_CACHE_HIT_TTL_MS = 15 * 60 * 1000;
+const SNIPPET_CACHE_MISS_TTL_MS = 2 * 60 * 1000;
+
+const SNIPPET_CACHE = new Map();
+
+export const clearSnippetCache = () => {
+  SNIPPET_CACHE.clear();
+};
+
+const getCachedSnippet = (url) => {
+  const entry = SNIPPET_CACHE.get(url);
+  if (!entry) return undefined;
+  if (Date.now() >= entry.expiresAt) {
+    SNIPPET_CACHE.delete(url);
+    return undefined;
+  }
+  // Refresh LRU recency.
+  SNIPPET_CACHE.delete(url);
+  SNIPPET_CACHE.set(url, entry);
+  return entry.value;
+};
+
+const setCachedSnippet = (url, value) => {
+  if (!url) return;
+  if (SNIPPET_CACHE.has(url)) SNIPPET_CACHE.delete(url);
+  else if (SNIPPET_CACHE.size >= SNIPPET_CACHE_MAX_ENTRIES) {
+    const oldestKey = SNIPPET_CACHE.keys().next().value;
+    if (oldestKey !== undefined) SNIPPET_CACHE.delete(oldestKey);
+  }
+  const ttl = value ? SNIPPET_CACHE_HIT_TTL_MS : SNIPPET_CACHE_MISS_TTL_MS;
+  SNIPPET_CACHE.set(url, { value, expiresAt: Date.now() + ttl });
+};
 
 // Minimal HTML entity decoder — covers the entities that appear in meta tags.
 const decodeHtmlEntities = (s) => s
@@ -107,28 +143,144 @@ const extractSnippetFromHtml = (html) => {
 
 // Returns "" on any failure (404, timeout, network error, non-HTML response,
 // no usable meta tag). Caller treats empty as "no snippet, fall back to title".
-export const fetchPageSnippet = async (url) => {
+export const fetchPageSnippet = async (
+  url,
+  { timeoutMs = SNIPPET_FETCH_TIMEOUT_MS, signal, fetchImpl = globalThis.fetch } = {},
+) => {
   if (!url) return "";
   if (!url.startsWith("http://") && !url.startsWith("https://")) return "";
 
+  const cached = getCachedSnippet(url);
+  if (cached !== undefined) return cached;
+  if (signal?.aborted) return "";
+
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), SNIPPET_FETCH_TIMEOUT_MS);
+  let localTimedOut = false;
+  const timer = setTimeout(() => {
+    localTimedOut = true;
+    controller.abort();
+  }, Math.max(100, timeoutMs));
+  const onExternalAbort = () => controller.abort();
+  signal?.addEventListener("abort", onExternalAbort, { once: true });
+
   try {
-    const res = await fetch(url, {
+    const res = await fetchImpl(url, {
       signal: controller.signal,
       credentials: "include", // send the user's cookies so authed pages return real content
       headers: { Accept: "text/html,application/xhtml+xml" },
     });
-    if (!res.ok) return "";
-    const ct = (res.headers.get("content-type") || "").toLowerCase();
-    if (!ct.includes("html")) return "";
-    const html = await res.text();
-    return extractSnippetFromHtml(html);
+    if (!res.ok) {
+      if (!signal?.aborted && !localTimedOut) setCachedSnippet(url, "");
+      return "";
+    }
+    const ct = (res.headers?.get?.("content-type") || "").toLowerCase();
+    if (!ct.includes("html")) {
+      if (!signal?.aborted && !localTimedOut) setCachedSnippet(url, "");
+      return "";
+    }
+
+    let html = "";
+    if (res.body && typeof res.body.getReader === "function") {
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder("utf-8", { fatal: false });
+      let bytesRead = 0;
+      try {
+        while (bytesRead < MAX_SNIPPET_HTML_BYTES) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (!value || value.byteLength === 0) continue;
+          const remaining = MAX_SNIPPET_HTML_BYTES - bytesRead;
+          const chunk = value.byteLength > remaining ? value.subarray(0, remaining) : value;
+          bytesRead += chunk.byteLength;
+          html += decoder.decode(chunk, { stream: true });
+          const lower = html.toLowerCase();
+          if (lower.includes("</head>") && (lower.includes("</h1>") || bytesRead >= 16384)) {
+            break;
+          }
+        }
+        html += decoder.decode();
+      } finally {
+        reader.cancel().catch(() => {});
+      }
+    } else {
+      html = (await res.text()).slice(0, MAX_SNIPPET_HTML_BYTES);
+    }
+
+    const snippet = extractSnippetFromHtml(html);
+    if (!signal?.aborted && !localTimedOut) setCachedSnippet(url, snippet);
+    return snippet;
   } catch {
     return "";
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener("abort", onExternalAbort);
   }
+};
+
+export const fetchPageSnippets = async (
+  tabs,
+  {
+    concurrency = SNIPPET_CONCURRENCY,
+    globalBudgetMs = SNIPPET_GLOBAL_BUDGET_MS,
+    perRequestTimeoutMs = 1200,
+    fetchImpl = globalThis.fetch,
+  } = {},
+) => {
+  if (!Array.isArray(tabs) || tabs.length === 0) return [];
+  const results = new Array(tabs.length).fill("");
+  const indicesByUrl = new Map();
+
+  for (let i = 0; i < tabs.length; i++) {
+    const url = tabs[i]?.url || "";
+    if (!url.startsWith("http://") && !url.startsWith("https://")) continue;
+    const cached = getCachedSnippet(url);
+    if (cached !== undefined) {
+      results[i] = cached;
+      continue;
+    }
+    if (!indicesByUrl.has(url)) indicesByUrl.set(url, []);
+    indicesByUrl.get(url).push(i);
+  }
+
+  const pendingUrls = [...indicesByUrl.keys()];
+  if (pendingUrls.length === 0) return results;
+
+  const controller = new AbortController();
+  let budgetTimer;
+  const budgetReached = new Promise((resolve) => {
+    budgetTimer = setTimeout(() => {
+      controller.abort();
+      resolve();
+    }, Math.max(50, globalBudgetMs));
+  });
+
+  let cursor = 0;
+  const workerCount = Math.max(1, Math.min(concurrency, pendingUrls.length));
+  const workers = Array.from({ length: workerCount }, async () => {
+    while (!controller.signal.aborted) {
+      const idx = cursor++;
+      if (idx >= pendingUrls.length) break;
+      const url = pendingUrls[idx];
+      const snippet = await fetchPageSnippet(url, {
+        timeoutMs: perRequestTimeoutMs,
+        signal: controller.signal,
+        fetchImpl,
+      });
+      if (snippet) {
+        for (const tabIdx of indicesByUrl.get(url)) {
+          results[tabIdx] = snippet;
+        }
+      }
+    }
+  });
+
+  try {
+    await Promise.race([Promise.allSettled(workers), budgetReached]);
+  } finally {
+    clearTimeout(budgetTimer);
+    controller.abort();
+  }
+  return results;
 };
 
 /**

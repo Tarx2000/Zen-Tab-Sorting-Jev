@@ -112,11 +112,26 @@ export const findExistingGroup = (name, workspaceId) => {
     );
     if (direct?.isConnected && !isSidebarCopy(direct)) return direct;
 
+    const wsEl = globalThis.window?.gZenWorkspaces?.workspaceElement?.(workspaceId)
+      || (globalThis.window?.gZenWorkspaces?.activeWorkspace === workspaceId
+        ? globalThis.window?.gZenWorkspaces?.activeWorkspaceElement
+        : null);
+
     const candidates = document.querySelectorAll(`tab-group[label="${escapedName}"]`);
     for (const candidate of candidates) {
       if (!candidate.isConnected || isSidebarCopy(candidate)) continue;
+      const candidateWs = candidate.getAttribute?.("zen-workspace-id");
+      if (candidateWs && candidateWs !== workspaceId) continue;
       if (candidate.querySelector(`tab[zen-workspace-id="${workspaceId}"]`)) {
         return candidate;
+      }
+      if (!candidate.querySelector("tab")) {
+        if (
+          candidate.closest?.("zen-workspace")?.id === workspaceId ||
+          wsEl?.contains?.(candidate)
+        ) {
+          return candidate;
+        }
       }
     }
     return null;
@@ -194,8 +209,8 @@ export const applyGroupColor = (groupEl, color) => {
   }
 
   if (isValidHex(color)) {
-    const invert = colorMix(color, "#ffffff", 25);
-    const pale   = colorMix(color, "#ffffff", 80);
+    const invert = `color-mix(in srgb, ${color} ${CONFIG.HEX_INVERT_MIX_PERCENT}%, white)`;
+    const pale   = `color-mix(in srgb, ${color} ${CONFIG.HEX_PALE_MIX_PERCENT}%, white)`;
     try {
       groupEl.style.setProperty("--tab-group-color", color, "important");
       groupEl.style.setProperty("--tab-group-color-invert", invert, "important");

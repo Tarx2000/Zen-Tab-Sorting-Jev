@@ -179,14 +179,15 @@ const organizeCurrentWorkspace = async () => {
 
     // 6. Apply Pass 1 moves (if any optional domain rules matched).
     const sortingPlan = resolveSortingPlan({ mode: sortMode, tabs, pass1: { byGroup, unmatched } });
+    let strictEjectCandidates = [];
     if (sortingPlan.shouldApplyPass1 && sortingPlan.pass1ByGroup.size > 0) {
       mutations.push(() => applyPass1(sortingPlan.pass1ByGroup, workspaceId, rules));
 
       if (domainRulesEnabled && isStrictRulesEnforced()) {
-        const candidates = unmatched.filter((t) => t.currentGroup && t._tab?.isConnected);
-        if (candidates.length > 0) {
-          mutations.push(() => moveTabsToTop(candidates.map((t) => t._tab), workspaceId));
-          for (const t of candidates) t.currentGroup = null;
+        strictEjectCandidates = unmatched.filter((t) => t.currentGroup && t._tab?.isConnected);
+        if (strictEjectCandidates.length > 0) {
+          mutations.push(() => moveTabsToTop(strictEjectCandidates.map((t) => t._tab), workspaceId));
+          for (const t of strictEjectCandidates) t.currentGroup = null;
         }
       }
     }
@@ -207,6 +208,7 @@ const organizeCurrentWorkspace = async () => {
       showToast("No ungrouped tabs left to sort.");
     }
 
+    let activePass2Plan = null;
     if (shouldRunPass2) {
       const inputCount = pass2Input.length;
       const inputLabel = isFreshLike ? "ALL eligible tab(s)" : "ungrouped tab(s)";
@@ -376,15 +378,15 @@ const organizeCurrentWorkspace = async () => {
           }
 
           if (planToApply) {
-            const confirmedPlan = planToApply;
+            activePass2Plan = planToApply;
             mutations.push(() => {
               const applyOpts = domainRulesEnabled
                 ? resolvePass2ApplyOptions(sortMode)
                 : { existingBehavior: "transient", newGroupBehavior: "transient", persistRules: false };
-              const ai = applyPass2(confirmedPlan, workspaceId, rules, applyOpts);
+              const ai = applyPass2(activePass2Plan, workspaceId, rules, applyOpts);
               recordDebugEvent("APPLY", `Pass 2 applied: ${ai.movedToExisting} tabs moved into existing groups, ${ai.newGroupsCreated} new groups created`);
               console.log(`${LOG} Pass 2 applied: ${ai.movedToExisting} tab(s) → existing groups, ${ai.newGroupsCreated} new group(s), ${ai.rulesGrown} rule(s) grown, ${ai.newRulesCreated} new rule(s)`);
-              pass2 = confirmedPlan;
+              pass2 = activePass2Plan;
 
               if (isFreshLike) {
                 const tabsContainer = window.gZenWorkspaces?.activeWorkspaceElement?.tabsContainer;
@@ -428,10 +430,59 @@ const organizeCurrentWorkspace = async () => {
     // 9. Sync styling.
     mutations.push(() => syncAllGroupColors(workspaceId, rules));
 
-    if (window.gZenWorkspaces.activeWorkspace !== workspaceId || originalTabs.some(({ node, parent, url }) =>
-      !node.isConnected || node.parentElement !== parent || node.getAttribute("zen-workspace-id") !== workspaceId || getTabUrl(node) !== url)) {
-      showToast("Tabs oder Workspace wurden während der Berechnung verändert. Bitte die Sortierung erneut starten.", { type: "warning" });
+    if (window.gZenWorkspaces.activeWorkspace !== workspaceId) {
+      showToast("Workspace wurde während der Berechnung gewechselt. Bitte die Sortierung erneut starten.", { type: "warning" });
       return;
+    }
+
+    const staleTabNodes = new Set();
+    for (const { node, parent, url } of originalTabs) {
+      if (
+        !node?.isConnected ||
+        node.parentElement !== parent ||
+        node.getAttribute("zen-workspace-id") !== workspaceId ||
+        getTabUrl(node) !== url
+      ) {
+        staleTabNodes.add(node);
+      }
+    }
+
+    const countPlannedMoves = () => {
+      let total = 0;
+      for (const items of sortingPlan.pass1ByGroup.values()) total += items.length;
+      if (activePass2Plan) {
+        total += activePass2Plan.assignedToExisting.length;
+        for (const grp of activePass2Plan.newGroups) total += grp.tabs.length;
+      }
+      return total;
+    };
+    const initialPlannedMoves = countPlannedMoves();
+
+    if (staleTabNodes.size > 0) {
+      for (const [groupName, items] of sortingPlan.pass1ByGroup) {
+        const fresh = items.filter((item) => !staleTabNodes.has(item._tab));
+        if (fresh.length === 0) sortingPlan.pass1ByGroup.delete(groupName);
+        else sortingPlan.pass1ByGroup.set(groupName, fresh);
+      }
+      if (strictEjectCandidates.length > 0) {
+        for (let i = strictEjectCandidates.length - 1; i >= 0; i--) {
+          if (staleTabNodes.has(strictEjectCandidates[i]._tab)) strictEjectCandidates.splice(i, 1);
+        }
+      }
+      if (activePass2Plan) {
+        activePass2Plan.assignedToExisting = activePass2Plan.assignedToExisting.filter(
+          (a) => !staleTabNodes.has(a.tabInfo?._tab),
+        );
+        activePass2Plan.newGroups = activePass2Plan.newGroups
+          .map((g) => ({ ...g, tabs: g.tabs.filter((t) => !staleTabNodes.has(t._tab)) }))
+          .filter((g) => g.tabs.length >= 2);
+        activePass2Plan.skipped = activePass2Plan.skipped.filter((t) => !staleTabNodes.has(t._tab));
+      }
+      console.log(`${LOG} skipped ${staleTabNodes.size} tab(s) that changed while sorting was running`);
+      if (initialPlannedMoves > 0 && countPlannedMoves() === 0) {
+        showToast("Tabs wurden während der Berechnung verändert. Bitte die Sortierung erneut starten.", { type: "warning" });
+        return;
+      }
     }
     const collapsed = [...window.gZenWorkspaces.activeWorkspaceElement.querySelectorAll("tab-group[collapsed]")];
     await animateSidebarChanges(window, () => {
@@ -451,13 +502,6 @@ const organizeCurrentWorkspace = async () => {
       }
     } catch (e) {
       console.error(`${LOG} nesting diagnostic failed:`, e);
-    }
-
-    try {
-      window.gZenWorkspaces?.updateTabsContainers?.();
-      void window.gBrowser?.tabs?.length;
-    } catch (e) {
-      console.warn(`${LOG} tab-list settle failed (non-fatal):`, e);
     }
   } finally {
     console.groupEnd();

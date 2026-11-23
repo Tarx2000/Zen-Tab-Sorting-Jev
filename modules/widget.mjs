@@ -558,8 +558,9 @@ export const buildBackupRestoreSection = () => {
         download.error = null;
         download.progress = 100;
         download.hasProgress = true;
-        download.totalBytes = json.length;
-        download.currentBytes = json.length;
+        const byteLen = new TextEncoder().encode(json).byteLength;
+        download.totalBytes = byteLen;
+        download.currentBytes = byteLen;
         await list.add(download);
       } catch (e) {
         // Non-fatal — the file is already saved. The downloads panel just

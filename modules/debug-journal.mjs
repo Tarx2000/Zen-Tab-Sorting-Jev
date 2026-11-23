@@ -8,6 +8,8 @@ import { createSafeLogEvent } from "./safe-log.mjs";
 
 const MAX_DEBUG_EVENTS = 60;
 let inMemoryFallback = [];
+let cachedRaw = null;
+let cachedEvents = [];
 
 const readPersistedEvents = () => {
   try {
@@ -15,20 +17,29 @@ const readPersistedEvents = () => {
     if (prefs?.prefHasUserValue?.(CONFIG.DEBUG_LOGS_PREF)) {
       const raw = prefs.getStringPref(CONFIG.DEBUG_LOGS_PREF);
       if (raw) {
+        if (raw === cachedRaw) return [...cachedEvents];
         const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) return parsed;
+        if (Array.isArray(parsed)) {
+          cachedRaw = raw;
+          cachedEvents = parsed;
+          return [...parsed];
+        }
       }
     }
   } catch {}
-  return inMemoryFallback;
+  return [...inMemoryFallback];
 };
 
 const writePersistedEvents = (events) => {
-  inMemoryFallback = events;
+  const snapshot = [...events];
+  inMemoryFallback = snapshot;
   try {
     const prefs = globalThis.Services?.prefs;
     if (prefs?.setStringPref) {
-      prefs.setStringPref(CONFIG.DEBUG_LOGS_PREF, JSON.stringify(events));
+      const raw = JSON.stringify(snapshot);
+      cachedRaw = raw;
+      cachedEvents = snapshot;
+      prefs.setStringPref(CONFIG.DEBUG_LOGS_PREF, raw);
     }
   } catch (e) {
     console.warn(`${LOG} could not save debug logs to pref:`, e);

@@ -383,7 +383,9 @@ const buildProviderTestSection = (stage) => {
       const result = await (isJev ? testJevConnection() : testProviderConnection());
       status.dataset.state = result.ok ? "ok" : "err";
       status.textContent = result.ok
-        ? `Connected in ${result.latencyMs} ms — ${result.reasoning}.`
+        ? (isJev
+          ? `Connected in ${result.latencyMs} ms — ${result.reply}.`
+          : `Connected in ${result.latencyMs} ms — ${result.reasoning}.`)
         : result.reason === "consent_required" ? "Allow sending tab data in AI Sorting first."
         : result.reason === "missing_required_config" ? (isJev ? "Enter your Jev API key first." : `Complete the provider settings: ${(result.missingFields || []).join(", ")}.`)
         : `Connection failed: ${result.error || result.reason}`;

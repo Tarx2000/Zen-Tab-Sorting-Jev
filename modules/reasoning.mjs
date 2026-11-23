@@ -148,5 +148,5 @@ export const describeReasoningSelection = (preference, capabilities, effort) => 
       : `reasoning ${effort}`;
   }
   if (pref === REASONING_DEFAULT) return "reasoning: provider default";
-  return capabilities?.supported === false ? "reasoning off" : "reasoning off";
+  return "reasoning off";
 };

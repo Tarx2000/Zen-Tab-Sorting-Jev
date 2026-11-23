@@ -304,6 +304,8 @@ export const classifyExistingGroupsWithJev = async ({
   snippets = [],
   jevSettings = readJevSettings(),
   fetchImpl,
+  deadlineAt,
+  concurrency = 3,
 }) => {
   if (!Array.isArray(tabs) || tabs.length === 0) {
     return { assignedToExisting: [], leftoverTabs: [], leftoverSnippets: [] };
@@ -328,13 +330,19 @@ export const classifyExistingGroupsWithJev = async ({
   }
 
   const doFetch = resolveFetch(fetchImpl);
-  const assignedToExisting = [];
-  const leftoverTabs = [];
-  const leftoverSnippets = [];
-
+  const chunks = [];
   for (let start = 0; start < tabs.length; start += JEV_MAX_QUESTIONS_PER_BATCH) {
     const chunkTabs = tabs.slice(start, start + JEV_MAX_QUESTIONS_PER_BATCH);
     const chunkSnippets = chunkTabs.map((_, idx) => snippets?.[start + idx] || "");
+    chunks.push({ chunkTabs, chunkSnippets });
+  }
+
+  const chunkResults = new Array(chunks.length);
+  let cursor = 0;
+  const workerCount = Math.max(1, Math.min(concurrency, chunks.length));
+
+  const runChunk = async (chunkIdx) => {
+    const { chunkTabs, chunkSnippets } = chunks[chunkIdx];
     const payload = buildJevPayload({
       model: jevSettings.model || defaultJevModelForProvider(jevSettings.jevProvider),
       existingGroups: validGroups,
@@ -342,9 +350,12 @@ export const classifyExistingGroupsWithJev = async ({
       snippets: chunkSnippets,
     });
     const req = buildJevHttpRequest(jevSettings, payload);
+    const timeoutMs = Number.isFinite(deadlineAt)
+      ? Math.max(2500, Math.min(JEV_TIMEOUT_MS, deadlineAt - Date.now()))
+      : JEV_TIMEOUT_MS;
 
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), JEV_TIMEOUT_MS);
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     let response;
     let bodyText;
     try {
@@ -373,14 +384,40 @@ export const classifyExistingGroupsWithJev = async ({
       minMargin: jevSettings.minMargin,
     });
 
-    assignedToExisting.push(...batchEval.assignedToExisting);
+    const chunkLeftoverTabs = [];
+    const chunkLeftoverSnippets = [];
     for (let idx = 0; idx < chunkTabs.length; idx++) {
       const diag = batchEval.diagnostics[idx];
       if (!diag?.accepted) {
-        leftoverTabs.push(chunkTabs[idx]);
-        leftoverSnippets.push(chunkSnippets[idx]);
+        chunkLeftoverTabs.push(chunkTabs[idx]);
+        chunkLeftoverSnippets.push(chunkSnippets[idx]);
       }
     }
+    chunkResults[chunkIdx] = {
+      assignedToExisting: batchEval.assignedToExisting,
+      leftoverTabs: chunkLeftoverTabs,
+      leftoverSnippets: chunkLeftoverSnippets,
+    };
+  };
+
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (true) {
+        const idx = cursor++;
+        if (idx >= chunks.length) break;
+        await runChunk(idx);
+      }
+    }),
+  );
+
+  const assignedToExisting = [];
+  const leftoverTabs = [];
+  const leftoverSnippets = [];
+  for (const res of chunkResults) {
+    if (!res) continue;
+    assignedToExisting.push(...res.assignedToExisting);
+    leftoverTabs.push(...res.leftoverTabs);
+    leftoverSnippets.push(...res.leftoverSnippets);
   }
 
   return { assignedToExisting, leftoverTabs, leftoverSnippets };
@@ -393,6 +430,9 @@ export const testJevConnection = async (jevSettings = readJevSettings(), fetchIm
   if (!jevSettings.apiKey || !jevSettings.apiKey.trim()) {
     return { ok: false, reason: "missing_required_config", missingFields: ["jevApiKey"] };
   }
+  const startedAt = performance.now();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15_000);
   try {
     const payload = {
       model: jevSettings.model || defaultJevModelForProvider(jevSettings.jevProvider),
@@ -410,15 +450,20 @@ export const testJevConnection = async (jevSettings = readJevSettings(), fetchIm
     };
     const req = buildJevHttpRequest(jevSettings, payload);
     const doFetch = resolveFetch(fetchImpl);
-    const response = await doFetch(req.url, req.init);
+    const response = await doFetch(req.url, { ...req.init, signal: controller.signal });
     const bodyText = await response.text();
+    const latencyMs = Math.round(performance.now() - startedAt);
     if (!response.ok) {
-      return { ok: false, reason: "request_failed", error: `HTTP ${response.status}: ${bodyText.slice(0, 160)}` };
+      return { ok: false, reason: "request_failed", error: `HTTP ${response.status}: ${bodyText.slice(0, 160)}`, latencyMs };
     }
     const parsed = JSON.parse(bodyText);
     const choice = parsed?.answers?.probe?.choice || "ok";
-    return { ok: true, reply: `JEV picked "${choice}"` };
+    return { ok: true, reply: `JEV picked "${choice}"`, latencyMs };
   } catch (e) {
-    return { ok: false, reason: "request_failed", error: e?.message || String(e) };
+    const latencyMs = Math.round(performance.now() - startedAt);
+    const error = e?.name === "AbortError" ? "JEV connection test timed out" : (e?.message || String(e));
+    return { ok: false, reason: "request_failed", error, latencyMs };
+  } finally {
+    clearTimeout(timer);
   }
 };

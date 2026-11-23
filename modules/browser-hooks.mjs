@@ -401,12 +401,22 @@ export const setupTabGroupCreateHook = () => {
   console.log(`${LOG} TabGroupCreate hook installed`);
 };
 
+export const teardownTabGroupCreateHook = () => {
+  if (typeof gBrowser === "undefined" || !gBrowser?.tabContainer?._zaoTabGroupCreateHook) return;
+  try {
+    gBrowser.tabContainer.removeEventListener("TabGroupCreate", gBrowser.tabContainer._zaoTabGroupCreateHook);
+  } catch {}
+  delete gBrowser.tabContainer._zaoTabGroupCreateHook;
+};
+
 // Watch every tab-group's `collapsed` attribute and persist the current set
 // of collapsed labels to the pref. Re-applied on TabGroupCreate (above) so
 // the user's collapse choices survive browser restarts.
 export const setupCollapsedStatePersistence = () => {
   if (window._zaoCollapseObserverInstalled) return;
   window._zaoCollapseObserverInstalled = true;
+
+  const groupObservers = new Set();
 
   const persist = (group) => {
     if (isSidebarCopy(group)) return;
@@ -434,7 +444,16 @@ export const setupCollapsedStatePersistence = () => {
     });
     obs.observe(group, { attributes: true, attributeFilter: ["collapsed"] });
     group._zaoCollapseAttrObs = obs;
+    groupObservers.add(obs);
     persist(group);
+  };
+
+  const unwatch = (group) => {
+    const obs = group?._zaoCollapseAttrObs;
+    if (!obs) return;
+    try { obs.disconnect(); } catch {}
+    groupObservers.delete(obs);
+    delete group._zaoCollapseAttrObs;
   };
 
   // Existing tab-groups
@@ -448,14 +467,36 @@ export const setupCollapsedStatePersistence = () => {
         if (n.tagName?.toLowerCase() === "tab-group") watch(n);
         else n.querySelectorAll?.("tab-group").forEach(watch);
       }
+      for (const n of m.removedNodes) {
+        if (n.nodeType !== 1) continue;
+        if (n.tagName?.toLowerCase() === "tab-group") unwatch(n);
+        else n.querySelectorAll?.("tab-group").forEach(unwatch);
+      }
     }
   });
-  containerObs.observe(document.body || document.documentElement, {
+  const observeTarget =
+    (typeof gBrowser !== "undefined" && gBrowser?.tabContainer) ||
+    document.body ||
+    document.documentElement;
+  containerObs.observe(observeTarget, {
     childList: true,
     subtree: true,
   });
 
+  window._zaoCollapseObservers = { containerObs, groupObservers };
   console.log(`${LOG} collapsed-state persistence observer installed`);
+};
+
+export const teardownCollapsedStatePersistence = () => {
+  const state = window._zaoCollapseObservers;
+  if (!state) return;
+  try { state.containerObs?.disconnect(); } catch {}
+  for (const obs of state.groupObservers) {
+    try { obs.disconnect(); } catch {}
+  }
+  state.groupObservers.clear();
+  delete window._zaoCollapseObservers;
+  delete window._zaoCollapseObserverInstalled;
 };
 
 // ─── Pref observers ──────────────────────────────────────────────────────────

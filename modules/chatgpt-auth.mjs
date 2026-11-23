@@ -560,10 +560,15 @@ export const startChatGPTSignInFlow = async ({
   let serverSocket = null;
   let port = 14555;
   let tabWatchTimer = null;
+  let timeoutTimer = null;
   let openedTab = null;
   let settled = false;
 
   const cleanup = () => {
+    if (timeoutTimer) {
+      clearTimeout(timeoutTimer);
+      timeoutTimer = null;
+    }
     if (tabWatchTimer) {
       clearInterval(tabWatchTimer);
       tabWatchTimer = null;
@@ -627,8 +632,9 @@ export const startChatGPTSignInFlow = async ({
                     "<!doctype html><html><head><meta charset='utf-8'><title>Sign in with ChatGPT</title>" +
                     "<style>body{font-family:system-ui,sans-serif;padding:3rem;text-align:center;background:#111;color:#eee}</style>" +
                     "</head><body><h2>Signed in with ChatGPT</h2><p>You can close this tab and return to Zen Tab Sorting settings.</p></body></html>";
+                  const htmlBytes = new TextEncoder().encode(html).byteLength;
                   const httpResp =
-                    `HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ${html.length}\r\nConnection: close\r\n\r\n${html}`;
+                    `HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ${htmlBytes}\r\nConnection: close\r\n\r\n${html}`;
                   output.write(httpResp, httpResp.length);
                   output.close();
                 } catch {}
@@ -707,7 +713,7 @@ export const startChatGPTSignInFlow = async ({
     }, 350);
 
     // Timeout after 3 minutes
-    setTimeout(() => {
+    timeoutTimer = setTimeout(() => {
       if (!settled) {
         settled = true;
         cleanup();

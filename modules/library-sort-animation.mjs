@@ -2,7 +2,9 @@ import { GROUP_SELECTOR, groupHeader } from "./sidebar-elements.mjs";
 import { animateSortElement } from "./sort-motion.mjs";
 
 const HTML = "http://www.w3.org/1999/xhtml";
+const SVG = "http://www.w3.org/2000/svg";
 const MAX_PRESENTATIONS = 24;
+const EASE_OUT_EXPO = "cubic-bezier(0.22, 1, 0.36, 1)";
 export const activeLibrarySection = (win) => {
   const library = win.document.querySelector("zen-library");
   if (!library?.constructor.isLibrarySlightlyOpen || library.activeTab !== "spaces") return null;
@@ -45,6 +47,28 @@ const createLayer = (win) => {
   win.document.documentElement.appendChild(layer);
   return layer;
 };
+const createFlightSvgIcon = (doc, isGroup) => {
+  const svg = doc.createElementNS(SVG, "svg");
+  svg.setAttribute("class", isGroup ? "zao-flight-folder" : "zao-flight-tab");
+  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("width", "14");
+  svg.setAttribute("height", "14");
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("stroke", isGroup ? "var(--zao-flight-accent, currentColor)" : "currentColor");
+  svg.setAttribute("stroke-width", "1.4");
+  svg.setAttribute("stroke-linecap", "round");
+  svg.setAttribute("stroke-linejoin", "round");
+  const path = doc.createElementNS(SVG, "path");
+  path.setAttribute(
+    "d",
+    isGroup
+      ? "M1.75 4.25A1.25 1.25 0 0 1 3 3h3.1l1.4 1.5H13a1.25 1.25 0 0 1 1.25 1.25v6A1.25 1.25 0 0 1 13 13H3a1.25 1.25 0 0 1-1.25-1.25z"
+      : "M4 2.25h5.25L12.5 5.5v8.25a1 1 0 0 1-1 1h-7.5a1 1 0 0 1-1-1V3.25a1 1 0 0 1 1-1z M9 2.5v3.25h3.25",
+  );
+  svg.appendChild(path);
+  return svg;
+};
+
 const createPresentation = (win, layer, row) => {
   const ghost = win.document.createElementNS(HTML, "div");
   ghost.className = "zao-library-flight";
@@ -53,9 +77,16 @@ const createPresentation = (win, layer, row) => {
     height: `${Math.max(24, rect.height)}px`, color: appearance.color, font: appearance.font,
     backgroundColor: appearance.background });
   if (appearance.group && appearance.accent) ghost.style.setProperty("--zao-flight-accent", appearance.accent);
-  const icon = win.document.createElementNS(HTML, appearance.image ? "img" : "span");
-  icon.className = appearance.group ? "zao-flight-folder" : "zao-flight-tab";
-  if (appearance.image) { icon.src = appearance.image; icon.alt = ""; }
+  let icon;
+  if (appearance.image) {
+    icon = win.document.createElementNS(HTML, "img");
+    icon.className = appearance.group ? "zao-flight-folder" : "zao-flight-tab";
+    icon.src = appearance.image;
+    icon.alt = "";
+    icon.addEventListener("error", () => icon.replaceWith(createFlightSvgIcon(win.document, appearance.group)), { once: true });
+  } else {
+    icon = createFlightSvgIcon(win.document, appearance.group);
+  }
   const label = win.document.createElementNS(HTML, "span");
   label.textContent = appearance.label;
   ghost.append(icon, label);
@@ -136,11 +167,19 @@ export const animateLibraryChanges = async (win, section, mutate, reducedMotion,
         const dx = flight.target.rect.left - flight.origin.rect.left;
         const dy = flight.target.rect.top - flight.origin.rect.top;
         const scale = Math.max(0.75, Math.min(1.25, flight.target.rect.width / flight.origin.rect.width));
+        const delay = Math.min(index, 10) * 16;
         diagnostics.flyCount++;
         tasks.push(animateSortElement(win, ghost, {
-          transform: ["translate(0, 0) scale(1)", `translate(${dx}px, ${dy}px) scale(${scale}, 1)`], opacity: [0.9, 0.15],
-        }, { duration: 360, delay: Math.min(index, 12) * 18, easing: "cubic-bezier(.22,.8,.2,1)" }, scope.interrupted)
+          transform: ["translate3d(0, 0, 0) scale(1)", `translate3d(${dx}px, ${dy}px, 0) scale(${scale}, 1)`],
+          opacity: [0.95, 0.95, 0],
+          offset: [0, 0.75, 1],
+        }, { duration: 300, delay, easing: EASE_OUT_EXPO, fill: "both" }, scope.interrupted)
           .finally(() => ghost.remove()));
+        tasks.push(animateSortElement(win, flight.target.node, {
+          opacity: [0, 0, 1],
+          transform: ["scale(0.96)", "scale(0.96)", "scale(1)"],
+          offset: [0, 0.75, 1],
+        }, { duration: 300, delay, easing: EASE_OUT_EXPO, fill: "both" }, scope.interrupted));
       }
       await Promise.allSettled(tasks);
       diagnostics.cancelled = scope.cancelled;

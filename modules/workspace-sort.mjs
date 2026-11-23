@@ -49,7 +49,7 @@ export const organizeWorkspaces = (win = globalThis.window) => withSortSession("
       return run;
     }
     recordDebugEvent("SPACE-START", `${snapshot.units.length} Einheiten in ${snapshot.workspaces.length} Spaces`);
-    const plan = await classifyWorkspaceUnitsWithJev({ ...snapshot, fetchImpl: win.fetch.bind(win), signal });
+    const plan = await classifyWorkspaceUnitsWithJev({ ...snapshot, fetchImpl: win.fetch.bind(win), signal, concurrency: 3 });
     const errors = [...plan.errors];
     run.kept = plan.decisions.filter((decision) => !decision.shouldMove).length;
     const moves = plan.decisions.filter((decision) => decision.shouldMove);

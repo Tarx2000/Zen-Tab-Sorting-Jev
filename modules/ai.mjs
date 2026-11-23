@@ -28,8 +28,9 @@ import {
   getAINewGroupBehavior,
   getLocalAIBatchSize,
 } from "./rules.mjs";
-import { getTabTitle, fetchPageSnippet } from "./tabs.mjs";
+import { getTabTitle, fetchPageSnippets } from "./tabs.mjs";
 import { findExistingGroup, expandIfCollapsed, applyGroupColor, findSafeInsertAnchor } from "./groups.mjs";
+import { isSidebarCopy } from "./sidebar-elements.mjs";
 import { showToast } from "./ui-toast.mjs";
 
 // ─── Engine loaders (lazy + cached for the lifetime of the window) ───────────
@@ -610,14 +611,7 @@ export const runPass2Fresh = async (tabs) => {
   // Bounded parallel: fetchPageSnippet has its own 3s timeout per request; we
   // fire them all in parallel and let the slow ones drop to "" silently.
   const snippetT0 = performance.now();
-  const snippets = await Promise.all(reps.map((t) => {
-    const url = t.url || "";
-    // Only fetch the tab's actual http(s) URL. Non-http(s) tabs (about:*, chrome://, file://,
-    // javascript:, data:, blob:) have no real-world snippet — falling back to a synthetic
-    // https://hostname/ URL would fetch the wrong page (someone else's homepage).
-    if (!url.startsWith("http://") && !url.startsWith("https://")) return "";
-    return fetchPageSnippet(url);
-  }));
+  const snippets = await fetchPageSnippets(reps);
   const hitCount = snippets.filter((s) => s).length;
   console.log(
     `${LOG} Local Fresh: fetched page snippets for ${hitCount}/${reps.length} tab(s) in ${Math.round(performance.now() - snippetT0)}ms`
@@ -822,11 +816,24 @@ export const applyPass2 = (pass2Result, workspaceId, rules, options = {}) => {
   let newGroupsCreated = 0;
   let newRulesCreated = 0;
 
-  // Seed the in-use color set from existing rules so new AI groups don't
-  // duplicate them. Updated as each new group is created within this batch.
+  // Seed the in-use color set from existing rules AND live workspace groups so
+  // new AI groups don't duplicate neighbor group colors. Updated as each new
+  // group is created within this batch.
   const usedColors = new Set(
     rules.map((r) => r.color).filter((c) => typeof c === "string" && c.length > 0)
   );
+  if (typeof document !== "undefined" && typeof document.querySelectorAll === "function") {
+    try {
+      const selector = workspaceId
+        ? `tab-group:has(tab[zen-workspace-id="${workspaceId}"]), tab-group[zen-workspace-id="${workspaceId}"]`
+        : "tab-group";
+      for (const groupEl of document.querySelectorAll(selector)) {
+        if (isSidebarCopy(groupEl)) continue;
+        const color = groupEl.color || groupEl.getAttribute?.("color");
+        if (typeof color === "string" && color.trim()) usedColors.add(color.trim());
+      }
+    } catch {}
+  }
 
   // 1. Move tabs into existing rule-matched groups.
   for (const a of pass2Result.assignedToExisting) {
