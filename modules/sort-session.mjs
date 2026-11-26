@@ -11,8 +11,20 @@ export const abortSortSession = (win = globalThis.window) => {
 const BUTTON_SELECTOR = ".zao-organize-button, #tab-wand-button, #zao-sort-workspaces";
 const GROUP_STATE_READY_TIMEOUT_MS = 3000;
 
-const isWandButton = (button) =>
-  button?.id === "tab-wand-button" || button?.getAttribute?.("id") === "tab-wand-button";
+const WAND_BUTTON_SELECTOR = "#tab-wand-button, .zao-organize-button:not([data-zao-library-organize])";
+
+const isWandButton = (button) => {
+  if (!button) return false;
+  if (button.id === "tab-wand-button" || button.getAttribute?.("id") === "tab-wand-button") return true;
+  if (typeof button.matches === "function") {
+    try {
+      if (button.matches(".zao-organize-button:not([data-zao-library-organize])")) return true;
+    } catch {}
+  }
+  const hasOrganizeClass = Boolean(button.classList?.contains?.("zao-organize-button"));
+  const isLibrary = Boolean(button.hasAttribute?.("data-zao-library-organize"));
+  return hasOrganizeClass && !isLibrary;
+};
 
 const buttonMatchesSession = (button, session) => {
   const space = button.closest?.(".zen-library-space[data-uuid], zen-workspace");
@@ -94,7 +106,7 @@ export const withSortSession = async (
   const abort = () => session.controller.abort();
   const onWandAbortClick = (event) => {
     if (event.type === "click" && event.button !== 0) return;
-    const button = event.target?.closest?.("#tab-wand-button");
+    const button = event.target?.closest?.(WAND_BUTTON_SELECTOR);
     if (!button || !buttonMatchesSession(button, session)) return;
     event.preventDefault();
     event.stopImmediatePropagation?.();

@@ -193,9 +193,53 @@ export const CONFIG = {
   RULES_URL: "chrome://sine/content/zen-tab-sorting/rules.json",
   CSS_URL: "chrome://sine/content/zen-tab-sorting/userChrome.css",
 
+  // Built-in Folder Engine & Motion preferences
+  FOLDER_ENGINE_ENABLED_PREF: "extensions.zen-tab-sorting.folder-engine-enabled",
+  FOLDER_TAB_COUNT_PREF: "extensions.zen-tab-sorting.folder-tab-count",
+  FOLDER_GROUP_SHORTCUT_PREF: "extensions.zen-tab-sorting.folder-group-shortcut",
+  ANIMATION_STYLE_PREF: "extensions.zen-tab-sorting.animation-style",
+
+  // Smart default time budgets (seconds) when ai-time-budget has no explicit user value
+  AI_TIME_BUDGET_CLOUD_DEFAULT: 20,
+  AI_TIME_BUDGET_LOCAL_DEFAULT: 90,
+
   // Color picker popover: gap (px) between the popover and its swatch anchor.
   POPOVER_GAP_PX: 8,
 };
+
+// Non-secret, non-rule tuning preferences safe for per-section & global
+// Reset-to-Defaults. NEVER includes API keys, OAuth sessions, domain rules,
+// or skip-domain lists.
+export const RESETTABLE_TUNING_PREFS = Object.freeze([
+  // Section: jev
+  Object.freeze({ section: "jev", pref: CONFIG.AI_JEV_PROVIDER_PREF, type: "string", defaultValue: "typesafe" }),
+  Object.freeze({ section: "jev", pref: CONFIG.AI_JEV_MODEL_PREF, type: "string", defaultValue: CONFIG.AI_JEV_TYPESAFE_MODEL_DEFAULT }),
+  Object.freeze({ section: "jev", pref: CONFIG.AI_JEV_MIN_PROB_PREF, type: "string", defaultValue: "0.70" }),
+  Object.freeze({ section: "jev", pref: CONFIG.AI_JEV_MIN_MARGIN_PREF, type: "string", defaultValue: "0.15" }),
+  // Section: llm
+  Object.freeze({ section: "llm", pref: CONFIG.AI_FALLBACK_PROVIDER_PREF, type: "string", defaultValue: "chatgpt" }),
+  Object.freeze({ section: "llm", pref: CONFIG.AI_REASONING_EFFORT_PREF, type: "string", defaultValue: CONFIG.AI_REASONING_EFFORT_DEFAULT }),
+  Object.freeze({ section: "llm", pref: CONFIG.AI_TIME_BUDGET_PREF, type: "string", defaultValue: "20" }),
+  Object.freeze({ section: "llm", pref: CONFIG.AI_OLLAMA_WARMUP_PREF, type: "bool", defaultValue: true }),
+  Object.freeze({ section: "llm", pref: CONFIG.AI_LOCAL_BATCH_SIZE_PREF, type: "string", defaultValue: String(CONFIG.AI_LOCAL_BATCH_SIZE_DEFAULT) }),
+  // Section: behavior
+  Object.freeze({ section: "behavior", pref: CONFIG.AI_SORT_MODE_PREF, type: "string", defaultValue: "rules-first" }),
+  Object.freeze({ section: "behavior", pref: CONFIG.AI_NEW_GROUP_BEHAVIOR_PREF, type: "string", defaultValue: "transient" }),
+  Object.freeze({ section: "behavior", pref: CONFIG.AI_EXISTING_BEHAVIOR_PREF, type: "string", defaultValue: "transient" }),
+  Object.freeze({ section: "behavior", pref: CONFIG.AI_RESPECT_SPACE_CONTAINERS_PREF, type: "bool", defaultValue: true }),
+  Object.freeze({ section: "behavior", pref: CONFIG.AI_WORKSPACE_SORT_STRICTNESS_PREF, type: "string", defaultValue: "balanced" }),
+  Object.freeze({ section: "behavior", pref: CONFIG.USE_DOMAIN_RULES_PREF, type: "bool", defaultValue: false }),
+  Object.freeze({ section: "behavior", pref: CONFIG.STRICT_RULES_PREF, type: "bool", defaultValue: false }),
+  // Section: appearance
+  Object.freeze({ section: "appearance", pref: CONFIG.NEW_GROUP_COLOR_STRENGTH_PREF, type: "string", defaultValue: "20" }),
+  Object.freeze({ section: "appearance", pref: CONFIG.MINIMAL_STYLE_PREF, type: "bool", defaultValue: false }),
+  Object.freeze({ section: "appearance", pref: CONFIG.ANIMATION_STYLE_PREF, type: "string", defaultValue: "fluid" }),
+  Object.freeze({ section: "appearance", pref: CONFIG.FOLDER_ENGINE_ENABLED_PREF, type: "bool", defaultValue: true }),
+  Object.freeze({ section: "appearance", pref: CONFIG.FOLDER_TAB_COUNT_PREF, type: "bool", defaultValue: true }),
+  Object.freeze({ section: "appearance", pref: CONFIG.FOLDER_GROUP_SHORTCUT_PREF, type: "string", defaultValue: "Alt+G" }),
+  // Section: diagnostics
+  Object.freeze({ section: "diagnostics", pref: CONFIG.DEBUG_MODE_PREF, type: "bool", defaultValue: false }),
+]);
 
 // Zen uses U+200B (zero-width space) as the `label` attribute placeholder for a
 // brand-new "Create tab group" that the user hasn't named yet. It's invisible in

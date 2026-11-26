@@ -1,0 +1,374 @@
+/* Zen Tab Sorting — Settings UI stylesheet (injected into about:preferences).
+   Complements userChrome.css with styles for:
+   - ATG conflict detection banner
+   - Unified Provider Card (18 presets, masked secret store, searchable model combobox,
+     Ollama status & pull progress, collapsible Fallback Chain & Per-Task Profiles)
+   - Manual OAuth callback URL fallback drawer
+   - Standard vs Fine-Tuning collapsible drawers + per-section & global Reset-to-Defaults */
+
+.zao-atg-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, #f59e0b 55%, transparent);
+  background: color-mix(in srgb, #f59e0b 14%, transparent);
+  color: inherit;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.zao-atg-banner-icon {
+  flex: 0 0 auto;
+  font-weight: 700;
+  color: #f59e0b;
+  font-size: 15px;
+  line-height: 1.2;
+}
+
+.zao-atg-banner-text {
+  flex: 1 1 auto;
+}
+
+/* Section header with Reset-to-Default action */
+.zao-section-header-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.zao-section-reset-btn {
+  appearance: none;
+  border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+  background: color-mix(in srgb, currentColor 5%, transparent);
+  color: inherit;
+  border-radius: 7px;
+  padding: 4px 10px;
+  font-size: 11.5px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  opacity: 0.85;
+  transition: opacity 120ms ease, background 120ms ease;
+}
+
+.zao-section-reset-btn:hover {
+  opacity: 1;
+  background: color-mix(in srgb, currentColor 11%, transparent);
+}
+
+.zao-section-reset-btn:focus-visible {
+  outline: 2px solid var(--zen-primary-color, AccentColor);
+  outline-offset: 2px;
+}
+
+/* Unified Provider Card */
+.zao-unified-provider-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 12px 0;
+  padding: 14px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, currentColor 16%, transparent);
+  background: color-mix(in srgb, currentColor 3%, transparent);
+}
+
+.zao-provider-card-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.zao-provider-card-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 650;
+  font-size: 14px;
+}
+
+.zao-provider-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+  background: color-mix(in srgb, currentColor 7%, transparent);
+}
+
+.zao-provider-badge[data-tone="ok"] {
+  border-color: color-mix(in srgb, #22c55e 45%, transparent);
+  background: color-mix(in srgb, #22c55e 14%, transparent);
+  color: light-dark(#15803d, #86efac);
+}
+
+.zao-provider-badge[data-tone="warn"] {
+  border-color: color-mix(in srgb, #f59e0b 45%, transparent);
+  background: color-mix(in srgb, #f59e0b 14%, transparent);
+  color: light-dark(#b45309, #fcd34d);
+}
+
+.zao-provider-badge[data-tone="err"] {
+  border-color: color-mix(in srgb, #ef4444 45%, transparent);
+  background: color-mix(in srgb, #ef4444 14%, transparent);
+  color: light-dark(#b91c1c, #fca5a5);
+}
+
+.zao-provider-grid {
+  display: grid;
+  grid-template-columns: minmax(120px, 150px) minmax(0, 1fr);
+  gap: 10px 12px;
+  align-items: center;
+}
+
+.zao-provider-grid label {
+  font-size: 12.5px;
+  opacity: 0.9;
+}
+
+.zao-provider-field-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.zao-provider-field-row input,
+.zao-provider-field-row select {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 6px 8px;
+  border-radius: 7px;
+  border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+  background: color-mix(in srgb, Canvas 90%, transparent);
+  color: inherit;
+  font-size: 12.5px;
+}
+
+.zao-get-key-link {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: var(--zen-primary-color, AccentColor);
+  text-decoration: none;
+  padding: 4px 6px;
+  border-radius: 6px;
+  white-space: nowrap;
+}
+
+.zao-get-key-link:hover {
+  text-decoration: underline;
+  background: color-mix(in srgb, var(--zen-primary-color, AccentColor) 10%, transparent);
+}
+
+/* Searchable Model Combobox */
+.zao-model-combobox {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.zao-model-combobox-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.zao-model-combobox-input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.zao-model-dropdown {
+  max-height: 210px;
+  overflow-y: auto;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+  background: var(--arrowpanel-background, Canvas);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.zao-model-dropdown[hidden] {
+  display: none !important;
+}
+
+.zao-model-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.zao-model-option:hover,
+.zao-model-option[aria-selected="true"] {
+  background: color-mix(in srgb, var(--zen-primary-color, AccentColor) 18%, transparent);
+}
+
+.zao-model-option-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.zao-model-fav-btn {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  padding: 2px 5px;
+  border-radius: 4px;
+  opacity: 0.7;
+  font-size: 13px;
+}
+
+.zao-model-fav-btn:hover,
+.zao-model-fav-btn[aria-pressed="true"] {
+  opacity: 1;
+  color: #f59e0b;
+}
+
+/* Ollama Pull row */
+.zao-ollama-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.zao-ollama-progress {
+  flex: 1 1 160px;
+  height: 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, currentColor 14%, transparent);
+  overflow: hidden;
+}
+
+.zao-ollama-progress-bar {
+  height: 100%;
+  width: 0%;
+  background: var(--zen-primary-color, AccentColor);
+  transition: width 150ms ease;
+}
+
+/* Collapsible Drawers (Fallback Chain / Per-Task Profiles / Manual OAuth / Fine-Tuning) */
+.zao-provider-drawer,
+.zao-oauth-manual-fallback,
+.zao-fine-tuning-details {
+  border: 1px solid color-mix(in srgb, currentColor 14%, transparent);
+  border-radius: 9px;
+  padding: 10px 12px;
+  background: color-mix(in srgb, currentColor 2%, transparent);
+}
+
+.zao-provider-drawer summary,
+.zao-oauth-manual-fallback summary,
+.zao-fine-tuning-details summary {
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+}
+
+.zao-drawer-body {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.zao-oauth-manual-fallback {
+  flex-basis: 100%;
+  margin-top: 4px;
+}
+
+.zao-oauth-callback-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.zao-oauth-callback-row input {
+  flex: 1 1 240px;
+  min-width: 0;
+  padding: 6px 8px;
+  border-radius: 7px;
+  border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+  background: color-mix(in srgb, Canvas 90%, transparent);
+  color: inherit;
+}
+
+/* Global Reset-to-Defaults Bar */
+.zao-global-reset-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.zao-global-reset-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.zao-reset-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, #f59e0b 45%, transparent);
+  background: color-mix(in srgb, #f59e0b 10%, transparent);
+  font-size: 12.5px;
+}
+
+.zao-reset-confirm[hidden] {
+  display: none !important;
+}
+
+.zao-consent-notice {
+  flex-basis: 100%;
+  font-size: 12px;
+  opacity: 0.85;
+  padding: 6px 10px;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--zen-primary-color, AccentColor) 12%, transparent);
+}
+
+@media (max-width: 700px) {
+  .zao-provider-grid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 6px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .zao-section-reset-btn,
+  .zao-ollama-progress-bar {
+    transition: none !important;
+  }
+}

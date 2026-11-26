@@ -243,9 +243,9 @@ test("Given a server that rejects max_tokens When a request is sent Then it retr
       assert.equal(calls[1].body.reasoning_effort, "none");
       assert.equal("temperature" in calls[1].body, false);
 
-      // The detected shape is cached, so the second call does not pay for the
-      // rejected request again.
-      const second = await testProviderConnection(settings);
+      // The detected shape is cached, so a subsequent call (without forced cache
+      // reset) does not pay for the rejected request again.
+      const second = await testProviderConnection(settings, { resetCache: false });
       assert.equal(second.ok, true);
       assert.equal(calls.length, 3);
       assert.equal(calls[2].body.max_completion_tokens, 64);

@@ -1,6 +1,8 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { CONFIG } from "../modules/config.mjs";
+import { PROVIDER_PRESETS } from "../modules/provider-registry.mjs";
 
 const REQUIRED_SECTIONS = [
   "Group Rules",
@@ -10,7 +12,11 @@ const REQUIRED_SECTIONS = [
   "AI Sorting",
 ];
 
-const REQUIRED_LLM_VALUES = ["chatgpt", "primalabs", "ollama", "openai", "gemini", "custom"];
+const REQUIRED_LLM_VALUES = [
+  "off",
+  ...PROVIDER_PRESETS.map((preset) => preset.id),
+];
+
 const REQUIRED_PROPERTIES = [
   "extensions.zen-auto-organize.new-group-color-strength",
   "extensions.zen-auto-organize.ai-jev-provider",
@@ -27,7 +33,21 @@ const REQUIRED_PROPERTIES = [
   "extensions.zen-auto-organize.ai-custom-model",
   "extensions.zen-auto-organize.ai-custom-endpoint",
   "extensions.zen-auto-organize.ai-custom-format",
+  "extensions.zen-auto-organize.ai-respect-space-containers",
+  "extensions.zen-auto-organize.ai-workspace-sort-strictness",
+  "extensions.zen-tab-sorting.folder-engine-enabled",
+  "extensions.zen-tab-sorting.folder-tab-count",
+  "extensions.zen-tab-sorting.folder-group-shortcut",
+  "extensions.zen-tab-sorting.animation-style",
 ];
+
+const SECRET_PROPERTY_PATTERN = /(?:api-key|token|secret|password|session)/i;
+
+const KNOWN_CONFIG_PREFS = new Set(
+  Object.entries(CONFIG)
+    .filter(([key, val]) => key.endsWith("_PREF") && typeof val === "string")
+    .map(([, val]) => val),
+);
 
 const readPreferences = (rootDir, errors) => {
   try {
@@ -72,17 +92,38 @@ export const validatePreferences = (rootDir = process.cwd()) => {
   if (findEntry(preferences, "extensions.zen-auto-organize.ai-engine")) {
     errors.push("the hybrid pipeline is fixed; do not expose an AI engine selector");
   }
+
   const llm = findEntry(preferences, "extensions.zen-auto-organize.ai-fallback-provider");
   const llmValues = optionValues(llm);
   for (const value of REQUIRED_LLM_VALUES) {
     if (!llmValues.includes(value)) errors.push(`LLM provider missing option ${value}`);
   }
-  if (llmValues.some(value => ["off", "none", "local"].includes(value))) {
-    errors.push("LLM options must support the mandatory two-stage pipeline");
+  if (llmValues.some((value) => ["none", "local"].includes(value))) {
+    errors.push("LLM options must not include deprecated none/local values (use 'off' to disable Stage 2)");
   }
+
   for (const entry of preferences) {
     for (const option of entry.options || []) {
-      if (/[&<>\"]/.test(option.label || "")) errors.push(`XML-unsafe dropdown label in ${entry.property}`);
+      if (/[&<>"]/.test(option.label || "")) {
+        errors.push(`XML-unsafe dropdown label in ${entry.property}`);
+      }
+    }
+
+    if (typeof entry?.property === "string") {
+      // Cross-check every preferences.json property against modules/config.mjs *_PREF constants
+      if (!KNOWN_CONFIG_PREFS.has(entry.property)) {
+        errors.push(`preference ${entry.property} is not declared as a *_PREF constant in modules/config.mjs`);
+      }
+
+      // Validate secret fields: must be string type with an empty defaultValue
+      if (SECRET_PROPERTY_PATTERN.test(entry.property)) {
+        if (entry.type !== "string") {
+          errors.push(`secret preference ${entry.property} must have type "string"`);
+        }
+        if (entry.defaultValue !== "") {
+          errors.push(`secret preference ${entry.property} must have an empty defaultValue ""`);
+        }
+      }
     }
   }
 
@@ -110,5 +151,5 @@ if (isCli) {
     console.error(result.errors.join("\n"));
     process.exit(1);
   }
-  console.log("validate-preferences: PASS sections/provider controls/secret fields");
+  console.log("validate-preferences: PASS sections/provider controls/secret fields/config cross-check");
 }

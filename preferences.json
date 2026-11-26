@@ -74,24 +74,76 @@
     "placeholder": false,
     "options": [
       {
+        "label": "Off — Jev existing groups only",
+        "value": "off"
+      },
+      {
         "label": "ChatGPT subscription",
         "value": "chatgpt"
       },
       {
-        "label": "PrimaLabs API",
-        "value": "primalabs"
+        "label": "OpenAI",
+        "value": "openai"
       },
       {
-        "label": "OpenAI-compatible API",
-        "value": "openai"
+        "label": "Anthropic (Claude)",
+        "value": "anthropic"
       },
       {
         "label": "Google Gemini",
         "value": "gemini"
       },
       {
+        "label": "Azure OpenAI",
+        "value": "azure-openai"
+      },
+      {
+        "label": "OpenRouter",
+        "value": "openrouter"
+      },
+      {
+        "label": "Groq",
+        "value": "groq"
+      },
+      {
+        "label": "Mistral",
+        "value": "mistral"
+      },
+      {
+        "label": "DeepSeek",
+        "value": "deepseek"
+      },
+      {
+        "label": "xAI (Grok)",
+        "value": "xai"
+      },
+      {
+        "label": "Perplexity",
+        "value": "perplexity"
+      },
+      {
+        "label": "GitHub Models",
+        "value": "github-models"
+      },
+      {
+        "label": "PrimaLabs API",
+        "value": "primalabs"
+      },
+      {
         "label": "Ollama (local LLM)",
         "value": "ollama"
+      },
+      {
+        "label": "LM Studio (local)",
+        "value": "lmstudio"
+      },
+      {
+        "label": "llama.cpp Server (local)",
+        "value": "llamacpp"
+      },
+      {
+        "label": "vLLM (local)",
+        "value": "vllm"
       },
       {
         "label": "Custom endpoint",
@@ -250,8 +302,15 @@
     "type": "string",
     "label": "Time limit for the AI pass in seconds",
     "property": "extensions.zen-auto-organize.ai-time-budget",
-    "defaultValue": "10",
-    "placeholder": "10"
+    "defaultValue": "20",
+    "placeholder": "20 (cloud) / 90 (local)"
+  },
+  {
+    "type": "string",
+    "label": "Local AI batch size",
+    "property": "extensions.zen-auto-organize.ai-local-batch-size",
+    "defaultValue": "30",
+    "placeholder": "30"
   },
   {
     "type": "separator",
@@ -292,6 +351,33 @@
       {
         "label": "Create and save a domain rule",
         "value": "auto-add"
+      }
+    ]
+  },
+  {
+    "type": "checkbox",
+    "label": "Respect Space container locks when sorting between Spaces",
+    "property": "extensions.zen-auto-organize.ai-respect-space-containers",
+    "defaultValue": true
+  },
+  {
+    "type": "dropdown",
+    "label": "Cross-Space sorting strictness",
+    "property": "extensions.zen-auto-organize.ai-workspace-sort-strictness",
+    "defaultValue": "balanced",
+    "placeholder": false,
+    "options": [
+      {
+        "label": "Balanced (recommended)",
+        "value": "balanced"
+      },
+      {
+        "label": "Conservative — require stronger lead before moving",
+        "value": "conservative"
+      },
+      {
+        "label": "Aggressive — move on smaller lead",
+        "value": "aggressive"
       }
     ]
   },
@@ -348,6 +434,46 @@
     "label": "Minimal style — strip group colors and match Zen's address-bar styling",
     "property": "extensions.zen-auto-organize.minimal-style",
     "defaultValue": false
+  },
+  {
+    "type": "dropdown",
+    "label": "Sorting animation style",
+    "property": "extensions.zen-tab-sorting.animation-style",
+    "defaultValue": "fluid",
+    "placeholder": false,
+    "options": [
+      {
+        "label": "Fluid — spring motion choreography (recommended)",
+        "value": "fluid"
+      },
+      {
+        "label": "Minimal — subtle quick transitions",
+        "value": "minimal"
+      },
+      {
+        "label": "Off — instant updates without animation",
+        "value": "off"
+      }
+    ]
+  },
+  {
+    "type": "checkbox",
+    "label": "Enable built-in Folder Engine (tab count badges, folder icons, keyboard shortcut)",
+    "property": "extensions.zen-tab-sorting.folder-engine-enabled",
+    "defaultValue": true
+  },
+  {
+    "type": "checkbox",
+    "label": "Show tab count badge on collapsed folders",
+    "property": "extensions.zen-tab-sorting.folder-tab-count",
+    "defaultValue": true
+  },
+  {
+    "type": "string",
+    "label": "Keyboard shortcut to group selected tabs",
+    "property": "extensions.zen-tab-sorting.folder-group-shortcut",
+    "defaultValue": "Alt+G",
+    "placeholder": "Alt+G"
   },
   {
     "type": "separator",
