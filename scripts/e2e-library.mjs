@@ -6,12 +6,16 @@ import { writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertConnectedProfile, delay, launchZen, stopZen } from "./zen-e2e-driver.mjs";
-import { createLabProfile, findDefaultSineProfile, removeLabProfile, scenarioPrefs, writeUserPrefs } from "./zen-e2e-profile.mjs";
+import { createLabProfile, findDefaultSineProfile, removeLabProfile, resolveZenBinary, scenarioPrefs, writeUserPrefs } from "./zen-e2e-profile.mjs";
 import { MarionetteClient, reserveTcpPort } from "./zen-e2e-marionette.mjs";
 import { startFixturePageServer } from "./zen-e2e-servers.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const lab = await createLabProfile(root, await findDefaultSineProfile());
+const zenBinaryArg = process.argv.indexOf("--zen-binary");
+const zenBinary = resolveZenBinary(zenBinaryArg >= 0 ? process.argv[zenBinaryArg + 1] : "");
+const sineProfileArg = process.argv.indexOf("--sine-profile");
+const sineProfile = await findDefaultSineProfile(sineProfileArg >= 0 ? process.argv[sineProfileArg + 1] : "");
+const lab = await createLabProfile(root, sineProfile);
 const port = await reserveTcpPort();
 const pages = await startFixturePageServer();
 let zen, client;
@@ -44,7 +48,7 @@ try {
       clientId: "library-test-client", accessToken: "expired-test-access", refreshToken: "test-rotation-1", expiresAt: 1,
     })],
   ]);
-  zen = launchZen({ options: { headed: process.argv.includes("--headed"), zenBinary: process.env.ZEN_BINARY || "/Applications/Zen.app/Contents/MacOS/zen" }, profileDir: lab.profileDir, marionettePort: port });
+  zen = launchZen({ options: { headed: process.argv.includes("--headed"), zenBinary }, profileDir: lab.profileDir, marionettePort: port });
   client = await MarionetteClient.connect(port);
   await client.newSession();
   await client.setScriptTimeout();

@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
 
+import { resolveZenBinary } from "./zen-e2e-profile.mjs";
+
 const SENSITIVE_ENV_TOKEN = /(^|_)(API[-_]?KEY|TOKEN|SECRET|PASSWORD|CREDENTIALS?|AUTH|PRIVATE[-_]?KEY)($|_)/i;
 const PROVIDER_ENV_PREFIX = /^(OPENROUTER|OPENAI|ANTHROPIC|GOOGLE|GEMINI)_/i;
 
@@ -15,7 +17,7 @@ export const buildZenEnv = (sourceEnv = process.env, headed = false, marionetteP
   return env;
 };
 
-export const launchZen = ({ options, profileDir, marionettePort }) => {
+export const launchZen = ({ options = {}, profileDir, marionettePort }) => {
   const args = [
     "--new-instance",
     "--no-remote",
@@ -27,7 +29,8 @@ export const launchZen = ({ options, profileDir, marionettePort }) => {
   ];
   if (!options.headed) args.unshift("--headless");
   const env = buildZenEnv(process.env, options.headed, marionettePort);
-  const zen = spawn(options.zenBinary, args, { stdio: ["ignore", "pipe", "pipe"], env });
+  const binary = resolveZenBinary(options.zenBinary);
+  const zen = spawn(binary, args, { stdio: ["ignore", "pipe", "pipe"], env });
   const lines = [];
   const collect = (chunk) => {
     for (const line of String(chunk).split(/\r?\n/).filter(Boolean)) {
@@ -51,7 +54,7 @@ export const assertConnectedProfile = async (marionette, expectedProfileDir) => 
 };
 
 export const stopZen = async (zen) => {
-  if (zen.exitCode != null) return;
+  if (!zen || zen.exitCode != null) return;
   zen.kill("SIGTERM");
   await new Promise((resolvePromise) => {
     const timer = setTimeout(() => {
@@ -65,29 +68,38 @@ export const stopZen = async (zen) => {
   });
 };
 
-export const driveZenScenario = async (marionette, scenario) => {
+export const driveZenScenario = async (marionette, scenario, { fallbackToCommand = false } = {}) => {
   await waitForZenReady(marionette);
   await prepareTabs(marionette, scenario);
   await waitForWorkspaceUrls(marionette, scenario.tabs.length);
-  await clickWand(marionette);
+  await clickWand(marionette, { fallbackToCommand });
   return await waitForSortedState(marionette, scenario.name, scenario.tabs.length);
 };
 
 export const delay = (ms) => new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
 
-const waitForZenReady = async (marionette) => waitUntil(async () => {
+export const waitForZenReady = async (marionette) => waitUntil(async () => {
   const state = await marionette.execute(`
     const win = Services.wm.getMostRecentWindow("navigator:browser");
     return {
       hasSineAPI: !!win?.SineAPI,
-      hasButton: !!win?.document?.getElementById("tab-wand-button"),
+      hasButton: !!win?.document?.querySelector(".zao-organize-button, #tab-wand-button"),
       hasCommand: !!win?.document?.getElementById("cmd_zenAutoOrganize"),
       hasListener: !!win?.document?.querySelector("commandset#zenCommandSet")?._zaoCommandListener,
       hasHarness: typeof win?.ZenTabSorting?.handleOrganizeClick === "function",
       hasBrowser: !!win?.gBrowser?.tabs,
     };
   `);
-  return { done: state.hasSineAPI && state.hasButton && state.hasCommand && state.hasListener && state.hasHarness && state.hasBrowser, state };
+  return {
+    done:
+      state.hasSineAPI &&
+      state.hasButton &&
+      state.hasCommand &&
+      state.hasListener &&
+      state.hasHarness &&
+      state.hasBrowser,
+    state,
+  };
 }, "Zen did not load Sine/Zen Tab Sorting");
 
 const prepareTabs = async (marionette, scenario) => {
@@ -125,21 +137,75 @@ const waitForWorkspaceUrls = async (marionette, expectedTabs) => waitUntil(async
   return { done: state.fixtureCount >= expectedTabs, state };
 }, "Zen did not attach fixture URLs to tabs");
 
-const clickWand = async (marionette) => {
+/**
+ * Drive a real UI click on `.zao-organize-button` / `#tab-wand-button`.
+ * Falls back to command invocation only when `fallbackToCommand` is explicitly true.
+ */
+export const clickWand = async (marionette, { fallbackToCommand = false } = {}) => {
   const result = await marionette.executeAsync(`
     const done = arguments[arguments.length - 1];
+    const fallbackToCommand = ${JSON.stringify(Boolean(fallbackToCommand))};
     const win = Services.wm.getMostRecentWindow("navigator:browser");
-    win.ZenTabSorting.handleOrganizeClick()
-      .then(() => done({ directHandler: true }))
-      .catch((error) => done({ error: error?.stack || error?.message || String(error) }));
+    const doc = win?.document;
+    if (!doc) {
+      done({ error: "No active navigator:browser document" });
+      return;
+    }
+
+    const activeWs = win.gZenWorkspaces?.activeWorkspaceElement;
+    const candidates = [
+      ...(activeWs ? activeWs.querySelectorAll(".zao-organize-button, #tab-wand-button") : []),
+      ...doc.querySelectorAll(".zao-organize-button, #tab-wand-button"),
+    ].filter((el, idx, arr) => el && el.isConnected && !el.closest("zen-library") && arr.indexOf(el) === idx);
+
+    const visibleButton = candidates.find((el) => {
+      if (el.disabled) return false;
+      const rect = el.getBoundingClientRect?.();
+      return rect && rect.width > 0 && rect.height > 0;
+    }) || candidates.find((el) => !el.disabled);
+
+    if (visibleButton) {
+      visibleButton.dispatchEvent(new win.MouseEvent("click", {
+        bubbles: true,
+        cancelable: true,
+        button: 0,
+        view: win,
+      }));
+      done({ clickedButton: true, buttonId: visibleButton.id || "", className: visibleButton.className || "" });
+      return;
+    }
+
+    if (!fallbackToCommand) {
+      done({ error: "No enabled .zao-organize-button / #tab-wand-button found to click (pass fallbackToCommand: true to invoke command directly)" });
+      return;
+    }
+
+    const cmd = doc.getElementById("cmd_zenAutoOrganize");
+    if (cmd && typeof cmd.doCommand === "function") {
+      cmd.doCommand();
+      done({ commandFallback: true });
+      return;
+    }
+
+    if (typeof win.ZenTabSorting?.handleOrganizeClick === "function") {
+      win.ZenTabSorting.handleOrganizeClick()
+        .then(() => done({ commandFallback: true, directHandler: true }))
+        .catch((error) => done({ error: error?.stack || error?.message || String(error) }));
+      return;
+    }
+
+    done({ error: "Neither wand button nor fallback command is available" });
   `);
   if (result?.error) throw new Error(result.error);
-  if (!result?.directHandler) throw new Error(`Zen handler did not report completion: ${JSON.stringify(result)}`);
+  if (!result?.clickedButton && !result?.commandFallback) {
+    throw new Error(`Zen wand activation did not succeed: ${JSON.stringify(result)}`);
+  }
+  return result;
 };
 
 const waitForSortedState = async (marionette, scenarioName, expectedTabs) => waitUntil(async () => {
   const state = await collectSortedState(marionette);
-  return { done: !state.thinking && state.groupedTabs >= expectedTabs, state };
+  return { done: !state.thinking && !state.sessionActive && state.groupedTabs >= expectedTabs, state };
 }, `${scenarioName} did not produce the expected tab groups`);
 
 const collectSortedState = async (marionette) => await marionette.execute(`
@@ -157,11 +223,13 @@ const collectSortedState = async (marionette) => await marionette.execute(`
       url: spec,
     };
   };
-  const groups = [...win.document.querySelectorAll("tab-group")].map((group) => ({
-    label: group.getAttribute("label") || "",
-    tabs: group.querySelectorAll("tab").length,
-    tabItems: [...group.querySelectorAll("tab")].map(tabState),
-  }));
+  const groups = [...win.document.querySelectorAll("tab-group:not([split-view-group])")]
+    .filter((group) => !group.closest("zen-library"))
+    .map((group) => ({
+      label: group.getAttribute("label") || "",
+      tabs: group.querySelectorAll("tab").length,
+      tabItems: [...group.querySelectorAll("tab")].map(tabState),
+    }));
   const workspaceId = win.gZenWorkspaces.activeWorkspace;
   const workspaceTabs = [...win.gBrowser.tabs].filter((tab) => tab.getAttribute("zen-workspace-id") === workspaceId);
   const eligibleLikeTabs = workspaceTabs.filter((tab) =>
@@ -171,6 +239,7 @@ const collectSortedState = async (marionette) => await marionette.execute(`
     !tab.hasAttribute("zen-glance-tab") &&
     !tab.hasAttribute("zen-essential")
   );
+  const wandButton = win.document.querySelector(".zao-organize-button, #tab-wand-button");
   return {
     groups,
     groupedTabs: groups.reduce((sum, group) => sum + group.tabs, 0),
@@ -182,18 +251,23 @@ const collectSortedState = async (marionette) => await marionette.execute(`
     lastRun: win.ZenTabSortingLastRun || null,
     sampleUrls: workspaceTabs.slice(0, 6).map((tab) => win.gBrowser.getBrowserForTab(tab)?.currentURI?.spec || ""),
     aiEngine: Services.prefs.getStringPref("extensions.zen-auto-organize.ai-engine", "missing"),
+    aiFallbackProvider: Services.prefs.getStringPref("extensions.zen-auto-organize.ai-fallback-provider", "missing"),
     aiSortMode: Services.prefs.getStringPref("extensions.zen-auto-organize.ai-sort-mode", "missing"),
     aiConsent: Services.prefs.getBoolPref("extensions.zen-auto-organize.ai-provider-consent", false),
     customEndpoint: Services.prefs.getStringPref("extensions.zen-auto-organize.ai-custom-endpoint", "missing"),
-    thinking: !!win.document.getElementById("tab-wand-button")?.classList.contains("zao-thinking"),
+    thinking: Boolean(
+      wandButton?.classList?.contains("zao-thinking") ||
+      wandButton?.getAttribute("aria-busy") === "true"
+    ),
+    sessionActive: Boolean(win._zaoSortSession),
     hasCommand: !!win.document.getElementById("cmd_zenAutoOrganize"),
     hasListener: !!win.document.querySelector("commandset#zenCommandSet")?._zaoCommandListener,
     tabs: win.gBrowser.tabs.length,
   };
 `);
 
-const waitUntil = async (probe, message) => {
-  const deadline = Date.now() + 30000;
+export const waitUntil = async (probe, message, timeoutMs = 30000) => {
+  const deadline = Date.now() + timeoutMs;
   let last = null;
   while (Date.now() < deadline) {
     const result = await probe();
