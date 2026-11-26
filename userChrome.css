@@ -1,3 +1,5 @@
+@import url("styles/folder-engine.css");
+
 /* Zen Tab Sorting — Chrome styles, motion layers, toast, preview modal,
    and Sine settings dialog widgets.
    Borders/backgrounds derive from currentColor / Canvas via color-mix so

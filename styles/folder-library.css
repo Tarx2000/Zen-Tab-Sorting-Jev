@@ -1,0 +1,97 @@
+/* Zen Tab Sorting — Built-in Folder Engine, Zen Library (Spaces tab) shadow-DOM styles.
+   Portions adapted from Advanced Tab Groups (`folder-look.library.css` & `zen-library.css`,
+   MIT, Copyright (c) 2025 12th-devs / imthi).
+   Injected into `<zen-library>` shadowRoot by `modules/folder-engine.mjs`.
+   Uses clean display/visibility toggling without arbitrary max-height hacks. */
+
+.library-workspace-tab-group {
+  --atg-tab-group-color: var(--ws-primary-color, var(--zen-primary-color));
+  --atg-tab-group-stroke: light-dark(
+    color-mix(in srgb, var(--zen-primary-color) 60%, black),
+    color-mix(in srgb, var(--zen-colors-primary) 20%, var(--toolbox-textcolor))
+  );
+  --atg-tab-group-textcolor: var(--tab-selected-textcolor);
+  flex-shrink: 0;
+  width: 100%;
+  margin-block: 4px 2px;
+}
+
+.library-workspace-tab-group-content {
+  margin-inline-start: 12px;
+  overflow: visible;
+  position: relative;
+}
+
+.library-workspace-tab-group-content::after {
+  content: "";
+  position: absolute;
+  left: -2px;
+  top: 0;
+  width: 2px;
+  height: 100%;
+  pointer-events: none;
+  background: var(--atg-tab-group-color);
+  opacity: 0.65;
+}
+
+.library-workspace-tab-group.collapsed .library-workspace-tab-group-content .library-workspace-item:not(.selected):not(.atg-folder-active) {
+  display: none !important;
+}
+
+.library-workspace-tab-group[atg-folder-look] {
+  --atg-folder-tint: var(--atg-tab-group-color, var(--zen-primary-color));
+  --zen-folder-behind-bgcolor: light-dark(
+    color-mix(in srgb, var(--atg-folder-tint) 60%, gray),
+    color-mix(in srgb, var(--atg-folder-tint) 60%, #c1c1c1)
+  );
+  --zen-folder-front-bgcolor: light-dark(
+    color-mix(in srgb, var(--atg-folder-tint), white 70%),
+    color-mix(in srgb, var(--atg-folder-tint), black 40%)
+  );
+  --zen-folder-stroke: light-dark(
+    color-mix(in srgb, var(--atg-folder-tint) 50%, black),
+    color-mix(in srgb, var(--atg-folder-tint) 35%, #ebebeb)
+  );
+}
+
+.library-workspace-tab-group[atg-folder-look] > .library-workspace-item.atg-tab-group {
+  gap: 0 !important;
+  padding-inline-start: 0 !important;
+  min-height: var(--tab-min-height) !important;
+  height: auto !important;
+  margin-block: 2px !important;
+  border-radius: 12px !important;
+  font-weight: 600 !important;
+  color: inherit !important;
+  overflow: visible !important;
+}
+
+.library-workspace-tab-group[atg-folder-look] > .library-workspace-item.atg-tab-group > .atg-tab-group-icon {
+  display: none !important;
+}
+
+.library-workspace-tab-group[atg-folder-look] > .library-workspace-item.atg-tab-group > .item-label {
+  font-weight: 600 !important;
+  padding-inline-start: 32px !important;
+  color: inherit !important;
+  mask-image: linear-gradient(to left, transparent, black var(--tab-label-mask-size, 2em)) !important;
+}
+
+/* Collapsed folders keep active tabs (and nested folders holding them) visible */
+.library-workspace-tab-group.collapsed .library-workspace-tab-group-content .library-workspace-item.atg-folder-active {
+  display: flex !important;
+  min-height: var(--tab-min-height) !important;
+  opacity: 1 !important;
+  margin-block: 2px !important;
+  pointer-events: auto !important;
+}
+
+.library-workspace-tab-group.collapsed .library-workspace-tab-group-content > .library-workspace-tab-group:has(.library-workspace-item.atg-folder-active) {
+  display: block !important;
+  margin-block: 4px 2px !important;
+}
+
+.library-workspace-tab-group[atg-folder-look] > .library-workspace-item.atg-tab-group > .atg-tab-group-close-button,
+.library-workspace-tab-group[atg-folder-look] > .library-workspace-item.atg-tab-group > .atg-tab-group-folder-button {
+  display: none !important;
+}

@@ -5,8 +5,8 @@ import { classifyExistingGroupsRemoteBatch, runPass2Remote, runPass2RemoteFresh 
 
 const DEFAULT_OPEN_ROOT = process.cwd();
 // Optional sibling NeuroSort checkout used only for cross-project parity asserts.
-// Absent on any machine other than the original author's — see oldRootAvailable.
-const DEFAULT_OLD_ROOT = process.env.NEUROSORT_ROOT || "/Users/tyrell/Projects/misc/tab-neurosort";
+// Configured explicitly via NEUROSORT_REPO_PATH (never a hardcoded local path).
+const DEFAULT_OLD_ROOT = (process.env.NEUROSORT_REPO_PATH || "").trim();
 
 const readText = (rootDir, path) => readFileSync(join(rootDir, path), "utf8");
 const readJson = (rootDir, path) => JSON.parse(readText(rootDir, path));
@@ -40,6 +40,7 @@ const runChecks = async (openRoot, oldRoot) => {
   const rules = readText(openRoot, "modules/rules.mjs");
   const prefsUi = readText(openRoot, "modules/prefs-ui.mjs");
   const readOptional = (rootDir, path) => {
+    if (!rootDir) return null;
     try {
       return readText(rootDir, path);
     } catch {

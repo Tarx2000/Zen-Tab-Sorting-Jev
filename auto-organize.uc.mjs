@@ -86,6 +86,8 @@ const loadBrowserModules = () => {
       import("./modules/browser-hooks.mjs"),
       import("./modules/sort-session.mjs"),
       import("./modules/workspace-sort.mjs"),
+      import("./modules/folder-sync.mjs"),
+      import("./modules/folder-engine.mjs"),
     ]).then(([
       hybridPrefs,
       providerSettings,
@@ -98,6 +100,8 @@ const loadBrowserModules = () => {
       browserHooks,
       sortSession,
       workspaceSort,
+      folderSync,
+      folderEngine,
     ]) => ({
       hybridPrefs,
       providerSettings,
@@ -110,9 +114,17 @@ const loadBrowserModules = () => {
       browserHooks,
       sortSession,
       workspaceSort,
+      folderSync,
+      folderEngine,
     }));
   }
   return browserModulesPromise;
+};
+
+const hydrateSecretsSafely = () => {
+  import("./modules/secret-store.mjs")
+    .then((mod) => mod.hydrateSecrets?.())
+    .catch((e) => console.warn(`${LOG} secret hydration skipped:`, e));
 };
 
 const initializeOnce = (mods) => {
@@ -131,11 +143,15 @@ const initializeOnce = (mods) => {
     browserHooks,
     sortSession,
     workspaceSort,
+    folderSync,
+    folderEngine,
   } = mods;
 
   // Register teardowns up front so cleanup always covers every subsystem.
   registerTeardown("sort-session", () => sortSession.abortSortSession(window));
   registerTeardown("dom-cache", () => tabs.domCache.invalidate());
+  registerTeardown("folder-engine", () => folderEngine.teardownFolderEngine(window));
+  registerTeardown("folder-sync", () => folderSync.teardownFolderSync(window));
   registerTeardown("tab-context-menu", () => browserHooks.teardownTabContextMenu(window));
   registerTeardown("tab-group-context-menu", () => browserHooks.teardownTabGroupContextMenu(window));
   registerTeardown("tab-group-create-hook", () => browserHooks.teardownTabGroupCreateHook(window));
@@ -146,6 +162,7 @@ const initializeOnce = (mods) => {
   registerTeardown("group-state", () => groupState.teardownGroupState(window));
   registerTeardown("minimal-style-observer", () => browserHooks.teardownMinimalStylePrefObserver(window));
 
+  runSafeInit("secret-store-hydrate", () => hydrateSecretsSafely());
   runSafeInit("hybrid-preferences", () => hybridPrefs.ensureHybridPreferences(Services.prefs));
   runSafeInit("command", () => browserUi.setupCommand());
   runSafeInit("separators", () => browserUi.addButtonToAllSeparators());
@@ -159,6 +176,8 @@ const initializeOnce = (mods) => {
   runSafeInit("group-state", () => groupState.setupGroupState(window));
   runSafeInit("collapsed-state-migration", () => browserHooks.setupCollapsedStatePersistence(window));
   runSafeInit("minimal-style-observer", () => browserHooks.setupMinimalStylePrefObserver(window));
+  runSafeInit("folder-sync", () => folderSync.setupFolderSync(window));
+  runSafeInit("folder-engine", () => folderEngine.setupFolderEngine(window));
 
   // Lazy-load heavy click-handler only when invoked.
   runSafeInit("public-api", () => {
@@ -250,6 +269,7 @@ const initializeBrowserScript = async () => {
 
 const initializePrefsScript = async () => {
   try {
+    hydrateSecretsSafely();
     const { setupSettingsObserver, teardownSettingsObserver } = await import("./modules/prefs-ui.mjs");
     if (cleanedUp || window.closed) return;
     registerTeardown("settings-observer", () => teardownSettingsObserver());

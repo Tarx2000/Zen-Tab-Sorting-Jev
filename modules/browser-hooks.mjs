@@ -22,9 +22,14 @@ import {
   writeCollapsedGroupsPref,
   isMinimalStyle,
 } from "./rules.mjs";
-import { applyGroupColor, syncAllGroupColors, moveTabsToTop, directGroupTabs, expandIfCollapsed, collapseGroup, resolveWorkspaceElement } from "./groups.mjs";
+import { applyGroupColor, syncAllGroupColors, moveTabsToTop, directGroupTabs } from "./groups.mjs";
 import { saveGroupState } from "./group-state.mjs";
-import { t } from "./i18n.mjs";
+import { t, getLocale } from "./i18n.mjs";
+import {
+  openMoveToFolderPopover,
+  closeMoveToFolderPopover,
+  isTabMovableToFolder,
+} from "./move-to-folder.mjs";
 
 const WINDOW_STATE = new WeakMap();
 
@@ -78,8 +83,7 @@ const applyToRule = (tab, groupName, group) => {
 
 const PARENT_MENU_ID = "zen-tab-sorting-add-to-rule-menu";
 const MOVE_TO_FOLDER_MENU_ID = "zen-tab-sorting-move-to-folder-menu";
-const HTML_NS = "http://www.w3.org/1999/xhtml";
-const SPLIT_VIEW_SELECTOR = "tab-group[split-view-group], tab-split-view-wrapper";
+const MOVE_TO_FOLDER_ITEM_ID = "zen-tab-sorting-move-to-folder-item";
 
 const findContextMenu = (doc) =>
   doc?.getElementById?.("tabContextMenu") ||
@@ -91,23 +95,23 @@ const getTabHostname = (tab) => {
   try { return getHostname(getTabUrl(tab)); } catch { return null; }
 };
 
-const getWorkspaceFolderElements = (win, workspaceId) => {
-  const doc = win?.document;
-  if (!doc || !workspaceId) return [];
-  const wsEl = resolveWorkspaceElement(workspaceId);
-  const scope = wsEl || doc;
-  const groups = [];
-  const seen = new Set();
-  for (const el of scope.querySelectorAll(NORMAL_GROUP_SELECTOR)) {
-    if (!el?.isConnected || isSidebarCopy(el) || seen.has(el)) continue;
-    const groupWs = el.closest?.("zen-workspace")?.id || el.getAttribute?.("zen-workspace-id");
-    if (groupWs && groupWs !== workspaceId) continue;
-    const label = (el.getAttribute?.("label") || "").trim();
-    if (!label) continue;
-    seen.add(el);
-    groups.push({ el, label, count: directGroupTabs(el, workspaceId).length });
+const resolveMovableTargetTabs = (win, contextTab) => {
+  if (!contextTab) return [];
+  let selected = [];
+  try {
+    selected = Array.isArray(win?.gBrowser?.selectedTabs) ? win.gBrowser.selectedTabs : [];
+  } catch {
+    selected = [];
   }
-  return groups;
+  const source = selected.length > 1 && selected.includes(contextTab) ? selected : [contextTab];
+  return source.filter(isTabMovableToFolder);
+};
+
+const formatMoveToFolderLabel = (count, win) => {
+  if (count <= 1) return t("menu.moveToFolder", null, win);
+  return getLocale(win) === "de"
+    ? `${count} Tabs in Ordner verschieben …`
+    : `Move ${count} tabs to Folder…`;
 };
 
 export const setupTabContextMenu = (win = globalThis.window) => {
@@ -124,6 +128,7 @@ export const setupTabContextMenu = (win = globalThis.window) => {
   // Remove stale elements if re-initializing after a dev reload.
   doc.getElementById(PARENT_MENU_ID)?.remove?.();
   doc.getElementById(MOVE_TO_FOLDER_MENU_ID)?.remove?.();
+  doc.getElementById(MOVE_TO_FOLDER_ITEM_ID)?.remove?.();
 
   const parent = doc.createXULElement("menu");
   parent.id = PARENT_MENU_ID;
@@ -134,29 +139,23 @@ export const setupTabContextMenu = (win = globalThis.window) => {
   parent.appendChild(popup);
   menu.appendChild(parent);
 
-  // "Move to Folder…" submenu with quick-pick filter across active workspace folders.
-  const moveParent = doc.createXULElement("menu");
-  moveParent.id = MOVE_TO_FOLDER_MENU_ID;
-  moveParent.setAttribute("label", t("menu.moveToFolder", null, win));
-  moveParent.setAttribute("hidden", "true");
-
-  const movePopup = doc.createXULElement("menupopup");
-  moveParent.appendChild(movePopup);
-  menu.appendChild(moveParent);
+  // "Move to Folder…" entry opening the searchable Quick-Pick Popover (Q3 & Q8).
+  const moveItem = doc.createXULElement("menuitem");
+  moveItem.id = MOVE_TO_FOLDER_ITEM_ID;
+  moveItem.setAttribute("label", t("menu.moveToFolder", null, win));
+  moveItem.setAttribute("hidden", "true");
+  menu.appendChild(moveItem);
 
   let currentTab = null;
   let currentHostname = null;
-  let folderMap = new Map();
+  let currentTargetTabs = [];
+  let lastAnchorPoint = null;
 
-  const isTabMovableToFolder = (tab) =>
-    Boolean(
-      tab?.isConnected &&
-      !tab.pinned &&
-      !tab.hasAttribute?.("zen-essential") &&
-      !tab.hasAttribute?.("zen-glance-tab") &&
-      !tab.hasAttribute?.("zen-empty-tab") &&
-      !tab.closest?.(SPLIT_VIEW_SELECTOR),
-    );
+  const onContextPoint = (e) => {
+    if (typeof e.clientX === "number" && typeof e.clientY === "number") {
+      lastAnchorPoint = { x: e.clientX, y: e.clientY };
+    }
+  };
 
   const onOuterShowing = (e) => {
     if (e.target !== menu) return;
@@ -170,19 +169,22 @@ export const setupTabContextMenu = (win = globalThis.window) => {
       parent.setAttribute("label", t("menu.addHostToRule", { host: currentHostname }, win));
     }
 
-    const canMove = isTabMovableToFolder(currentTab);
-    moveParent.hidden = !canMove;
+    currentTargetTabs = resolveMovableTargetTabs(win, currentTab);
+    const canMove = currentTargetTabs.length > 0;
+    moveItem.hidden = !canMove;
     if (canMove) {
-      moveParent.setAttribute("label", t("menu.moveToFolder", null, win));
+      moveItem.setAttribute("label", formatMoveToFolderLabel(currentTargetTabs.length, win));
     }
   };
 
   const onOuterHidden = (e) => {
     if (e.target !== menu) return;
-    // Release tab & folder DOM references immediately when the popup closes.
-    currentTab = null;
-    currentHostname = null;
-    folderMap.clear();
+    // Release tab DOM references after command dispatch completes.
+    (win.setTimeout || setTimeout)(() => {
+      currentTab = null;
+      currentHostname = null;
+      currentTargetTabs = [];
+    }, 0);
   };
 
   const onSubmenuShowing = () => {
@@ -232,120 +234,40 @@ export const setupTabContextMenu = (win = globalThis.window) => {
     applyToRule(currentTab, ruleName, groupEl);
   };
 
-  const moveTabIntoFolder = (tab, targetGroup) => {
-    if (!tab?.isConnected || !targetGroup?.isConnected) return;
-    if (tab.closest?.(NORMAL_GROUP_SELECTOR) === targetGroup) return;
-    const wasCollapsed = expandIfCollapsed(targetGroup);
-    try {
-      win.gBrowser?.moveTabToExistingGroup?.(tab, targetGroup);
-      if (wasCollapsed) {
-        (win.setTimeout || setTimeout)(() => {
-          if (!win.closed && targetGroup.isConnected) collapseGroup(targetGroup);
-        }, 0);
-      }
-      saveGroupState(win);
-    } catch (e) {
-      console.error(`${LOG} Move to Folder failed:`, e);
-    }
-  };
-
-  const onMoveSubmenuShowing = () => {
-    while (movePopup.firstChild) movePopup.firstChild.remove();
-    folderMap.clear();
-    if (!isTabMovableToFolder(currentTab)) return;
-
-    const workspaceId =
-      currentTab.getAttribute?.("zen-workspace-id") ||
-      win.gZenWorkspaces?.activeWorkspace;
-    const currentGroup = currentTab.closest?.(NORMAL_GROUP_SELECTOR) || null;
-    const folders = getWorkspaceFolderElements(win, workspaceId);
-
-    if (folders.length === 0) {
-      const emptyItem = doc.createXULElement("menuitem");
-      emptyItem.setAttribute("label", t("menu.noFoldersYet", null, win));
-      emptyItem.setAttribute("disabled", "true");
-      movePopup.appendChild(emptyItem);
-      return;
-    }
-
-    const folderItems = [];
-
-    // Add quick-pick search input when 5+ folders exist in the workspace.
-    if (folders.length >= 5 && typeof doc.createElementNS === "function") {
-      const searchBox = doc.createElementNS(HTML_NS, "input");
-      searchBox.type = "search";
-      searchBox.className = "zao-folder-search-input";
-      searchBox.placeholder = t("menu.searchFolders", null, win);
-      searchBox.setAttribute("aria-label", t("menu.searchFolders", null, win));
-      searchBox.style.cssText = "margin:4px 8px;padding:4px 8px;width:calc(100% - 16px);box-sizing:border-box;border-radius:6px;";
-      const stopBubble = (ev) => ev.stopPropagation();
-      searchBox.addEventListener("click", stopBubble);
-      searchBox.addEventListener("mousedown", stopBubble);
-      searchBox.addEventListener("input", () => {
-        const query = searchBox.value.trim().toLowerCase();
-        for (const entry of folderItems) {
-          entry.item.hidden = Boolean(query && !entry.labelLower.includes(query));
-        }
-      });
-      searchBox.addEventListener("keydown", (ev) => {
-        ev.stopPropagation();
-        if (ev.key === "Enter") {
-          const match = folderItems.find((entry) => !entry.item.hidden && !entry.item.disabled);
-          if (match) {
-            moveTabIntoFolder(currentTab, match.groupEl);
-            menu.hidePopup?.();
-          }
-        }
-      });
-      movePopup.appendChild(searchBox);
-      movePopup.appendChild(doc.createXULElement("menuseparator"));
-    }
-
-    folders.forEach(({ el, label, count }, idx) => {
-      const key = `f_${idx}`;
-      folderMap.set(key, el);
-      const item = doc.createXULElement("menuitem");
-      const isCurrent = el === currentGroup;
-      item.setAttribute("label", isCurrent ? `✓ ${label} (${count})` : `${label} (${count})`);
-      if (isCurrent) item.setAttribute("disabled", "true");
-      item.dataset.zaoFolderKey = key;
-      movePopup.appendChild(item);
-      folderItems.push({ item, groupEl: el, labelLower: label.toLowerCase() });
-    });
-  };
-
-  const onMoveCommand = (e) => {
-    const key = e.target?.dataset?.zaoFolderKey;
-    if (!key || !currentTab) return;
-    const targetGroup = folderMap.get(key);
-    if (!targetGroup) return;
-    moveTabIntoFolder(currentTab, targetGroup);
+  const onMoveCommand = () => {
+    const targets = currentTargetTabs.length
+      ? currentTargetTabs.slice()
+      : resolveMovableTargetTabs(win, win.TabContextMenu?.contextTab || win.gBrowser?.selectedTab);
+    if (targets.length === 0) return;
+    const anchor = lastAnchorPoint || targets[0];
+    openMoveToFolderPopover(win, targets, anchor);
   };
 
   menu.addEventListener("popupshowing", onOuterShowing);
   menu.addEventListener("popuphidden", onOuterHidden);
   popup.addEventListener("popupshowing", onSubmenuShowing);
   popup.addEventListener("command", onCommand);
-  movePopup.addEventListener("popupshowing", onMoveSubmenuShowing);
-  movePopup.addEventListener("command", onMoveCommand);
+  moveItem.addEventListener("command", onMoveCommand);
+  doc.addEventListener("contextmenu", onContextPoint, true);
 
   state.contextMenu = {
     menu,
+    doc,
     parent,
     popup,
-    moveParent,
-    movePopup,
+    moveItem,
     onOuterShowing,
     onOuterHidden,
     onSubmenuShowing,
     onCommand,
-    onMoveSubmenuShowing,
     onMoveCommand,
+    onContextPoint,
   };
-  console.log(`${LOG} tab context submenus installed (build ${BUILD_VERSION})`);
+  console.log(`${LOG} tab context menus installed (build ${BUILD_VERSION})`);
 };
 
 export const teardownTabContextMenu = (win = globalThis.window) => {
+  closeMoveToFolderPopover(win);
   const state = WINDOW_STATE.get(win);
   const ctx = state?.contextMenu;
   if (!ctx) return;
@@ -353,10 +275,10 @@ export const teardownTabContextMenu = (win = globalThis.window) => {
   try { ctx.menu.removeEventListener("popuphidden", ctx.onOuterHidden); } catch {}
   try { ctx.popup.removeEventListener("popupshowing", ctx.onSubmenuShowing); } catch {}
   try { ctx.popup.removeEventListener("command", ctx.onCommand); } catch {}
-  try { ctx.movePopup.removeEventListener("popupshowing", ctx.onMoveSubmenuShowing); } catch {}
-  try { ctx.movePopup.removeEventListener("command", ctx.onMoveCommand); } catch {}
+  try { ctx.moveItem.removeEventListener("command", ctx.onMoveCommand); } catch {}
+  try { ctx.doc.removeEventListener("contextmenu", ctx.onContextPoint, true); } catch {}
   if (ctx.parent?.isConnected) try { ctx.parent.remove(); } catch {}
-  if (ctx.moveParent?.isConnected) try { ctx.moveParent.remove(); } catch {}
+  if (ctx.moveItem?.isConnected) try { ctx.moveItem.remove(); } catch {}
   state.contextMenu = null;
 };
 

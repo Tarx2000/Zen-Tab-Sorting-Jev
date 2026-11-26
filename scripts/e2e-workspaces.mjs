@@ -5,7 +5,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertConnectedProfile, delay, launchZen, stopZen } from "./zen-e2e-driver.mjs";
-import { createLabProfile, findDefaultSineProfile, removeLabProfile, scenarioPrefs, writeUserPrefs } from "./zen-e2e-profile.mjs";
+import { createLabProfile, findDefaultSineProfile, removeLabProfile, resolveZenBinary, scenarioPrefs, writeUserPrefs } from "./zen-e2e-profile.mjs";
 import { MarionetteClient, reserveTcpPort } from "./zen-e2e-marionette.mjs";
 import { startFixturePageServer } from "./zen-e2e-servers.mjs";
 
@@ -16,8 +16,12 @@ const drag = process.argv.includes("--drag");
 const bulkArg = process.argv.indexOf("--tabs");
 const bulkTabs = bulkArg >= 0 ? Number.parseInt(process.argv[bulkArg + 1], 10) : 0;
 if (!Number.isInteger(bulkTabs) || bulkTabs < 0 || bulkTabs > 1000) throw new Error("--tabs must be between 0 and 1000");
+const zenBinaryArg = process.argv.indexOf("--zen-binary");
+const zenBinary = resolveZenBinary(zenBinaryArg >= 0 ? process.argv[zenBinaryArg + 1] : "");
+const sineProfileArg = process.argv.indexOf("--sine-profile");
+const sineProfile = await findDefaultSineProfile(sineProfileArg >= 0 ? process.argv[sineProfileArg + 1] : "");
 const artifacts = process.env.ZEN_WORKSPACE_ARTIFACTS || "";
-const lab = await createLabProfile(root, await findDefaultSineProfile());
+const lab = await createLabProfile(root, sineProfile);
 const port = await reserveTcpPort();
 const pages = await startFixturePageServer();
 let zen;
@@ -42,7 +46,7 @@ try {
     ["zen.view.sidebar-expanded", true],
     ["browser.startup.page", 0],
   ]);
-  zen = launchZen({ options: { headed, zenBinary: process.env.ZEN_BINARY || "/Applications/Zen.app/Contents/MacOS/zen" }, profileDir: lab.profileDir, marionettePort: port });
+  zen = launchZen({ options: { headed, zenBinary }, profileDir: lab.profileDir, marionettePort: port });
   client = await MarionetteClient.connect(port);
   await client.newSession();
   await client.setScriptTimeout();
@@ -406,7 +410,7 @@ try {
       ["browser.startup.page", 3], ["browser.sessionstore.resume_session_once", true],
       ["extensions.zen-auto-organize.new-group-color-strength", "80"],
     ]);
-    zen = launchZen({ options: { headed, zenBinary: process.env.ZEN_BINARY || "/Applications/Zen.app/Contents/MacOS/zen" }, profileDir: lab.profileDir, marionettePort: nextPort });
+    zen = launchZen({ options: { headed, zenBinary }, profileDir: lab.profileDir, marionettePort: nextPort });
     client = await MarionetteClient.connect(nextPort);
     await client.newSession();
     await client.setScriptTimeout();
