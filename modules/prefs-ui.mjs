@@ -148,7 +148,12 @@ const detectAdvancedTabGroups = () => {
       const enumerator = wm.getEnumerator("navigator:browser");
       while (enumerator.hasMoreElements()) {
         const win = enumerator.getNext();
-        if (win?.advancedTabGroups || win?.atgFolderLook || win?.document?.querySelector?.("[atg-folder-look]")) {
+        if (
+          win?._zaoAtgConflictDetected ||
+          win?.advancedTabGroups ||
+          win?.atgFolderLook ||
+          win?.document?.getElementById?.("advanced-tab-groups-context-menu")
+        ) {
           return true;
         }
       }

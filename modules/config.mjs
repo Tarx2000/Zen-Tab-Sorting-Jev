@@ -236,7 +236,7 @@ export const RESETTABLE_TUNING_PREFS = Object.freeze([
   Object.freeze({ section: "appearance", pref: CONFIG.ANIMATION_STYLE_PREF, type: "string", defaultValue: "fluid" }),
   Object.freeze({ section: "appearance", pref: CONFIG.FOLDER_ENGINE_ENABLED_PREF, type: "bool", defaultValue: true }),
   Object.freeze({ section: "appearance", pref: CONFIG.FOLDER_TAB_COUNT_PREF, type: "bool", defaultValue: true }),
-  Object.freeze({ section: "appearance", pref: CONFIG.FOLDER_GROUP_SHORTCUT_PREF, type: "string", defaultValue: "Alt+G" }),
+  Object.freeze({ section: "appearance", pref: CONFIG.FOLDER_GROUP_SHORTCUT_PREF, type: "string", defaultValue: "Ctrl+Shift+G" }),
   // Section: diagnostics
   Object.freeze({ section: "diagnostics", pref: CONFIG.DEBUG_MODE_PREF, type: "bool", defaultValue: false }),
 ]);

@@ -472,8 +472,8 @@
     "type": "string",
     "label": "Keyboard shortcut to group selected tabs",
     "property": "extensions.zen-tab-sorting.folder-group-shortcut",
-    "defaultValue": "Alt+G",
-    "placeholder": "Alt+G"
+    "defaultValue": "Ctrl+Shift+G",
+    "placeholder": "Ctrl+Shift+G"
   },
   {
     "type": "separator",

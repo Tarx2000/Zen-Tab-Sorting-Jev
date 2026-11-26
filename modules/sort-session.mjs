@@ -11,14 +11,16 @@ export const abortSortSession = (win = globalThis.window) => {
 const BUTTON_SELECTOR = ".zao-organize-button, #tab-wand-button, #zao-sort-workspaces";
 const GROUP_STATE_READY_TIMEOUT_MS = 3000;
 
-const WAND_BUTTON_SELECTOR = "#tab-wand-button, .zao-organize-button:not([data-zao-library-organize])";
+const WAND_BUTTON_SELECTOR = "#tab-wand-button, .zao-organize-button:not([data-zao-library-organize]):not(#zao-sort-workspaces)";
 
 const isWandButton = (button) => {
   if (!button) return false;
-  if (button.id === "tab-wand-button" || button.getAttribute?.("id") === "tab-wand-button") return true;
+  const id = button.id || button.getAttribute?.("id") || "";
+  if (id === "zao-sort-workspaces") return false;
+  if (id === "tab-wand-button") return true;
   if (typeof button.matches === "function") {
     try {
-      if (button.matches(".zao-organize-button:not([data-zao-library-organize])")) return true;
+      if (button.matches(".zao-organize-button:not([data-zao-library-organize]):not(#zao-sort-workspaces)")) return true;
     } catch {}
   }
   const hasOrganizeClass = Boolean(button.classList?.contains?.("zao-organize-button"));
