@@ -401,7 +401,24 @@ const cancelActiveToggleAnimation = (group) => {
  * never uses `max-height: 4000px`.
  */
 export const animateFolderToggle = (win, group, collapsed) => {
-  if (!group?.isConnected || win?.closed) return;
+  if (
+    !group?.isConnected ||
+    win?.closed ||
+    isSidebarCopy(group) ||
+    group.hasAttribute?.("split-view-group") ||
+    group.hasAttribute?.("drag-image")
+  ) {
+    group?.removeAttribute?.(ATTR_COLLAPSING);
+    return;
+  }
+
+  const container = group.querySelector?.(":scope > .tab-group-container");
+  const hadActiveAnim = ACTIVE_TOGGLE_ANIMS.has(group);
+  const inFlightHeight =
+    hadActiveAnim && container
+      ? Math.max(0, Math.round(container.getBoundingClientRect?.().height || 0))
+      : null;
+
   cancelActiveToggleAnimation(group);
 
   if (prefersReducedMotion(win)) {
@@ -409,7 +426,6 @@ export const animateFolderToggle = (win, group, collapsed) => {
     return;
   }
 
-  const container = group.querySelector?.(":scope > .tab-group-container");
   if (!container || typeof container.animate !== "function") {
     group.removeAttribute?.(ATTR_COLLAPSING);
     return;
@@ -437,7 +453,8 @@ export const animateFolderToggle = (win, group, collapsed) => {
   }
 
   const easing = resolveFolderEasing(win, group);
-  const duration = collapsed ? 210 : 250;
+  const baseDuration = collapsed ? 220 : 250;
+  let duration = baseDuration;
   const anims = [];
   let finished = false;
   let safetyTimer = null;
@@ -467,7 +484,7 @@ export const animateFolderToggle = (win, group, collapsed) => {
 
   try {
     if (collapsed) {
-      // Hold non-active items visible during the short collapse animation, then release.
+      // Hold non-active items visible during the collapse animation, then release.
       group.setAttribute(ATTR_COLLAPSING, "true");
       const fullHeight = Math.max(0, Math.round(container.scrollHeight || 0));
       const activeHeight = Array.from(container.children || []).reduce((sum, child) => {
@@ -475,10 +492,19 @@ export const animateFolderToggle = (win, group, collapsed) => {
         return sum + Math.round(child.getBoundingClientRect?.().height || 0);
       }, 0);
 
-      if (fullHeight > activeHeight) {
+      const startHeight =
+        inFlightHeight !== null && inFlightHeight > activeHeight && inFlightHeight < fullHeight
+          ? inFlightHeight
+          : fullHeight;
+
+      if (startHeight > activeHeight) {
+        if (startHeight < fullHeight && fullHeight > activeHeight) {
+          const ratio = (startHeight - activeHeight) / (fullHeight - activeHeight);
+          duration = Math.max(120, Math.round(baseDuration * ratio));
+        }
         container.style.overflow = "hidden";
         const cAnim = container.animate(
-          [{ height: `${fullHeight}px` }, { height: `${activeHeight}px` }],
+          [{ height: `${startHeight}px` }, { height: `${activeHeight}px` }],
           { duration, easing, fill: "forwards" },
         );
         anims.push(cAnim);
@@ -488,12 +514,15 @@ export const animateFolderToggle = (win, group, collapsed) => {
       for (let i = 0; i < maxAnimated; i++) {
         const item = childItems[i];
         if (typeof item.animate !== "function") continue;
+        const reverseIdx = maxAnimated - 1 - i;
+        const delay = Math.min(reverseIdx * 8, 48);
+        const itemDuration = Math.max(110, duration - delay - 16);
         const a = item.animate(
           [
             { opacity: 1, transform: "translate3d(0, 0, 0)" },
             { opacity: 0, transform: "translate3d(0, -6px, 0)" },
           ],
-          { duration: Math.max(140, duration - 30), easing, fill: "forwards" },
+          { duration: itemDuration, delay, easing, fill: "forwards" },
         );
         anims.push(a);
       }
@@ -505,10 +534,19 @@ export const animateFolderToggle = (win, group, collapsed) => {
         return sum + Math.round(child.getBoundingClientRect?.().height || 0);
       }, 0);
 
-      if (targetHeight > activeHeight) {
+      const startHeight =
+        inFlightHeight !== null && inFlightHeight > activeHeight && inFlightHeight < targetHeight
+          ? inFlightHeight
+          : activeHeight;
+
+      if (targetHeight > startHeight) {
+        if (startHeight > activeHeight && targetHeight > activeHeight) {
+          const ratio = (targetHeight - startHeight) / (targetHeight - activeHeight);
+          duration = Math.max(120, Math.round(baseDuration * ratio));
+        }
         container.style.overflow = "hidden";
         const cAnim = container.animate(
-          [{ height: `${activeHeight}px` }, { height: `${targetHeight}px` }],
+          [{ height: `${startHeight}px` }, { height: `${targetHeight}px` }],
           { duration, easing },
         );
         anims.push(cAnim);
@@ -1330,9 +1368,10 @@ export const setupFolderEngine = (win = globalThis.window) => {
     state.tabObserver = new win.MutationObserver((mutations) => {
       let needsRefresh = false;
       const immediateGroups = new Set();
+      const collapsedGroups = new Set();
       for (const m of mutations) {
         if (m.type === "attributes" && m.attributeName === "collapsed" && isPlainTabGroup(m.target)) {
-          onGroupCollapsedChanged(m.target);
+          collapsedGroups.add(m.target);
         } else if (m.type === "childList") {
           const targetGroup = isPlainTabGroup(m.target)
             ? m.target
@@ -1362,6 +1401,9 @@ export const setupFolderEngine = (win = globalThis.window) => {
             }
           }
         }
+      }
+      for (const group of collapsedGroups) {
+        onGroupCollapsedChanged(group);
       }
       for (const group of immediateGroups) {
         decorateGroup(group);
@@ -1415,15 +1457,18 @@ export const setupFolderEngine = (win = globalThis.window) => {
       scheduleRefreshAll();
     });
 
-    // Double-click folder header -> inline rename
+    // Suppress double-click / multi-click rename on folder headers so rapid
+    // clicking only toggles collapse/expand. Context-menu "Rename" calls
+    // `startInlineRename` directly and remains 100% functional.
     listen(container, "dblclick", (event) => {
+      if (event.target?.closest?.(".zao-folder-rename-input")) return;
       const header = event.target?.closest?.(".tab-group-label-container");
       if (!header) return;
-      const group = header.closest?.(NORMAL_GROUP_SELECTOR);
-      if (!isPlainTabGroup(group)) return;
+      const group = header.closest?.(`${NORMAL_GROUP_SELECTOR}, zen-folder`);
+      if (!group || isSidebarCopy(group) || group.hasAttribute?.("split-view-group")) return;
       event.preventDefault();
       event.stopPropagation();
-      startInlineRename(win, group, { selectAll: true });
+      event.stopImmediatePropagation?.();
     }, true);
 
     // Right-click folder header -> built-in Folder Engine context menu
