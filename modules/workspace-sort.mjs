@@ -107,6 +107,11 @@ export const organizeWorkspaces = (win = globalThis.window) => withSortSession("
     const plan = await classifyWorkspaceUnitsWithJev({ ...snapshot, fetchImpl: win.fetch.bind(win), signal, concurrency: 3 });
     if (signal.aborted) {
       run.aborted = true;
+      run.errors.push({
+        name: t("workspace.runName", null, win),
+        reason: t("error.sortAborted", null, win),
+        phase: "run",
+      });
       toast(t("toast.sortAborted", null, win), { type: "info" });
       return run;
     }
@@ -283,6 +288,11 @@ export const organizeWorkspaces = (win = globalThis.window) => withSortSession("
 
     if (signal.aborted) {
       run.aborted = true;
+      run.errors.push({
+        name: t("workspace.runName", null, win),
+        reason: t("error.sortAborted", null, win),
+        phase: "run",
+      });
       toast(t("toast.sortAborted", null, win), { type: "info" });
       return run;
     }
@@ -311,6 +321,11 @@ export const organizeWorkspaces = (win = globalThis.window) => withSortSession("
   } catch (error) {
     if (signal.aborted) {
       run.aborted = true;
+      run.errors.push({
+        name: t("workspace.runName", null, win),
+        reason: t("error.sortAborted", null, win),
+        phase: "run",
+      });
       toast(t("toast.sortAborted", null, win), { type: "info" });
       return run;
     }

@@ -295,16 +295,20 @@ export const moveWorkspaceUnit = (win, unit, targetId) => {
         if (splitSync) {
           try { splitSync(node, unit.workspaceId, unit._tabs); } catch {}
         }
-        const restoreDom = () => {
-          if (unit._parent?.isConnected) {
+        const needsDomRestore =
+          Boolean(unit._parent?.isConnected) &&
+          (node.parentNode !== unit._parent ||
+            (previousNext?.parentNode === unit._parent && node.nextSibling !== previousNext));
+        if (needsDomRestore) {
+          const restoreDom = () => {
             const anchor = previousNext?.parentNode === unit._parent ? previousNext : null;
             if (anchor !== node) unit._parent.insertBefore(node, anchor);
+          };
+          if (node.tabs?.length && typeof browser.zenHandleTabMove === "function") {
+            try { browser.zenHandleTabMove(node, restoreDom); } catch { restoreDom(); }
+          } else {
+            restoreDom();
           }
-        };
-        if (node.tabs?.length && typeof browser.zenHandleTabMove === "function") {
-          try { browser.zenHandleTabMove(node, restoreDom); } catch { restoreDom(); }
-        } else {
-          restoreDom();
         }
         restoreCollapsedStates(collapsedSnapshot);
         browser.tabContainer?._invalidateCachedTabs?.();

@@ -890,6 +890,7 @@ export const handleOrganizeClick = ({ workspaceId, fromLibrary = false } = {}) =
   const originalSpace = manager.activeWorkspace;
   const originalTab = window.gBrowser?.selectedTab;
   let animated = false;
+  let restoredSpace = false;
   try {
     if (isAbortedOrClosed(signal)) return { aborted: true };
     // Existing grouping APIs operate on the active native strip, never on the
@@ -908,6 +909,7 @@ export const handleOrganizeClick = ({ workspaceId, fromLibrary = false } = {}) =
           manager?.getWorkspaces?.().some((space) => space.uuid === originalSpace)
         ) {
           await manager.changeWorkspaceWithID(originalSpace);
+          restoredSpace = true;
           if (!window.closed && originalTab?.isConnected && !originalTab.closing && window.gBrowser) {
             window.gBrowser.selectedTab = originalTab;
           }
@@ -915,8 +917,9 @@ export const handleOrganizeClick = ({ workspaceId, fromLibrary = false } = {}) =
       } catch (e) {
         console.warn(`${LOG} failed to restore original workspace after Library sort:`, e);
       }
-      // Avoid double refreshStripsNow() when animateSidebarChanges already refreshed Library strips.
-      if (!window.closed && !animated) {
+      // Reconcile Library strips after restoring the original Space (or when no animation ran)
+      // so space-card copies and copyForTab() mappings stay in sync with live tab groups.
+      if (!window.closed && (restoredSpace || !animated)) {
         try {
           window.document?.querySelector?.("zen-library-spaces-section")?.refreshStripsNow?.();
         } catch {}

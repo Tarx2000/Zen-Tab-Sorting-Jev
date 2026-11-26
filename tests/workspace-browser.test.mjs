@@ -289,6 +289,21 @@ test("workspace-browser: collapsed snapshot/restore, rollback on mid-move error,
   assert.equal(fTab.getAttribute("zen-workspace-id"), "ws-a");
   assert.equal(folder.collapsed, true);
 
+  // 1c. Rollback does NOT re-call zenHandleTabMove when zenHandleTabMove itself threw before moving DOM
+  const origHandleMove = win.gBrowser.zenHandleTabMove;
+  let handleMoveCalls = 0;
+  win.gBrowser.zenHandleTabMove = (node) => {
+    handleMoveCalls += 1;
+    throw new Error("Simulated zenHandleTabMove failure");
+  };
+  const snap1c = snapshotWorkspaceUnits(win, []);
+  const folderUnit1c = snap1c.units.find((u) => u.name === "Collapsed Folder");
+  assert.throws(() => moveWorkspaceUnit(win, folderUnit1c, "ws-b"), /Simulated zenHandleTabMove failure/);
+  win.gBrowser.zenHandleTabMove = origHandleMove;
+  assert.equal(handleMoveCalls, 1, "Rollback must NOT re-call zenHandleTabMove when node never left its original DOM slot");
+  assert.equal(folder.parentElement, wsA.tabsContainer);
+  assert.equal(folder.nextSibling, anchorTab);
+
   // 2. Successful move preserves collapsed even if native move expands it
   win.gZenFolders.changeFolderToSpace = (node, targetId, opts) => {
     node.collapsed = false; // Simulate native Zen auto-expanding on move

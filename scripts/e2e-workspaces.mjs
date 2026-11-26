@@ -375,7 +375,10 @@ try {
     };
   `);
   console.log(JSON.stringify({ edgeCases }));
-  assert.equal(edgeCases.menuLabel, "Alle Spaces automatisch sortieren");
+  assert.ok(
+    ["Alle Spaces automatisch sortieren", "Auto-sort all Spaces"].includes(edgeCases.menuLabel),
+    `Unexpected workspace sort menu label: ${edgeCases.menuLabel}`,
+  );
   assert.equal(edgeCases.finished, true);
   assert.equal(edgeCases.racePreserved, true);
   assert.equal(edgeCases.raceReported, true);

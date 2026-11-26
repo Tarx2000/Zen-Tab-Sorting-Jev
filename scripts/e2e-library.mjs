@@ -68,7 +68,7 @@ try {
       tab.setAttribute("label", name);
       return tab;
     });
-    for (const tab of [...win.gBrowser.tabs]) if (!tabs.includes(tab) && !tab.hasAttribute("zen-essential")) win.gBrowser.removeTab(tab, { animate: false });
+    for (const tab of [...win.gBrowser.tabs]) if (!tabs.includes(tab) && !tab.hasAttribute("zen-essential") && !tab.hasAttribute("zen-empty-tab") && tab !== originalTab) win.gBrowser.removeTab(tab, { animate: false });
     await manager.changeWorkspaceWithID(source);
     win.gBrowser.selectedTab = originalTab;
     const original = win.fetch.bind(win);
@@ -175,9 +175,18 @@ try {
     Services.prefs.setStringPref("extensions.zen-auto-organize.ai-sort-mode", "hybrid");
     const manager = win.gZenWorkspaces;
     await manager.changeWorkspaceWithID(s.target);
+    const lib = win.document.querySelector("zen-library");
     const principal = Services.scriptSecurityManager.getSystemPrincipal();
-    s.newColorTabs = [0, 1].map(index => win.gBrowser.addTab("http://127.0.0.1:${pages.port}/color-sixty-" + index,
-      { inBackground: true, triggeringPrincipal: principal }));
+    s.newColorTabs = [0, 1].map(index => {
+      let created;
+      const open = () => {
+        created = win.gBrowser.addTab("http://127.0.0.1:${pages.port}/color-sixty-" + index,
+          { inBackground: true, triggeringPrincipal: principal });
+      };
+      if (typeof lib?.keepOpenWhile === "function") lib.keepOpenWhile(open);
+      else open();
+      return created;
+    });
     await new Promise(resolve => win.setTimeout(resolve, 200));
     await manager.changeWorkspaceWithID(s.source);
     win.gBrowser.selectedTab = s.originalTab;
@@ -416,7 +425,7 @@ try {
       busy: !!win._zaoSortSession };
   `);
   console.log(JSON.stringify({ interrupted }));
-  assert.ok(interrupted.errors.some(reason => /abgebrochen/.test(reason)));
+  assert.ok(interrupted.errors.some(reason => /abgebrochen|cancelled|canceled/i.test(reason)));
   assert.equal(interrupted.finished, true);
   assert.equal(interrupted.animation.surface, "library");
   assert.equal(interrupted.animation.nativeRefresh, true);

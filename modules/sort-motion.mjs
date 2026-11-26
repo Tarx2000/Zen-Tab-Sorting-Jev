@@ -78,6 +78,10 @@ export const createPresentationScope = (
   }
 
   const onScroll = (event) => {
+    if (scrollThreshold <= 0) {
+      cancel();
+      return;
+    }
     const target = event?.target;
     if (!target || typeof target.scrollTop !== "number") {
       cancel();
@@ -88,10 +92,9 @@ export const createPresentationScope = (
       cancel();
       return;
     }
-    if (
-      Math.abs(target.scrollTop - origin.top) > scrollThreshold ||
-      Math.abs((target.scrollLeft || 0) - origin.left) > scrollThreshold
-    ) {
+    const dy = Math.abs(target.scrollTop - origin.top);
+    const dx = Math.abs((target.scrollLeft || 0) - origin.left);
+    if (dy > scrollThreshold || dx > scrollThreshold || (event.isTrusted === false && dx === 0 && dy === 0)) {
       cancel();
     }
   };

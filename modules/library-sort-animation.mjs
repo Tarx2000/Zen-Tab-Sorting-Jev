@@ -239,6 +239,7 @@ export const animateLibraryChanges = async (win, section, mutate, reducedMotion,
         container: section,
         signal,
         checkActive: () => activeLibrarySection(win) === section,
+        scrollThreshold: 0,
       });
       if (scope.cancelled) {
         diagnostics.cancelled = true;
