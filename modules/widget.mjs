@@ -1,7 +1,7 @@
 // Zen Tab Sorting — settings rules editor widget.
 // Builds the pill table (Category | Domains) with +/- buttons, color swatch per row,
-// hex input, and live persistence to the rules pref. Also wires a pref observer so
-// external changes (right-click "Add to Rule…" submenu, AI Pass 2, Import) refresh the table in real time.
+// URL-to-hostname normalization & dedupe, keyboard row reorder, cached drag midpoints,
+// and non-blocking inline Backup/Restore feedback.
 
 import { CONFIG, LOG, h } from "./config.mjs";
 import { readRulesPref, writeRulesPref, readSkipDomainsPref, writeSkipDomainsPref } from "./rules.mjs";
@@ -12,75 +12,142 @@ import {
 
 let rulesPrefObserver = null;
 
-export const buildRulesEditor = (rules) => {
-  const container = h("div");
-  container.className = "zao-rules-editor";
+/**
+ * Normalize user-typed or pasted URLs/hostnames into clean lowercase domain
+ * tokens (preserving leading `*.` wildcards). Splits comma/whitespace-separated
+ * entries so pasting multiple domains works in one step.
+ */
+export const normalizeDomainInput = (raw) => {
+  if (typeof raw !== "string") return [];
+  const tokens = raw.split(/[\s,]+/).map((t) => t.trim()).filter(Boolean);
+  const out = [];
+  const seen = new Set();
 
+  for (const token of tokens) {
+    const wildcard = token.startsWith("*.");
+    const stripped = wildcard ? token.slice(2) : token;
+    if (!stripped) continue;
+
+    let host = "";
+    try {
+      const candidate = stripped.includes("://") ? stripped : `https://${stripped}`;
+      const parsed = new URL(candidate);
+      host = parsed.hostname.toLowerCase().replace(/\.+$/, "");
+    } catch {
+      host = stripped
+        .replace(/^[a-z][a-z0-9+.-]*:\/\//i, "")
+        .split(/[/?#]/)[0]
+        .replace(/:\d+$/, "")
+        .toLowerCase()
+        .replace(/\.+$/, "");
+    }
+    if (!host) continue;
+    const normalized = wildcard ? `*.${host}` : host;
+    if (!seen.has(normalized)) {
+      seen.add(normalized);
+      out.push(normalized);
+    }
+  }
+  return out;
+};
+
+export const buildRulesEditor = (rules) => {
+  const container = h("div", { class: "zao-rules-editor" });
   const persist = () => writeRulesPref(rules);
 
-  // Forward-declared because some helpers (e.g. renderPill's remove button) need
-  // to call render() to redraw the whole table after a mutation. They're defined
-  // BEFORE render() in source order, so without this hoisted `let` they couldn't
-  // see it. Assigned in the `render = () => { ... }` block further down.
   let render;
 
-  const renderPill = (rule, dIdx) => {
-    const pill = h("span");
-    pill.className = "zao-pill";
+  const restoreFocus = (target) => {
+    if (!target) return;
+    const rows = container.querySelectorAll(".zao-row");
+    if (target.type === "group-name") {
+      const row = rows[target.idx];
+      row?.querySelector(".zao-group-name")?.focus();
+    } else if (target.type === "pill-add") {
+      const row = rows[target.idx];
+      row?.querySelector(".zao-pill-add")?.focus();
+    } else if (target.type === "pill-remove") {
+      const row = rows[target.idx];
+      const removeBtns = row?.querySelectorAll(".zao-pill-remove");
+      if (removeBtns?.length) {
+        removeBtns[Math.min(target.pillIdx, removeBtns.length - 1)]?.focus();
+      } else {
+        row?.querySelector(".zao-pill-add")?.focus();
+      }
+    } else if (target.type === "grip") {
+      const row = rows[target.idx];
+      row?.querySelector(".zao-row-grip")?.focus();
+    } else if (target.type === "row-remove") {
+      if (rows.length > 0) {
+        const row = rows[Math.min(target.idx, rows.length - 1)];
+        row?.querySelector(".zao-remove-row")?.focus();
+      } else {
+        container.querySelector(".zao-add-row-btn")?.focus();
+      }
+    }
+  };
 
-    const text = h("span");
-    text.textContent = rule.domains[dIdx];
+  const renderPill = (rule, rowIdx, dIdx) => {
+    const pill = h("span", { class: "zao-pill" });
+
+    const text = h("span", { text: rule.domains[dIdx] });
     pill.appendChild(text);
 
-    const remove = h("button");
+    const remove = h("button", { class: "zao-pill-remove", text: "×" });
     remove.type = "button";
-    remove.className = "zao-pill-remove";
-    remove.textContent = "×";
     remove.title = "Remove this domain";
+    remove.setAttribute("aria-label", `Remove domain ${rule.domains[dIdx]}`);
     remove.addEventListener("click", () => {
       rule.domains.splice(dIdx, 1);
       persist();
-      render();
+      render({ type: "pill-remove", idx: rowIdx, pillIdx: dIdx });
     });
     pill.appendChild(remove);
 
     return pill;
   };
 
-  const renderAddPill = (rule) => {
-    const addBtn = h("button");
+  const renderAddPill = (rule, rowIdx) => {
+    const addBtn = h("button", { class: "zao-pill-add", text: "+" });
     addBtn.type = "button";
-    addBtn.className = "zao-pill-add";
-    addBtn.textContent = "+";
     addBtn.title = "Add domain";
+    addBtn.setAttribute("aria-label", `Add domain to ${rule.name || `group ${rowIdx + 1}`}`);
     addBtn.addEventListener("click", () => {
-      const input = h("input");
+      const input = h("input", { class: "zao-pill-input" });
       input.type = "text";
-      input.className = "zao-pill-input";
       input.placeholder = "host.com or *.host.com";
+      input.setAttribute("aria-label", `Domain for ${rule.name || `group ${rowIdx + 1}`}`);
 
       let done = false;
-      const commit = () => {
+      const commit = (focusNext) => {
         if (done) return;
         done = true;
-        const val = input.value.trim();
-        if (val) {
-          rule.domains.push(val);
-          persist();
+        const normalized = normalizeDomainInput(input.value);
+        if (normalized.length > 0) {
+          const existing = new Set(rule.domains.map((d) => String(d).toLowerCase()));
+          let added = false;
+          for (const domain of normalized) {
+            if (!existing.has(domain.toLowerCase())) {
+              rule.domains.push(domain);
+              existing.add(domain.toLowerCase());
+              added = true;
+            }
+          }
+          if (added) persist();
         }
-        render();
+        render(focusNext ? { type: "pill-add", idx: rowIdx } : null);
       };
       const cancel = () => {
         if (done) return;
         done = true;
-        render();
+        render({ type: "pill-add", idx: rowIdx });
       };
 
       input.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") { e.preventDefault(); commit(); }
+        if (e.key === "Enter") { e.preventDefault(); commit(true); }
         else if (e.key === "Escape") { e.preventDefault(); cancel(); }
       });
-      input.addEventListener("blur", () => setTimeout(commit, 0));
+      input.addEventListener("blur", () => setTimeout(() => commit(false), 0));
 
       addBtn.replaceWith(input);
       input.focus();
@@ -89,13 +156,11 @@ export const buildRulesEditor = (rules) => {
   };
 
   const renderColorCell = (rule) => {
-    const cell = h("div");
-    cell.className = "zao-color-cell";
+    const cell = h("div", { class: "zao-color-cell" });
 
     // Use <div role="button"> — a real <button> picks up chrome-button theming
     // that fights our 22×22 circle sizing.
-    const swatch = h("div");
-    swatch.className = "zao-swatch";
+    const swatch = h("div", { class: "zao-swatch" });
     swatch.setAttribute("role", "button");
     swatch.setAttribute("tabindex", "0");
     updateSwatchAppearance(swatch, rule.color);
@@ -111,69 +176,83 @@ export const buildRulesEditor = (rules) => {
     return cell;
   };
 
-  // Drag-and-drop reorder. Pass 1 is first-match-wins, so the rules array
-  // order determines which group a domain lands in when multiple rules could
-  // claim it. Reordering here changes that priority AND the sidebar's group
-  // display order on next wand click.
-  //
-  // Drag state lives at the editor scope so all rows share it. The DOM
-  // indicator and the actual reorder target both read from `dragToIdx`, so
-  // what the user SEES is exactly what gets applied on drop — no recompute
-  // from clientY at drop-time (which would disagree if the cursor jittered
-  // in the moment between the final dragover and the mouseup).
+  // Drag-and-drop reorder state with per-session cached row midpoints (zero
+  // getBoundingClientRect calls during dragover).
   let dragFromIdx = null;
   let dragToIdx = null;
+  let cachedRows = null;
 
   const clearDropIndicators = () => {
     container.querySelectorAll(".zao-row-drop-before, .zao-row-drop-after")
       .forEach((el) => el.classList.remove("zao-row-drop-before", "zao-row-drop-after"));
   };
 
-  const reorderRules = (fromIdx, toIdx) => {
-    if (fromIdx === toIdx || fromIdx === toIdx - 1) return; // no-op moves
+  const cacheRowMidpoints = () => {
+    cachedRows = Array.from(container.querySelectorAll(".zao-row")).map((el, idx) => {
+      const r = el.getBoundingClientRect();
+      return { el, idx, top: r.top, bottom: r.bottom, mid: r.top + r.height / 2 };
+    });
+  };
+
+  const invalidateRowCache = () => {
+    cachedRows = null;
+  };
+
+  const reorderRules = (fromIdx, toIdx, focusTarget = null) => {
+    if (fromIdx === toIdx || fromIdx === toIdx - 1) return;
+    if (fromIdx < 0 || fromIdx >= rules.length) return;
     const [moved] = rules.splice(fromIdx, 1);
-    // Adjust toIdx down by one if we removed an item earlier in the list.
     const adjustedTo = fromIdx < toIdx ? toIdx - 1 : toIdx;
     rules.splice(adjustedTo, 0, moved);
     persist();
-    render();
+    render(focusTarget);
   };
 
   const renderRow = (rule, idx) => {
-    const row = h("div");
-    row.className = "zao-row";
+    const row = h("div", { class: "zao-row" });
     row.dataset.zaoIdx = String(idx);
 
-    // Drag-handle grip. Only this element is `draggable`, so the user must
-    // grab it explicitly — accidental drags from the name/domain inputs are
-    // impossible. Visual: a six-dot "⋮⋮" glyph.
     const grip = h("div", { class: "zao-row-grip", text: "⋮⋮" });
-    grip.title = "Drag to reorder";
+    grip.setAttribute("role", "button");
+    grip.tabIndex = 0;
+    grip.title = "Drag to reorder (or press Alt+Up / Alt+Down)";
+    grip.setAttribute("aria-label", `Reorder group ${rule.name || idx + 1} (Alt+Up or Alt+Down)`);
     grip.setAttribute("draggable", "true");
     grip.addEventListener("dragstart", (e) => {
       e.dataTransfer.effectAllowed = "move";
       e.dataTransfer.setData("text/zao-rule-idx", String(idx));
       dragFromIdx = idx;
       dragToIdx = null;
-      // Drag the whole row visually (DataTransfer.setDragImage uses an
-      // element + offset). The grip alone would look strange detached.
+      cacheRowMidpoints();
       try { e.dataTransfer.setDragImage(row, 12, row.offsetHeight / 2); } catch {}
       row.classList.add("zao-row-dragging");
     });
     grip.addEventListener("dragend", () => {
       row.classList.remove("zao-row-dragging");
       clearDropIndicators();
+      invalidateRowCache();
       dragFromIdx = null;
       dragToIdx = null;
     });
     row.appendChild(grip);
 
+    row.addEventListener("keydown", (e) => {
+      if (!e.altKey || (e.key !== "ArrowUp" && e.key !== "ArrowDown")) return;
+      if (e.key === "ArrowUp" && idx > 0) {
+        e.preventDefault();
+        reorderRules(idx, idx - 1, { type: "grip", idx: idx - 1 });
+      } else if (e.key === "ArrowDown" && idx < rules.length - 1) {
+        e.preventDefault();
+        reorderRules(idx, idx + 2, { type: "grip", idx: idx + 1 });
+      }
+    });
+
     row.appendChild(renderColorCell(rule));
 
-    const nameInput = h("input");
+    const nameInput = h("input", { class: "zao-group-name" });
     nameInput.type = "text";
-    nameInput.className = "zao-group-name";
     nameInput.placeholder = "Group name";
+    nameInput.setAttribute("aria-label", `Group ${idx + 1} name`);
     nameInput.value = rule.name || "";
     nameInput.addEventListener("input", () => {
       rule.name = nameInput.value;
@@ -181,75 +260,61 @@ export const buildRulesEditor = (rules) => {
     });
     row.appendChild(nameInput);
 
-    const domainsEl = h("div");
-    domainsEl.className = "zao-domains";
+    const domainsEl = h("div", { class: "zao-domains" });
     if (!Array.isArray(rule.domains)) rule.domains = [];
-    rule.domains.forEach((_, dIdx) => domainsEl.appendChild(renderPill(rule, dIdx)));
-    domainsEl.appendChild(renderAddPill(rule));
+    rule.domains.forEach((_, dIdx) => domainsEl.appendChild(renderPill(rule, idx, dIdx)));
+    domainsEl.appendChild(renderAddPill(rule, idx));
     row.appendChild(domainsEl);
 
-    const removeBtn = h("button");
+    const removeBtn = h("button", { class: "zao-remove-row", text: "×" });
     removeBtn.type = "button";
-    removeBtn.className = "zao-remove-row";
-    removeBtn.textContent = "×";
     removeBtn.title = "Remove this group";
+    removeBtn.setAttribute("aria-label", `Remove group ${rule.name || idx + 1}`);
     removeBtn.addEventListener("click", () => {
       rules.splice(idx, 1);
       persist();
-      render();
+      render({ type: "row-remove", idx });
     });
     row.appendChild(removeBtn);
 
     return row;
   };
 
-  // Container-level dragover/drop. Some browsers don't fire dragover on the
-  // source element during a drag, so per-row listeners miss events when the
-  // cursor is still over the row being dragged. Listening at the container
-  // covers all rows uniformly — we hit-test the cursor's clientY against
-  // each row's bounding rect to figure out where the drop would land.
   if (!container._zaoContainerDragListenersInstalled) {
     container._zaoContainerDragListenersInstalled = true;
     container.addEventListener("dragover", (e) => {
       if (!e.dataTransfer.types.includes("text/zao-rule-idx")) return;
       e.preventDefault();
       e.dataTransfer.dropEffect = "move";
-      const rows = Array.from(container.querySelectorAll(".zao-row"));
-      if (rows.length === 0) return;
-      // Find the row whose vertical range contains the cursor. If the cursor
-      // is above the first row, target index 0 / top half. If below the last
-      // row, target the last row's bottom half.
-      let targetRow = null;
-      let targetIdx = -1;
+      if (!cachedRows) cacheRowMidpoints();
+      if (!cachedRows || cachedRows.length === 0) return;
+
+      let target = null;
       let above = true;
-      const firstRect = rows[0].getBoundingClientRect();
-      const lastRect = rows[rows.length - 1].getBoundingClientRect();
-      if (e.clientY < firstRect.top) {
-        targetRow = rows[0];
-        targetIdx = 0;
+      const first = cachedRows[0];
+      const last = cachedRows[cachedRows.length - 1];
+      if (e.clientY < first.top) {
+        target = first;
         above = true;
-      } else if (e.clientY > lastRect.bottom) {
-        targetRow = rows[rows.length - 1];
-        targetIdx = rows.length - 1;
+      } else if (e.clientY > last.bottom) {
+        target = last;
         above = false;
       } else {
-        for (let i = 0; i < rows.length; i++) {
-          const r = rows[i].getBoundingClientRect();
-          if (e.clientY >= r.top && e.clientY <= r.bottom) {
-            targetRow = rows[i];
-            targetIdx = i;
-            above = (e.clientY - r.top) < r.height / 2;
+        for (const entry of cachedRows) {
+          if (e.clientY >= entry.top && e.clientY <= entry.bottom) {
+            target = entry;
+            above = e.clientY < entry.mid;
             break;
           }
         }
       }
-      if (!targetRow) return;
-      const newToIdx = above ? targetIdx : targetIdx + 1;
-      if (dragToIdx === newToIdx) return; // no DOM update needed
+      if (!target) return;
+      const newToIdx = above ? target.idx : target.idx + 1;
+      if (dragToIdx === newToIdx) return;
       dragToIdx = newToIdx;
       clearDropIndicators();
-      targetRow.classList.toggle("zao-row-drop-before", above);
-      targetRow.classList.toggle("zao-row-drop-after", !above);
+      target.el.classList.toggle("zao-row-drop-before", above);
+      target.el.classList.toggle("zao-row-drop-after", !above);
     });
     container.addEventListener("drop", (e) => {
       const fromStr = e.dataTransfer.getData("text/zao-rule-idx");
@@ -258,59 +323,50 @@ export const buildRulesEditor = (rules) => {
       const fromIdx = parseInt(fromStr, 10);
       const toIdx = dragToIdx;
       clearDropIndicators();
+      invalidateRowCache();
       dragFromIdx = null;
       dragToIdx = null;
       if (toIdx === null) return;
-      reorderRules(fromIdx, toIdx);
+      const finalIdx = fromIdx < toIdx ? toIdx - 1 : toIdx;
+      reorderRules(fromIdx, toIdx, { type: "grip", idx: finalIdx });
     });
   }
 
-  render = () => {
+  render = (focusTarget = null) => {
+    invalidateRowCache();
     container.replaceChildren();
 
-    const header = h("div");
-    header.className = "zao-header";
-    header.appendChild(h("div")); // grip column (no label)
-    header.appendChild(h("div")); // color column (no label)
-    const c1 = h("div");
-    c1.textContent = "Category";
-    header.appendChild(c1);
-    const c2 = h("div");
-    c2.textContent = "Domains";
-    header.appendChild(c2);
+    const header = h("div", { class: "zao-header" });
+    header.appendChild(h("div")); // grip column
+    header.appendChild(h("div")); // color column
+    header.appendChild(h("div", { text: "Category" }));
+    header.appendChild(h("div", { text: "Domains" }));
     header.appendChild(h("div")); // remove column
     container.appendChild(header);
 
     if (rules.length === 0) {
-      const empty = h("div");
-      empty.className = "zao-empty";
-      empty.textContent = "No groups yet — click \"+ Add group\" to start.";
-      container.appendChild(empty);
+      container.appendChild(h("div", {
+        class: "zao-empty",
+        text: "No groups yet — click \"+ Add group\" to start.",
+      }));
     } else {
       rules.forEach((rule, idx) => container.appendChild(renderRow(rule, idx)));
     }
 
-    const addRow = h("div");
-    addRow.className = "zao-add-row";
-    const addRowBtn = h("button");
+    const addRow = h("div", { class: "zao-add-row" });
+    const addRowBtn = h("button", { class: "zao-add-row-btn", text: "+ Add group" });
     addRowBtn.type = "button";
-    addRowBtn.className = "zao-add-row-btn";
-    addRowBtn.textContent = "+ Add group";
     addRowBtn.addEventListener("click", () => {
       rules.push({ name: "", domains: [] });
       persist();
-      render();
+      render({ type: "group-name", idx: rules.length - 1 });
     });
     addRow.appendChild(addRowBtn);
     container.appendChild(addRow);
+
+    if (focusTarget) restoreFocus(focusTarget);
   };
 
-  // Refresh widget state from the pref. Called by both the pref observer and
-  // the dialog-open watcher to pick up external changes (e.g. via the tab
-  // right-click submenu, AI Pass 2 grow, or Backup Import). Passes
-  // `keepIncomplete: true` so a blank row the user just added (and which
-  // persists to disk as `{name:"", domains:[]}`) survives the round-trip
-  // and continues to appear in the editor across browser restarts.
   const refreshFromPref = (reason) => {
     if (!container.isConnected) return;
     const fresh = readRulesPref({ keepIncomplete: true });
@@ -322,12 +378,8 @@ export const buildRulesEditor = (rules) => {
     render();
   };
 
-  // Expose the refresh hook on the container as an expando. `prefs-ui.mjs` calls
-  // this when the dialog reopens or its `[open]` attribute changes, to pick up
-  // any pref edits that happened while the dialog was closed.
   container._zaoRefresh = refreshFromPref;
 
-  // Watch for external changes to the rules pref.
   if (rulesPrefObserver) {
     try { Services.prefs.removeObserver(CONFIG.RULES_PREF, rulesPrefObserver); } catch {}
     rulesPrefObserver = null;
@@ -354,13 +406,8 @@ export const buildRulesEditor = (rules) => {
   return container;
 };
 
-// Standalone Backup & Restore section, injected by prefs-ui.mjs as a sibling
-// after the rules editor (not part of the editor card itself). Reads/writes the
-// rules pref directly so any open editor refreshes via its own pref observer.
 // ──────────────────────────────────────────────────────────────────────────────
-// Skip-domains editor — simple pill list. Hostnames in this list never get
-// touched by the tidy click; they're ejected from any group and parked at the
-// top of the workspace before Pass 1 runs (see click-handler.mjs).
+// Skip-domains editor — simple pill list.
 // ──────────────────────────────────────────────────────────────────────────────
 
 let skipPrefObserver = null;
@@ -373,17 +420,28 @@ export const buildSkipDomainsEditor = () => {
 
   let render;
 
+  const restoreFocus = (target) => {
+    if (!target) return;
+    if (target.type === "add") {
+      container.querySelector(".zao-pill-add")?.focus();
+    } else if (target.type === "remove") {
+      const btns = container.querySelectorAll(".zao-pill-remove");
+      if (btns.length > 0) btns[Math.min(target.idx, btns.length - 1)]?.focus();
+      else container.querySelector(".zao-pill-add")?.focus();
+    }
+  };
+
   const renderPill = (idx) => {
     const pill = h("span", { class: "zao-pill" });
-    const text = h("span", { text: domains[idx] });
-    pill.appendChild(text);
+    pill.appendChild(h("span", { text: domains[idx] }));
     const remove = h("button", { class: "zao-pill-remove", text: "×" });
     remove.type = "button";
     remove.title = "Remove from skip list";
+    remove.setAttribute("aria-label", `Remove ${domains[idx]} from skip list`);
     remove.addEventListener("click", () => {
       domains.splice(idx, 1);
       persist();
-      render();
+      render({ type: "remove", idx });
     });
     pill.appendChild(remove);
     return pill;
@@ -393,33 +451,43 @@ export const buildSkipDomainsEditor = () => {
     const addBtn = h("button", { class: "zao-pill-add", text: "+" });
     addBtn.type = "button";
     addBtn.title = "Add a domain to skip";
+    addBtn.setAttribute("aria-label", "Add domain to skip list");
     addBtn.addEventListener("click", () => {
       const input = h("input", { class: "zao-pill-input" });
       input.type = "text";
       input.placeholder = "host.com or *.host.com";
+      input.setAttribute("aria-label", "Domain to skip");
 
       let done = false;
-      const commit = () => {
+      const commit = (focusNext) => {
         if (done) return;
         done = true;
-        const val = input.value.trim();
-        if (val && !domains.includes(val)) {
-          domains.push(val);
-          persist();
+        const normalized = normalizeDomainInput(input.value);
+        if (normalized.length > 0) {
+          const existing = new Set(domains.map((d) => String(d).toLowerCase()));
+          let added = false;
+          for (const domain of normalized) {
+            if (!existing.has(domain.toLowerCase())) {
+              domains.push(domain);
+              existing.add(domain.toLowerCase());
+              added = true;
+            }
+          }
+          if (added) persist();
         }
-        render();
+        render(focusNext ? { type: "add" } : null);
       };
       const cancel = () => {
         if (done) return;
         done = true;
-        render();
+        render({ type: "add" });
       };
 
       input.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") { e.preventDefault(); commit(); }
+        if (e.key === "Enter") { e.preventDefault(); commit(true); }
         else if (e.key === "Escape") { e.preventDefault(); cancel(); }
       });
-      input.addEventListener("blur", () => setTimeout(commit, 0));
+      input.addEventListener("blur", () => setTimeout(() => commit(false), 0));
 
       addBtn.replaceWith(input);
       input.focus();
@@ -427,23 +495,22 @@ export const buildSkipDomainsEditor = () => {
     return addBtn;
   };
 
-  render = () => {
+  render = (focusTarget = null) => {
     container.replaceChildren();
     const row = h("div", { class: "zao-skip-row" });
     if (domains.length === 0) {
-      const empty = h("span", {
+      row.appendChild(h("span", {
         class: "zao-skip-empty",
         text: "No domains skipped — add hostnames you never want the tidy click to touch.",
-      });
-      row.appendChild(empty);
+      }));
     } else {
       domains.forEach((_, idx) => row.appendChild(renderPill(idx)));
     }
     row.appendChild(renderAddPill());
     container.appendChild(row);
+    if (focusTarget) restoreFocus(focusTarget);
   };
 
-  // Refresh on external writes (e.g. Import overwriting the pref).
   const refreshFromPref = () => {
     if (!container.isConnected) return;
     const fresh = readSkipDomainsPref();
@@ -482,69 +549,110 @@ export const teardownSkipPrefObserver = () => {
 };
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Backup & Restore — just the Export / Import buttons. The section header and
-// description come from Sine's native separator (declared in preferences.json)
-// and our SECTION_DESCRIPTIONS list (injected by prefs-ui.mjs).
-//
-// Export shape (v1):  { "rules": [...], "skipDomains": [...] }
-// Import accepts:
-//   • that object shape (overwrites both prefs)
-//   • a bare array (treated as rules-only, for backwards compat with v0 exports)
+// Backup & Restore — Export / Import with non-blocking inline status & confirm.
 // ──────────────────────────────────────────────────────────────────────────────
 export const buildBackupRestoreSection = () => {
   const section = h("div", { class: "zao-backup-section" });
   const bar = h("div", { class: "zao-backup-row" });
 
+  const statusEl = h("div", { class: "zao-backup-status" });
+  statusEl.setAttribute("role", "status");
+  statusEl.setAttribute("aria-live", "polite");
+
+  const confirmBox = h("div", { class: "zao-backup-confirm" });
+  confirmBox.hidden = true;
+
+  let statusTimer = null;
+  const setStatus = (text, state = "info", clearAfterMs = 0) => {
+    if (statusTimer != null) {
+      clearTimeout(statusTimer);
+      statusTimer = null;
+    }
+    statusEl.textContent = text || "";
+    if (state) statusEl.dataset.state = state;
+    else delete statusEl.dataset.state;
+    if (clearAfterMs > 0) {
+      statusTimer = setTimeout(() => {
+        statusTimer = null;
+        statusEl.textContent = "";
+        delete statusEl.dataset.state;
+      }, clearAfterMs);
+    }
+  };
+
+  const clearConfirm = () => {
+    confirmBox.replaceChildren();
+    confirmBox.hidden = true;
+  };
+
+  const showInlineConfirm = (summaryText, onConfirm) => {
+    confirmBox.replaceChildren();
+    confirmBox.hidden = false;
+
+    const msg = h("span", { class: "zao-backup-confirm-text", text: summaryText });
+    const actions = h("div", { class: "zao-backup-confirm-actions" });
+
+    const confirmBtn = h("button", { class: "zao-backup-btn zao-backup-btn-primary", text: "Replace settings" });
+    confirmBtn.type = "button";
+    confirmBtn.addEventListener("click", () => {
+      clearConfirm();
+      onConfirm();
+    });
+
+    const cancelBtn = h("button", { class: "zao-backup-btn", text: "Cancel" });
+    cancelBtn.type = "button";
+    cancelBtn.addEventListener("click", () => {
+      clearConfirm();
+      setStatus("Import cancelled.", "info", 2500);
+      importBtn.focus();
+    });
+
+    actions.append(confirmBtn, cancelBtn);
+    confirmBox.append(msg, actions);
+    confirmBtn.focus();
+  };
+
   const exportBtn = h("button", { class: "zao-backup-btn", text: "Export" });
   exportBtn.type = "button";
   exportBtn.title = "Download current rules + skip-domains as a JSON file";
   exportBtn.addEventListener("click", async () => {
+    clearConfirm();
     const payload = {
-      // keepIncomplete: true so a user's in-progress rules are included in
-      // the backup — otherwise restoring would silently drop them.
       rules: readRulesPref({ keepIncomplete: true }) || [],
       skipDomains: readSkipDomainsPref() || [],
     };
     const json = JSON.stringify(payload, null, 2);
-    // Filename: wand-backup-<N>groups-YYYYMMDD-HHmmss.json — encodes which
-    // mod produced it, how many rules were saved, and exact-second timestamp.
     const ts = new Date()
       .toISOString()
       .replace(/[-:T]/g, "")
       .replace(/\..*$/, "")
-      .replace(/^(\d{8})(\d{6})$/, "$1-$2"); // 20260519-223045
+      .replace(/^(\d{8})(\d{6})$/, "$1-$2");
     const filename = `wand-backup-${payload.rules.length}groups-${ts}.json`;
 
-    const finish = (label) => {
+    const finish = (label, statusMsg, state = "ok") => {
       const original = exportBtn.textContent;
       exportBtn.textContent = label;
       setTimeout(() => { exportBtn.textContent = original; }, 1500);
+      setStatus(statusMsg, state, 5000);
     };
-    const fallbackToClipboard = () => {
+
+    const fallbackToClipboard = async () => {
       try {
-        navigator.clipboard.writeText(json);
-        finish("Copied!");
+        await navigator.clipboard.writeText(json);
+        finish("Copied!", "Saved to clipboard (downloads folder unavailable).", "ok");
       } catch (e) {
         console.error(`${LOG} clipboard fallback failed:`, e);
         console.log(json);
-        alert("Couldn't save or copy. The JSON has been logged to the Browser Console.");
+        setStatus("Couldn't save or copy — backup JSON logged to Browser Console.", "err");
       }
     };
 
-    // Direct download into the user's default Downloads folder. Uses
-    // Firefox's Downloads API so the saved file also shows up in the browser's
-    // downloads panel (Ctrl+Shift+J) like any other download, with no save
-    // dialog interrupting the flow.
     try {
       const { Downloads } = ChromeUtils.importESModule(
-        "resource://gre/modules/Downloads.sys.mjs"
+        "resource://gre/modules/Downloads.sys.mjs",
       );
       const downloadsDir = await Downloads.getPreferredDownloadsDirectory();
       const targetPath = PathUtils.join(downloadsDir, filename);
-      // Write the bytes directly — simpler and more reliable than the
-      // Downloads.createDownload route, which needs a source URI that survives
-      // the async start() call. We then register the completed file with
-      // Firefox's download list so it appears in the downloads panel.
       await IOUtils.writeUTF8(targetPath, json);
       try {
         const list = await Downloads.getList(Downloads.PUBLIC);
@@ -563,15 +671,13 @@ export const buildBackupRestoreSection = () => {
         download.currentBytes = byteLen;
         await list.add(download);
       } catch (e) {
-        // Non-fatal — the file is already saved. The downloads panel just
-        // won't have a record. Most users won't notice.
         console.warn(`${LOG} could not register download with Firefox's download list:`, e);
       }
       console.log(`${LOG} exported ${payload.rules.length} rule(s) + ${payload.skipDomains.length} skip-domain(s) → ${targetPath}`);
-      finish("Downloaded!");
+      finish("Downloaded!", `Exported ${filename}`, "ok");
     } catch (e) {
       console.error(`${LOG} export failed:`, e);
-      fallbackToClipboard();
+      await fallbackToClipboard();
     }
   });
   bar.appendChild(exportBtn);
@@ -580,6 +686,7 @@ export const buildBackupRestoreSection = () => {
   importBtn.type = "button";
   importBtn.title = "Replace rules + skip-domains from a JSON file";
   importBtn.addEventListener("click", () => {
+    clearConfirm();
     const picker = document.createElementNS("http://www.w3.org/1999/xhtml", "input");
     picker.type = "file";
     picker.accept = "application/json,.json";
@@ -594,7 +701,6 @@ export const buildBackupRestoreSection = () => {
         let importedRules = null;
         let importedSkip = null;
         if (Array.isArray(parsed)) {
-          // Legacy v0 format — array of rules only.
           importedRules = parsed;
         } else if (parsed && typeof parsed === "object") {
           if (Array.isArray(parsed.rules)) importedRules = parsed.rules;
@@ -602,7 +708,9 @@ export const buildBackupRestoreSection = () => {
         } else {
           throw new Error("Top-level must be an array or { rules, skipDomains } object");
         }
-        if (!importedRules && !importedSkip) throw new Error("Nothing to import (no rules or skipDomains found)");
+        if (!importedRules && !importedSkip) {
+          throw new Error("Nothing to import (no rules or skipDomains found)");
+        }
 
         let validRules = null;
         if (importedRules) {
@@ -610,7 +718,7 @@ export const buildBackupRestoreSection = () => {
             .map((r) => ({
               name: typeof r?.name === "string" ? r.name.trim() : "",
               domains: Array.isArray(r?.domains)
-                ? r.domains.map((d) => String(d).trim()).filter(Boolean)
+                ? r.domains.flatMap((d) => normalizeDomainInput(String(d)))
                 : [],
               ...(typeof r?.color === "string" ? { color: r.color } : {}),
             }))
@@ -622,26 +730,30 @@ export const buildBackupRestoreSection = () => {
 
         let validSkip = null;
         if (importedSkip) {
-          validSkip = importedSkip.map((d) => String(d).trim()).filter(Boolean);
+          validSkip = [...new Set(importedSkip.flatMap((d) => normalizeDomainInput(String(d))))];
         }
 
         const current = {
-          // Match the widget's view (includes in-progress rules) so the
-          // "N → M" confirmation reflects what the user actually sees in
-          // the editor, not the filtered wand-click count.
           rules: (readRulesPref({ keepIncomplete: true }) || []).length,
           skip: (readSkipDomainsPref() || []).length,
         };
-        const summaryLines = [];
-        if (validRules) summaryLines.push(`Rules:  ${current.rules} → ${validRules.length}`);
-        if (validSkip) summaryLines.push(`Skip:   ${current.skip} → ${validSkip.length}`);
-        if (!window.confirm(`Replace your settings?\n\n${summaryLines.join("\n")}`)) return;
-        if (validRules) writeRulesPref(validRules);
-        if (validSkip) writeSkipDomainsPref(validSkip);
-        console.log(`${LOG} imported${validRules ? ` ${validRules.length} rule(s)` : ""}${validSkip ? ` ${validSkip.length} skip-domain(s)` : ""}`);
+        const summaryParts = [];
+        if (validRules) summaryParts.push(`Rules: ${current.rules} → ${validRules.length}`);
+        if (validSkip) summaryParts.push(`Skip: ${current.skip} → ${validSkip.length}`);
+
+        showInlineConfirm(`Replace current settings? (${summaryParts.join(" · ")})`, () => {
+          if (validRules) writeRulesPref(validRules);
+          if (validSkip) writeSkipDomainsPref(validSkip);
+          const importedSummary = [
+            validRules ? `${validRules.length} rule(s)` : "",
+            validSkip ? `${validSkip.length} skip-domain(s)` : "",
+          ].filter(Boolean).join(" and ");
+          console.log(`${LOG} imported ${importedSummary}`);
+          setStatus(`Imported ${importedSummary}.`, "ok", 5000);
+        });
       } catch (e) {
         console.error(`${LOG} import failed:`, e);
-        alert(`Import failed: ${e.message}`);
+        setStatus(`Import failed: ${e.message}`, "err");
       }
     });
     document.documentElement.appendChild(picker);
@@ -649,15 +761,10 @@ export const buildBackupRestoreSection = () => {
   });
   bar.appendChild(importBtn);
 
-  section.appendChild(bar);
+  section.append(bar, confirmBox, statusEl);
   return section;
 };
 
-// Called from prefs-ui.mjs's teardownSettingsObserver on window unload. The
-// observer is registered against the global Services.prefs, which lives in
-// the parent process and survives window close — without this explicit
-// removal it'd leak one observer + closure (over `container`, `rules`,
-// `window`) per open/close cycle of the settings dialog.
 export const teardownRulesPrefObserver = () => {
   if (!rulesPrefObserver) return;
   try { Services.prefs.removeObserver(CONFIG.RULES_PREF, rulesPrefObserver); } catch {}

@@ -5,6 +5,198 @@
 import { CONFIG, DEFAULT_RULES, LOG, ZEN_COLOR_NAMES, isValidHex, normalizePipSize, pipSizePrefFor } from "./config.mjs";
 import { normalizeSortingMode } from "./sorting-mode.mjs";
 
+// Opt-in starter rule presets (Dev, Docs, Social, Shopping, Finance, Media).
+// Never auto-applied unless the user explicitly imports or selects them.
+export const STARTER_RULE_PRESETS = Object.freeze([
+  Object.freeze({
+    name: "Dev",
+    color: "blue",
+    domains: [
+      "github.com",
+      "gitlab.com",
+      "stackoverflow.com",
+      "developer.mozilla.org",
+      "npmjs.com",
+      "linear.app",
+      "vercel.com",
+      "localhost",
+    ],
+  }),
+  Object.freeze({
+    name: "Docs",
+    color: "cyan",
+    domains: [
+      "docs.google.com",
+      "drive.google.com",
+      "notion.so",
+      "coda.io",
+      "dropbox.com",
+      "confluence.atlassian.com",
+    ],
+  }),
+  Object.freeze({
+    name: "Social",
+    color: "pink",
+    domains: [
+      "reddit.com",
+      "x.com",
+      "twitter.com",
+      "linkedin.com",
+      "instagram.com",
+      "bsky.app",
+      "mastodon.social",
+    ],
+  }),
+  Object.freeze({
+    name: "Shopping",
+    color: "orange",
+    domains: [
+      "amazon.com",
+      "amazon.de",
+      "ebay.com",
+      "ebay.de",
+      "etsy.com",
+      "idealo.de",
+      "zalando.de",
+    ],
+  }),
+  Object.freeze({
+    name: "Finance",
+    color: "green",
+    domains: [
+      "paypal.com",
+      "stripe.com",
+      "wise.com",
+      "revolut.com",
+      "chase.com",
+      "n26.com",
+      "ing.de",
+    ],
+  }),
+  Object.freeze({
+    name: "Media",
+    color: "purple",
+    domains: [
+      "youtube.com",
+      "netflix.com",
+      "spotify.com",
+      "twitch.tv",
+      "soundcloud.com",
+      "vimeo.com",
+      "disneyplus.com",
+    ],
+  }),
+]);
+
+/**
+ * Normalize a domain entry: trim, lowercase, strip protocol (`https://`),
+ * strip leading `www.`, strip path/query/hash/trailing slashes and ports,
+ * while preserving a leading `*.` wildcard prefix.
+ */
+export const normalizeDomainPattern = (raw) => {
+  if (typeof raw !== "string" && typeof raw !== "number") return "";
+  let s = String(raw).trim();
+  if (!s) return "";
+
+  const isWildcard = s.startsWith("*.");
+  if (isWildcard) s = s.slice(2).trim();
+
+  // Strip protocol if someone pasted a full URL (e.g. "https://www.GitHub.com/org/repo/")
+  s = s.replace(/^[a-z][a-z0-9+.-]*:\/\//i, "");
+  // Strip userinfo if present
+  const atIdx = s.indexOf("@");
+  const slashIdx = s.search(/[/?#]/);
+  if (atIdx !== -1 && (slashIdx === -1 || atIdx < slashIdx)) {
+    s = s.slice(atIdx + 1);
+  }
+  // Keep only host portion (drop path/query/hash)
+  s = s.split(/[/?#]/)[0];
+  // Strip optional port (e.g. localhost:3000 -> localhost)
+  s = s.replace(/:\d+$/, "");
+  // Trim trailing dots & lowercase
+  s = s.replace(/\.+$/, "").trim().toLowerCase();
+  // Strip leading www.
+  if (s.startsWith("www.")) s = s.slice(4);
+  if (!s) return "";
+  return isWildcard ? `*.${s}` : s;
+};
+
+/**
+ * Normalize a URL pattern (e.g., "https://www.GitHub.com/MyOrg/*" -> "github.com/myorg/*"
+ * preserving path case sensitivity only as lowercase for consistent matching).
+ */
+export const normalizeUrlPattern = (raw) => {
+  if (typeof raw !== "string" && typeof raw !== "number") return "";
+  let s = String(raw).trim();
+  if (!s) return "";
+  s = s.replace(/^[a-z][a-z0-9+.-]*:\/\//i, "");
+  // Strip query/fragment unless pattern explicitly uses them? Keep host+path clean.
+  s = s.split("#")[0].trim();
+  if (!s) return "";
+  const slashPos = s.indexOf("/");
+  if (slashPos === -1) {
+    const host = s.toLowerCase().replace(/^www\./, "").replace(/\.+$/, "");
+    return host;
+  }
+  let host = s.slice(0, slashPos).toLowerCase().replace(/^www\./, "").replace(/\.+$/, "");
+  let path = s.slice(slashPos).replace(/\/{2,}/g, "/");
+  if (path.length > 1 && path.endsWith("/")) path = path.slice(0, -1);
+  return `${host}${path}`;
+};
+
+const dedupeStrings = (arr) => {
+  const seen = new Set();
+  const out = [];
+  for (const item of arr) {
+    const key = item.toLowerCase();
+    if (!item || seen.has(key)) continue;
+    seen.add(key);
+    out.push(item);
+  }
+  return out;
+};
+
+export const normalizeRule = (r) => {
+  const name = typeof r?.name === "string" ? r.name.trim() : "";
+  const domains = Array.isArray(r?.domains)
+    ? dedupeStrings(r.domains.map(normalizeDomainPattern).filter(Boolean))
+    : [];
+
+  const out = { name, domains };
+
+  if (typeof r?.color === "string") {
+    const c = r.color.trim();
+    if (ZEN_COLOR_NAMES.has(c) || isValidHex(c)) out.color = c;
+  }
+
+  if (Array.isArray(r?.urlPatterns)) {
+    const urlPatterns = dedupeStrings(r.urlPatterns.map(normalizeUrlPattern).filter(Boolean));
+    if (urlPatterns.length > 0) out.urlPatterns = urlPatterns;
+  }
+
+  if (Array.isArray(r?.titlePatterns)) {
+    const titlePatterns = dedupeStrings(
+      r.titlePatterns.map((p) => String(p ?? "").trim()).filter(Boolean),
+    );
+    if (titlePatterns.length > 0) out.titlePatterns = titlePatterns;
+  }
+
+  if (Array.isArray(r?.containers)) {
+    const containers = dedupeStrings(
+      r.containers.map((c) => String(c ?? "").trim()).filter(Boolean),
+    );
+    if (containers.length > 0) out.containers = containers;
+  }
+
+  return out;
+};
+
+const hasAnyRuleMatcher = (rule) =>
+  (Array.isArray(rule.domains) && rule.domains.length > 0) ||
+  (Array.isArray(rule.urlPatterns) && rule.urlPatterns.length > 0) ||
+  (Array.isArray(rule.titlePatterns) && rule.titlePatterns.length > 0) ||
+  (Array.isArray(rule.containers) && rule.containers.length > 0);
+
 /**
  * Whether deterministic domain rules (Pass 1) are enabled.
  * Off by default (`false`) so sorting relies purely on JEV + Fallback-LLM
@@ -30,23 +222,10 @@ export const readRulesPref = ({ keepIncomplete = false } = {}) => {
     if (!raw.trim()) return null;
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return null;
-    const cleaned = parsed
-      .map((r) => {
-        const out = {
-          name: typeof r?.name === "string" ? r.name.trim() : "",
-          domains: Array.isArray(r?.domains)
-            ? r.domains.map((d) => String(d).trim()).filter((d) => d.length > 0)
-            : [],
-        };
-        if (typeof r?.color === "string") {
-          const c = r.color.trim();
-          if (ZEN_COLOR_NAMES.has(c) || isValidHex(c)) out.color = c;
-        }
-        return out;
-      });
+    const cleaned = parsed.map(normalizeRule);
     return keepIncomplete
       ? cleaned
-      : cleaned.filter((r) => r.name.length > 0 && r.domains.length > 0);
+      : cleaned.filter((r) => r.name.length > 0 && hasAnyRuleMatcher(r));
   } catch (e) {
     console.warn(`${LOG} rules pref parse failed:`, e);
     return null;
@@ -55,7 +234,8 @@ export const readRulesPref = ({ keepIncomplete = false } = {}) => {
 
 export const writeRulesPref = (rules) => {
   try {
-    Services.prefs.setStringPref(CONFIG.RULES_PREF, JSON.stringify(rules));
+    const normalized = Array.isArray(rules) ? rules.map(normalizeRule) : [];
+    Services.prefs.setStringPref(CONFIG.RULES_PREF, JSON.stringify(normalized));
   } catch (e) {
     console.error(`${LOG} failed to write rules pref:`, e);
   }
@@ -68,7 +248,7 @@ export const readSkipDomainsPref = () => {
     if (!raw.trim()) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return parsed.map((d) => String(d).trim()).filter((d) => d.length > 0);
+    return dedupeStrings(parsed.map(normalizeDomainPattern).filter(Boolean));
   } catch (e) {
     console.warn(`${LOG} skip-domains pref parse failed:`, e);
     return [];
@@ -77,7 +257,10 @@ export const readSkipDomainsPref = () => {
 
 export const writeSkipDomainsPref = (domains) => {
   try {
-    Services.prefs.setStringPref(CONFIG.SKIP_DOMAINS_PREF, JSON.stringify(domains));
+    const normalized = Array.isArray(domains)
+      ? dedupeStrings(domains.map(normalizeDomainPattern).filter(Boolean))
+      : [];
+    Services.prefs.setStringPref(CONFIG.SKIP_DOMAINS_PREF, JSON.stringify(normalized));
   } catch (e) {
     console.error(`${LOG} failed to write skip-domains pref:`, e);
   }
@@ -110,15 +293,35 @@ export const validateRules = (data) => {
   if (!data || !Array.isArray(data.rules)) {
     throw new Error("rules.json must have a top-level 'rules' array");
   }
+  const normalized = [];
   for (const [i, rule] of data.rules.entries()) {
     if (!rule || typeof rule.name !== "string" || !rule.name.trim()) {
       throw new Error(`rule[${i}] missing or empty 'name'`);
     }
-    if (!Array.isArray(rule.domains) || rule.domains.some((d) => typeof d !== "string")) {
+    const hasExtended =
+      (Array.isArray(rule.urlPatterns) && rule.urlPatterns.length > 0) ||
+      (Array.isArray(rule.titlePatterns) && rule.titlePatterns.length > 0) ||
+      (Array.isArray(rule.containers) && rule.containers.length > 0);
+
+    if (rule.domains !== undefined) {
+      if (!Array.isArray(rule.domains) || rule.domains.some((d) => typeof d !== "string")) {
+        throw new Error(`rule[${i}] '${rule.name}': 'domains' must be a string array`);
+      }
+    } else if (!hasExtended) {
       throw new Error(`rule[${i}] '${rule.name}': 'domains' must be a string array`);
     }
+
+    for (const field of ["urlPatterns", "titlePatterns", "containers"]) {
+      if (rule[field] !== undefined) {
+        if (!Array.isArray(rule[field]) || rule[field].some((v) => typeof v !== "string")) {
+          throw new Error(`rule[${i}] '${rule.name}': '${field}' must be a string array`);
+        }
+      }
+    }
+
+    normalized.push(normalizeRule(rule));
   }
-  return data.rules;
+  return normalized;
 };
 
 const loadRulesFromFile = async () => {

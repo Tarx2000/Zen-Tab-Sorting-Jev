@@ -1,31 +1,215 @@
 import { captureNewGroupAppearance } from "./group-appearance.mjs";
-// Zen Tab Sorting — Pass 1: deterministic domain → group matching.
+// Zen Tab Sorting — Pass 1: deterministic specificity-ranked rule → group matching.
 // Pure logic over rules + tab info; applyPass1 mutates the DOM via gBrowser APIs.
 
 import { LOG } from "./config.mjs";
 import { findExistingGroup, expandIfCollapsed, collapseGroup, applyGroupColor, findSafeInsertAnchor } from "./groups.mjs";
+import { normalizeDomainPattern, normalizeUrlPattern } from "./rules.mjs";
 
-// Match a hostname against a single rule-domain pattern.
+const normalizeHost = (hostname) => {
+  if (!hostname) return "";
+  return normalizeDomainPattern(String(hostname)).replace(/^\*\./, "");
+};
+
+// Match a hostname against a single rule-domain pattern (case-insensitive, normalized).
 //   "host.com"    matches the bare host AND any subdomain
 //   "*.host.com"  matches subdomains only (NOT the bare host)
 export const matchesDomain = (hostname, pattern) => {
-  if (!hostname || !pattern) return false;
-  if (pattern.startsWith("*.")) {
-    const base = pattern.slice(2);
-    return hostname.endsWith("." + base);
+  const host = normalizeHost(hostname);
+  const pat = normalizeDomainPattern(pattern);
+  if (!host || !pat) return false;
+  if (pat.startsWith("*.")) {
+    const base = pat.slice(2);
+    return base.length > 0 && host.endsWith("." + base);
   }
-  return hostname === pattern || hostname.endsWith("." + pattern);
+  return host === pat || host.endsWith("." + pat);
 };
 
-// First-match-wins: find the first rule whose domain patterns include the tab's hostname.
-export const findGroupForTab = (tabInfo, rules) => {
-  for (const rule of rules) {
-    if (rule.domains.some((d) => matchesDomain(tabInfo.hostname, d))) {
-      return rule.name;
+// Safe glob matcher (only `*` wildcard, linear/bounded regex without ReDoS).
+const globToRegex = (glob) => {
+  const escaped = glob.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*+/g, ".*");
+  return new RegExp(`^${escaped}$`, "i");
+};
+
+const extractNormalizedHostPath = (tabInfo) => {
+  const rawUrl = String(tabInfo?.url || "").trim();
+  if (rawUrl) {
+    try {
+      const parsed = new URL(rawUrl);
+      const host = parsed.hostname.toLowerCase().replace(/^www\./, "");
+      let path = parsed.pathname.replace(/\/{2,}/g, "/");
+      if (path.length > 1 && path.endsWith("/")) path = path.slice(0, -1);
+      return `${host}${path}`;
+    } catch {
+      const stripped = normalizeUrlPattern(rawUrl);
+      if (stripped) return stripped;
     }
   }
-  return null;
+  return normalizeHost(tabInfo?.hostname);
 };
+
+// Match a URL pattern like "github.com/org/*" against a tab's normalized host + path.
+export const matchesUrlPattern = (tabInfo, pattern) => {
+  const normPat = normalizeUrlPattern(pattern);
+  if (!normPat) return false;
+  const candidate = extractNormalizedHostPath(tabInfo);
+  if (!candidate) return false;
+  if (normPat.includes("*")) {
+    return globToRegex(normPat).test(candidate);
+  }
+  // Exact or path-prefix match (e.g., "github.com/org" matches "github.com/org" and "github.com/org/repo").
+  const lowerCand = candidate.toLowerCase();
+  const lowerPat = normPat.toLowerCase();
+  if (lowerCand === lowerPat) return true;
+  if (lowerPat.includes("/")) {
+    return lowerCand.startsWith(lowerPat + "/");
+  }
+  return lowerCand === lowerPat || lowerCand.startsWith(lowerPat + "/");
+};
+
+// Match a title pattern (case-insensitive substring or `*` glob).
+export const matchesTitlePattern = (title, pattern) => {
+  const rawTitle = String(title || "").trim();
+  const pat = String(pattern || "").trim();
+  if (!rawTitle || !pat) return false;
+  if (pat.includes("*")) {
+    return globToRegex(pat).test(rawTitle);
+  }
+  return rawTitle.toLowerCase().includes(pat.toLowerCase());
+};
+
+const tabMatchesContainers = (tabInfo, containers) => {
+  if (!Array.isArray(containers) || containers.length === 0) return true;
+  const tabContainers = [
+    tabInfo?.containerLabel,
+    tabInfo?.container,
+    tabInfo?.userContextId != null ? String(tabInfo.userContextId) : "",
+  ]
+    .map((v) => String(v || "").trim().toLowerCase())
+    .filter(Boolean);
+  if (tabContainers.length === 0) return false;
+  return containers.some((c) => tabContainers.includes(String(c || "").trim().toLowerCase()));
+};
+
+// Specificity tiers (higher wins; ties broken by detailLength then rule array order):
+//   500 — URL path pattern match (`urlPatterns`)
+//   400 — Exact host match (`hostname === pattern`)
+//   300 — Wildcard subdomain match (`*.sub.domain.com`)
+//   200 — Parent domain match (`domain.com` matching `sub.domain.com`)
+//   150 — Title pattern match (`titlePatterns`)
+//   100 — Container-only match (`containers`)
+// Container constraint adds a +10 specificity bonus when combined with another matcher.
+const scoreRuleForTab = (tabInfo, rule) => {
+  if (!rule || !rule.name) return null;
+
+  const hasContainers = Array.isArray(rule.containers) && rule.containers.length > 0;
+  if (hasContainers && !tabMatchesContainers(tabInfo, rule.containers)) {
+    return null;
+  }
+
+  const containerBonus = hasContainers ? 10 : 0;
+  let bestTier = 0;
+  let bestDetail = 0;
+
+  // 1. URL path patterns (highest specificity)
+  if (Array.isArray(rule.urlPatterns)) {
+    for (const pat of rule.urlPatterns) {
+      if (matchesUrlPattern(tabInfo, pat)) {
+        const cleanLen = normalizeUrlPattern(pat).replace(/\*/g, "").length;
+        if (500 > bestTier || (500 === bestTier && cleanLen > bestDetail)) {
+          bestTier = 500;
+          bestDetail = cleanLen;
+        }
+      }
+    }
+  }
+
+  // 2-4. Domain patterns: exact host > *.subdomain > parent domain
+  const host = normalizeHost(tabInfo?.hostname);
+  if (host && Array.isArray(rule.domains)) {
+    for (const rawDomain of rule.domains) {
+      const pat = normalizeDomainPattern(rawDomain);
+      if (!pat) continue;
+      if (pat.startsWith("*.")) {
+        const base = pat.slice(2);
+        if (base && host.endsWith("." + base)) {
+          const score = 300;
+          const detail = base.length;
+          if (score > bestTier || (score === bestTier && detail > bestDetail)) {
+            bestTier = score;
+            bestDetail = detail;
+          }
+        }
+      } else if (host === pat) {
+        const score = 400;
+        const detail = pat.length;
+        if (score > bestTier || (score === bestTier && detail > bestDetail)) {
+          bestTier = score;
+          bestDetail = detail;
+        }
+      } else if (host.endsWith("." + pat)) {
+        const score = 200;
+        const detail = pat.length;
+        if (score > bestTier || (score === bestTier && detail > bestDetail)) {
+          bestTier = score;
+          bestDetail = detail;
+        }
+      }
+    }
+  }
+
+  // 5. Title patterns
+  if (Array.isArray(rule.titlePatterns)) {
+    for (const pat of rule.titlePatterns) {
+      if (matchesTitlePattern(tabInfo?.title, pat)) {
+        const cleanLen = String(pat).replace(/\*/g, "").trim().length;
+        if (150 > bestTier || (150 === bestTier && cleanLen > bestDetail)) {
+          bestTier = 150;
+          bestDetail = cleanLen;
+        }
+      }
+    }
+  }
+
+  // 6. Container-only rule (no domains, urlPatterns, or titlePatterns configured)
+  const hasOtherMatchers =
+    (Array.isArray(rule.domains) && rule.domains.length > 0) ||
+    (Array.isArray(rule.urlPatterns) && rule.urlPatterns.length > 0) ||
+    (Array.isArray(rule.titlePatterns) && rule.titlePatterns.length > 0);
+
+  if (bestTier === 0) {
+    if (hasContainers && !hasOtherMatchers) {
+      return { tier: 100, detail: 1 };
+    }
+    return null;
+  }
+
+  return { tier: bestTier + containerBonus, detail: bestDetail };
+};
+
+// Specificity-ranked rule selection:
+//   URL path pattern > exact host > *.subdomain > parent domain > title pattern > container > rule order.
+export const findGroupForTab = (tabInfo, rules) => {
+  if (!Array.isArray(rules) || rules.length === 0) return null;
+  let winner = null;
+  let winnerScore = null;
+
+  for (const rule of rules) {
+    const score = scoreRuleForTab(tabInfo, rule);
+    if (!score) continue;
+    if (
+      !winnerScore ||
+      score.tier > winnerScore.tier ||
+      (score.tier === winnerScore.tier && score.detail > winnerScore.detail)
+    ) {
+      winner = rule.name;
+      winnerScore = score;
+    }
+  }
+  return winner;
+};
+
+const normGroupName = (name) => String(name || "").trim().toLowerCase();
 
 /**
  * Plan what to do with each eligible tab based on the current rules. PURE — no DOM
@@ -48,7 +232,7 @@ export const runPass1 = (tabs, rules) => {
   for (const a of assignments) {
     if (!a.group) {
       unmatched.push(a);
-    } else if (a.group === a.currentGroup) {
+    } else if (normGroupName(a.group) === normGroupName(a.currentGroup)) {
       alreadyCorrect.push(a);
     } else {
       if (!byGroup.has(a.group)) byGroup.set(a.group, []);
@@ -62,17 +246,30 @@ export const runPass1 = (tabs, rules) => {
  * Execute the moves planned by `runPass1`. Creates new tab-groups when needed,
  * reuses existing ones, and applies per-rule colors after placement.
  *
+ * @param {Map<string, Array>} byGroup
+ * @param {string} workspaceId
+ * @param {Array} rules
+ * @param {object} [options]
+ * @param {boolean} [options.deferCollapse=false]
  * @returns {{ movedToExisting, createdGroups, movedToNew, errors[] }} counts + per-group error messages.
  */
-export const applyPass1 = (byGroup, workspaceId, rules) => {
+export const applyPass1 = (byGroup, workspaceId, rules, options = {}) => {
+  const deferCollapse = Boolean(options?.deferCollapse);
   let movedToExisting = 0;
   let createdGroups = 0;
   let movedToNew = 0;
   const errors = [];
 
-  const colorByName = new Map(rules.filter((r) => r.color).map((r) => [r.name, r.color]));
+  const colorByLowerName = new Map(
+    (rules || [])
+      .filter((r) => r?.name && r?.color)
+      .map((r) => [normGroupName(r.name), r.color]),
+  );
 
   for (const [groupName, items] of byGroup) {
+    const targetLower = normGroupName(groupName);
+    const groupColor = colorByLowerName.get(targetLower);
+
     // Resolve each item's tab info to its live DOM node (`_tab`) and re-check the
     // current group from the DOM. We re-check (rather than trusting the `currentGroup`
     // field set by runPass1) because the DOM may have changed between planning and
@@ -82,7 +279,7 @@ export const applyPass1 = (byGroup, workspaceId, rules) => {
       .filter((t) => {
         if (!t?.isConnected) return false;
         const currentGroupName = t.closest("tab-group")?.getAttribute("label");
-        return currentGroupName !== groupName;
+        return normGroupName(currentGroupName) !== targetLower;
       });
 
     if (tabsForGroup.length === 0) continue;
@@ -103,13 +300,14 @@ export const applyPass1 = (byGroup, workspaceId, rules) => {
           gBrowser.moveTabToExistingGroup(tab, existing);
           movedToExisting++;
         }
-        if (colorByName.has(groupName)) applyGroupColor(existing, colorByName.get(groupName));
+        if (groupColor) applyGroupColor(existing, groupColor);
         if (wasCollapsed) {
-          // Defer one tick so Firefox's tab-insertion bookkeeping completes
-          // before we collapse — otherwise the new tab's aria-hidden may
-          // not be set in the same paint.
-          const groupRef = existing;
-          setTimeout(() => collapseGroup(groupRef), 0);
+          if (deferCollapse) {
+            const groupRef = existing;
+            setTimeout(() => collapseGroup(groupRef), 0);
+          } else {
+            collapseGroup(existing);
+          }
         }
       } catch (e) {
         console.error(`${LOG} error moving tabs into "${groupName}":`, e);
@@ -128,7 +326,7 @@ export const applyPass1 = (byGroup, workspaceId, rules) => {
           captureNewGroupAppearance(newGroup);
           createdGroups++;
           movedToNew += tabsForGroup.length;
-          if (colorByName.has(groupName)) applyGroupColor(newGroup, colorByName.get(groupName));
+          if (groupColor) applyGroupColor(newGroup, groupColor);
         } else {
           console.warn(`${LOG} addTabGroup returned no element for "${groupName}"`);
           errors.push({ group: groupName, error: "addTabGroup returned null" });

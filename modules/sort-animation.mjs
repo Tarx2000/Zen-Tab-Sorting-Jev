@@ -1,44 +1,83 @@
 import { GROUP_SELECTOR, groupHeader, isSidebarCopy } from "./sidebar-elements.mjs";
 import { activeLibrarySection, animateLibraryChanges } from "./library-sort-animation.mjs";
-import { animateSortElement } from "./sort-motion.mjs";
+import {
+  animateSortElement,
+  computeFlightDuration,
+  createPresentationScope,
+  prefersReducedMotion,
+  SETTLE_EASE,
+  SPRING_EASE,
+} from "./sort-motion.mjs";
+import { showToast } from "./ui-toast.mjs";
 
 const HTML = "http://www.w3.org/1999/xhtml";
 const SVG = "http://www.w3.org/2000/svg";
 const MAX_GHOSTS = 36;
-const EASE_OUT_EXPO = "cubic-bezier(0.22, 1, 0.36, 1)";
+const OFFSCREEN_EXIT_PX = 36;
 
-const visibleRect = (win, element, allowHidden = false) => {
-  if (!element?.isConnected || isSidebarCopy(element)) return null;
-  const workspace = element.closest?.("zen-workspace");
-  // Hidden workspace strips can retain on-screen rectangles while clipping or
-  // opacity hides them. They are background moves, never visible flight origins.
-  if (workspace && workspace.id !== win.gZenWorkspaces.activeWorkspace) return null;
+const readBounds = (element) => {
   const rect = element.getBoundingClientRect();
-  if (rect.width < 2 || rect.height < 2 || rect.bottom <= 0 || rect.top >= win.innerHeight || rect.right <= 0 || rect.left >= win.innerWidth) return null;
-  const style = win.getComputedStyle(element);
-  if (style.display === "none" || (!allowHidden && style.visibility === "hidden")) return null;
-  const viewport = element.closest?.("arrowscrollbox")?.getBoundingClientRect();
-  if (viewport && (rect.bottom <= viewport.top || rect.top >= viewport.bottom || rect.right <= viewport.left || rect.left >= viewport.right)) return null;
-  return { left: rect.left, top: rect.top, width: rect.width, height: Math.min(rect.height, 44) };
+  return {
+    left: rect.left,
+    top: rect.top,
+    right: rect.right,
+    bottom: rect.bottom,
+    width: rect.width,
+    height: rect.height,
+  };
 };
 
-const elementRect = (win, node, allowHidden = false) => {
+const isInActiveWorkspace = (win, element) => {
+  const workspace = element.closest?.("zen-workspace");
+  return !workspace || workspace.id === win.gZenWorkspaces.activeWorkspace;
+};
+
+const visibleRect = (win, element, allowHidden = false, viewport = null, winWidth = win.innerWidth, winHeight = win.innerHeight) => {
+  if (!element?.isConnected || isSidebarCopy(element)) return null;
+  // Hidden workspace strips can retain on-screen rectangles while clipping or
+  // opacity hides them. They are background moves, never visible flight origins.
+  if (!isInActiveWorkspace(win, element)) return null;
+  const rect = readBounds(element);
+  if (rect.width < 2 || rect.height < 2 || rect.bottom <= 0 || rect.top >= winHeight || rect.right <= 0 || rect.left >= winWidth) return null;
+  const style = win.getComputedStyle(element);
+  if (style.display === "none" || (!allowHidden && style.visibility === "hidden")) return null;
+  if (viewport && (rect.bottom <= viewport.top || rect.top >= viewport.bottom || rect.right <= viewport.left || rect.left >= viewport.right)) return null;
+  return { left: rect.left, top: rect.top, width: rect.width, height: Math.min(rect.height, 48) };
+};
+
+const elementRect = (win, node, allowHidden = false, viewport = null, winWidth = win.innerWidth, winHeight = win.innerHeight) => {
   let anchor = node.matches?.(GROUP_SELECTOR) ? groupHeader(node) : node;
-  let rect = visibleRect(win, anchor, allowHidden);
+  let rect = visibleRect(win, anchor, allowHidden, viewport, winWidth, winHeight);
   let group = node.parentElement?.closest?.(GROUP_SELECTOR);
   while (!rect && group) {
     anchor = groupHeader(group);
-    rect = visibleRect(win, anchor, allowHidden);
+    rect = visibleRect(win, anchor, allowHidden, viewport, winWidth, winHeight);
     group = group.parentElement?.closest?.(GROUP_SELECTOR);
   }
   return rect;
 };
 
-const spaceAnchor = (win, id) => {
-  for (const element of win.document.querySelectorAll("toolbarbutton[zen-workspace-id]")) {
-    if (element.getAttribute("zen-workspace-id") === id && visibleRect(win, element)) return element;
+/**
+ * Unclipped layout rect for a same-space target whose node or ancestor group
+ * is currently scrolled outside the sidebar viewport.
+ */
+const unclippedElementRect = (win, node) => {
+  if (!node?.isConnected || isSidebarCopy(node) || !isInActiveWorkspace(win, node)) return null;
+  let anchor = node.matches?.(GROUP_SELECTOR) ? groupHeader(node) : node;
+  let group = node.parentElement?.closest?.(GROUP_SELECTOR);
+  while (anchor) {
+    if (anchor.isConnected) {
+      const style = win.getComputedStyle(anchor);
+      if (style.display !== "none") {
+        const rect = readBounds(anchor);
+        if (rect.width >= 2 && rect.height >= 2) return rect;
+      }
+    }
+    if (!group) break;
+    anchor = groupHeader(group);
+    group = group.parentElement?.closest?.(GROUP_SELECTOR);
   }
-  return win.gZenWorkspaces.workspaceElement(id)?.indicator;
+  return null;
 };
 
 const createFallbackIconSvg = (doc, isGroup) => {
@@ -84,35 +123,60 @@ const captureEntryAppearance = (win, node, rect) => {
   return {
     image: !isGroup ? (node.image || "") : "",
     isGroup,
+    compact: rect.width <= 52,
     color: style.color,
     font: style.font,
+    borderRadius: style.borderRadius || "",
     accent,
   };
 };
 
-const animate = async (win, node, dx, dy, delay, duration, scale = 1) => {
-  try {
-    await animateSortElement(win, node, {
-      transform: ["translate3d(0, 0, 0) scale(1)", `translate3d(${dx}px, ${dy}px, 0) scale(${scale})`],
-      opacity: [1, 0.92, 0],
-      offset: [0, 0.72, 1],
-    }, { duration, delay, easing: EASE_OUT_EXPO, fill: "both" });
-  } finally { node.remove(); }
+const collectSpaceAnchorRects = (win, winWidth, winHeight) => {
+  const rects = new Map();
+  for (const element of win.document.querySelectorAll("toolbarbutton[zen-workspace-id]")) {
+    const id = element.getAttribute("zen-workspace-id");
+    if (!id || rects.has(id)) continue;
+    const rect = visibleRect(win, element, false, null, winWidth, winHeight);
+    if (rect) rects.set(id, rect);
+  }
+  return (id) => {
+    if (!id) return null;
+    if (rects.has(id)) return rects.get(id);
+    const indicator = win.gZenWorkspaces.workspaceElement?.(id)?.indicator;
+    const rect = indicator ? visibleRect(win, indicator, false, null, winWidth, winHeight) : null;
+    rects.set(id, rect);
+    return rect;
+  };
 };
 
-/** Native mutations plus a bounded presentation. Never clone live tab elements. */
-export const animateSidebarChanges = async (win, mutate, { entries, budget = 3000 } = {}) => {
-  const reducedMotion = Boolean(win.gReduceMotion || win.matchMedia?.("(prefers-reduced-motion: reduce)").matches);
+/** Native mutations plus a bounded, 3-beat presentation. Never clone live tab elements. */
+export const animateSidebarChanges = async (
+  win,
+  mutate,
+  { entries, budget = 3000, signal, onBackgroundSummary } = {},
+) => {
+  const reducedMotion = prefersReducedMotion(win);
   const librarySection = activeLibrarySection(win);
-  if (librarySection) return animateLibraryChanges(win, librarySection, mutate, reducedMotion, entries);
+  if (librarySection) {
+    return animateLibraryChanges(win, librarySection, mutate, reducedMotion, entries, { signal });
+  }
+
   const explicit = Boolean(entries);
+  const activeSpaceId = win.gZenWorkspaces.activeWorkspace;
+  const activeSpaceEl = win.gZenWorkspaces.activeWorkspaceElement;
+  const scrollbox = activeSpaceEl?.closest?.("arrowscrollbox") || activeSpaceEl?.querySelector?.("arrowscrollbox") || null;
+
+  // Read phase 1: batch ALL pre-mutation geometry & styles before ANY DOM write.
+  const winWidth1 = win.innerWidth;
+  const winHeight1 = win.innerHeight;
+  const viewport1 = scrollbox ? readBounds(scrollbox) : null;
+
   const nodes = entries || [...win.gBrowser.tabs]
-    .filter((node) => node.getAttribute("zen-workspace-id") === win.gZenWorkspaces.activeWorkspace && !isSidebarCopy(node))
+    .filter((node) => node.getAttribute("zen-workspace-id") === activeSpaceId && !isSidebarCopy(node))
     .map((node) => ({ node, label: node.getAttribute("label") || "Tab" }));
 
-  // Read phase 1: snapshot pre-mutation geometry & styles before any DOM write.
   const before = nodes.map((entry) => {
-    const rect = elementRect(win, entry.node);
+    const rect = elementRect(win, entry.node, false, viewport1, winWidth1, winHeight1);
     return {
       ...entry,
       rect,
@@ -121,72 +185,138 @@ export const animateSidebarChanges = async (win, mutate, { entries, budget = 300
       ...captureEntryAppearance(win, entry.node, rect),
     };
   });
-  const activeSpaceEl = win.gZenWorkspaces.activeWorkspaceElement;
+
   const existingGroups = new Set(activeSpaceEl?.querySelectorAll(GROUP_SELECTOR) || []);
   const layout = [...(activeSpaceEl?.querySelectorAll(`tab, ${GROUP_SELECTOR}`) || [])]
     .filter((node) => !isSidebarCopy(node))
-    .map((node) => node.matches(GROUP_SELECTOR) ? groupHeader(node) : node)
-    .map((node) => ({ node, rect: visibleRect(win, node) })).filter(({ rect }) => rect);
+    .map((node) => (node.matches(GROUP_SELECTOR) ? groupHeader(node) : node))
+    .map((node) => ({ node, rect: visibleRect(win, node, false, viewport1, winWidth1, winHeight1) }))
+    .filter(({ rect }) => rect);
 
-  const diagnostics = { startedAt: Date.now(), surface: "sidebar", reducedMotion, flyCount: 0, backgroundCount: 0, finished: false };
+  const diagnostics = {
+    startedAt: Date.now(),
+    surface: "sidebar",
+    reducedMotion,
+    flyCount: 0,
+    offscreenExitCount: 0,
+    backgroundCount: 0,
+    cancelled: false,
+    finished: false,
+  };
   win.ZenTabSortingLastAnimation = diagnostics;
-  // Hide explicit moving units before an asynchronous retry can yield a paint.
-  const hidden = [];
+
+  const hidden = new Set();
   const hide = (node) => {
-    if (!node?.isConnected || hidden.includes(node)) return;
+    if (!node?.isConnected || hidden.has(node)) return;
     node.setAttribute("data-zao-in-flight", "true");
-    hidden.push(node);
+    hidden.add(node);
   };
-  let layer;
+  const unhide = (node) => {
+    if (!node) return;
+    node.removeAttribute("data-zao-in-flight");
+    hidden.delete(node);
+  };
+
+  let unclippedLayer = null;
+  let clippedLayer = null;
+  let scope = null;
   const prepared = new Map();
-  const ensureLayer = () => {
-    if (layer) return;
-    layer = win.document.createElementNS(HTML, "div");
-    layer.className = "zao-sort-animation-layer";
-    layer.setAttribute("data-zao-animation", "true");
-    layer.setAttribute("aria-hidden", "true");
-    win.document.documentElement.appendChild(layer);
+
+  const ensureUnclippedLayer = () => {
+    if (unclippedLayer) return unclippedLayer;
+    unclippedLayer = win.document.createElementNS(HTML, "div");
+    unclippedLayer.className = "zao-sort-animation-layer";
+    unclippedLayer.setAttribute("data-zao-animation", "true");
+    unclippedLayer.setAttribute("aria-hidden", "true");
+    win.document.documentElement.appendChild(unclippedLayer);
+    return unclippedLayer;
   };
-  const createGhost = (entry) => {
-    ensureLayer();
+
+  const ensureClippedLayer = (viewport, winW, winH) => {
+    if (!viewport) return ensureUnclippedLayer();
+    if (!clippedLayer) {
+      clippedLayer = win.document.createElementNS(HTML, "div");
+      clippedLayer.className = "zao-sort-animation-layer zao-sort-animation-layer-clipped";
+      clippedLayer.setAttribute("data-zao-animation", "true");
+      clippedLayer.setAttribute("aria-hidden", "true");
+      win.document.documentElement.appendChild(clippedLayer);
+    }
+    // Clip strictly to vertical scrollbox bounds with small horizontal breathing room for shadow.
+    const top = Math.max(0, Math.round(viewport.top));
+    const bottom = Math.max(0, Math.round(winH - viewport.bottom));
+    const left = Math.max(0, Math.round(viewport.left - 8));
+    const right = Math.max(0, Math.round(winW - viewport.right - 8));
+    clippedLayer.style.clipPath = `inset(${top}px ${right}px ${bottom}px ${left}px)`;
+    return clippedLayer;
+  };
+
+  const createGhost = (entry, targetLayer) => {
     const ghost = win.document.createElementNS(HTML, "div");
-    ghost.className = "zao-sort-ghost";
+    ghost.className = entry.compact ? "zao-sort-ghost zao-sort-ghost-compact" : "zao-sort-ghost";
     Object.assign(ghost.style, {
       left: `${entry.rect.left}px`,
       top: `${entry.rect.top}px`,
       width: `${entry.rect.width}px`,
-      height: `${Math.max(26, entry.rect.height)}px`,
+      height: `${entry.rect.height}px`,
       ...(entry.color ? { color: entry.color } : {}),
       ...(entry.font ? { font: entry.font } : {}),
+      ...(entry.borderRadius ? { borderRadius: entry.borderRadius } : {}),
     });
     if (entry.accent) ghost.style.setProperty("--zao-flight-accent", entry.accent);
-    const label = win.document.createElementNS(HTML, "span");
-    label.className = "zao-ghost-label";
-    label.textContent = entry.label || entry.node.getAttribute("label") || "Tab";
-    ghost.append(createGhostIcon(win.document, entry), label);
-    layer.appendChild(ghost);
+    ghost.append(createGhostIcon(win.document, entry));
+    if (!entry.compact) {
+      const label = win.document.createElementNS(HTML, "span");
+      label.className = "zao-ghost-label";
+      label.textContent = entry.label || entry.node.getAttribute("label") || "Tab";
+      ghost.append(label);
+    }
+    targetLayer.appendChild(ghost);
     return ghost;
   };
+
+  const createArrivalGlow = (targetLayer, rect, accent) => {
+    const glow = win.document.createElementNS(HTML, "div");
+    glow.className = "zao-arrival-glow";
+    Object.assign(glow.style, {
+      left: `${rect.left}px`,
+      top: `${rect.top}px`,
+      width: `${rect.width}px`,
+      height: `${rect.height}px`,
+    });
+    if (accent) glow.style.setProperty("--zao-flight-accent", accent);
+    targetLayer.appendChild(glow);
+    return glow;
+  };
+
   try {
-    if (!reducedMotion && explicit) {
+    if (!reducedMotion && explicit && !signal?.aborted) {
       before.forEach(({ node }) => hide(node));
       // Keep visible stand-ins at the origins while native moves/retries run.
-      for (const entry of before.filter(({ rect }) => rect).slice(0, MAX_GHOSTS)) prepared.set(entry.node, createGhost(entry));
+      for (const entry of before.filter(({ rect }) => rect).slice(0, MAX_GHOSTS)) {
+        const isCross = Boolean(entry.toWorkspaceId && entry.toWorkspaceId !== entry.workspaceId);
+        const hostLayer = isCross ? ensureUnclippedLayer() : ensureClippedLayer(viewport1, winWidth1, winHeight1);
+        prepared.set(entry.node, createGhost(entry, hostLayer));
+      }
     }
-    const result = await mutate();
-    if (reducedMotion || win.closed) return result;
 
-    // Read phase 2: capture all post-mutation geometry before writing animations.
+    const result = await mutate();
+    if (reducedMotion || win.closed || signal?.aborted) return result;
+
+    // Read phase 2: batch ALL post-mutation geometry & styles before ANY DOM writes.
+    const winWidth2 = win.innerWidth;
+    const winHeight2 = win.innerHeight;
+    const viewport2 = scrollbox?.isConnected ? readBounds(scrollbox) : null;
+
     const changed = before.filter(({ node, parent, workspaceId, toWorkspaceId }) => node.isConnected &&
       (node.parentElement !== parent || node.getAttribute("zen-workspace-id") !== workspaceId) &&
       (!toWorkspaceId || node.getAttribute("zen-workspace-id") === toWorkspaceId));
     if (!changed.length) return result;
 
-    const movingNodes = new Set(changed.map(({ node }) => node));
+    const changedSet = new Set(changed.map(({ node }) => node));
     const layoutShifts = [];
     for (const { node, rect } of layout) {
-      if (movingNodes.has(node) || changed.some((entry) => entry.node.contains(node))) continue;
-      const after = visibleRect(win, node, true);
+      if (changedSet.has(node) || changed.some((entry) => entry.node.contains(node))) continue;
+      const after = visibleRect(win, node, true, viewport2, winWidth2, winHeight2);
       if (!after || Math.abs(after.top - rect.top) + Math.abs(after.left - rect.left) < 1) continue;
       layoutShifts.push({ node, dx: rect.left - after.left, dy: rect.top - after.top });
     }
@@ -195,103 +325,291 @@ export const animateSidebarChanges = async (win, mutate, { entries, budget = 300
     for (const group of activeSpaceEl?.querySelectorAll(GROUP_SELECTOR) || []) {
       if (isSidebarCopy(group) || existingGroups.has(group)) continue;
       const header = groupHeader(group);
-      if (visibleRect(win, header, true)) newGroupHeaders.push(header);
+      if (visibleRect(win, header, true, viewport2, winWidth2, winHeight2)) newGroupHeaders.push(header);
     }
 
+    const getSpaceAnchorRect = collectSpaceAnchorRects(win, winWidth2, winHeight2);
     const visible = changed.filter((entry) => entry.rect).slice(0, MAX_GHOSTS);
     const plannedMoves = [];
+    const headerGlowMeta = new Map();
+
+    const clipTop = viewport2 ? viewport2.top : 0;
+    const clipBottom = viewport2 ? viewport2.bottom : winHeight2;
+
     for (const entry of visible) {
       const targetId = entry.toWorkspaceId || entry.node.getAttribute("zen-workspace-id");
       const crossSpace = targetId !== entry.workspaceId;
-      const directRect = !crossSpace && !explicit ? visibleRect(win, entry.node, true) : null;
-      const target = crossSpace ? visibleRect(win, spaceAnchor(win, targetId)) : (directRect || elementRect(win, entry.node, true));
-      if (!target) {
-        diagnostics.backgroundCount++;
+
+      if (crossSpace) {
+        const target = getSpaceAnchorRect(targetId);
+        if (!target) {
+          diagnostics.backgroundCount++;
+          continue;
+        }
+        plannedMoves.push({ entry, crossSpace: true, target, landingNode: null, destHeader: null, offscreenExit: null });
         continue;
       }
-      plannedMoves.push({ entry, crossSpace, target, useFlip: Boolean(directRect) });
+
+      const directRect = visibleRect(win, entry.node, true, viewport2, winWidth2, winHeight2);
+      const target = directRect || elementRect(win, entry.node, true, viewport2, winWidth2, winHeight2);
+      if (target) {
+        const destGroup = entry.node.parentElement?.closest?.(GROUP_SELECTOR) || null;
+        const destHeader = destGroup ? groupHeader(destGroup) : null;
+        if (destHeader && destGroup && !headerGlowMeta.has(destHeader)) {
+          const headerRect = visibleRect(win, destHeader, true, viewport2, winWidth2, winHeight2);
+          if (headerRect) {
+            const accent = win.getComputedStyle(destGroup).getPropertyValue("--tab-group-color").trim();
+            headerGlowMeta.set(destHeader, { rect: headerRect, accent, arrivalDelay: Infinity });
+          }
+        }
+        plannedMoves.push({
+          entry,
+          crossSpace: false,
+          target,
+          landingNode: directRect ? entry.node : null,
+          destHeader: destHeader && headerGlowMeta.has(destHeader) ? destHeader : null,
+          offscreenExit: null,
+        });
+        continue;
+      }
+
+      // Smooth off-screen exit: visible tab moved into a scrolled-out destination in the same space.
+      const rawTarget = unclippedElementRect(win, entry.node);
+      if (rawTarget && (rawTarget.bottom <= clipTop || rawTarget.top >= clipBottom)) {
+        const toTop = rawTarget.bottom <= clipTop;
+        const exitTarget = {
+          left: entry.rect.left,
+          top: toTop ? clipTop - OFFSCREEN_EXIT_PX : clipBottom + OFFSCREEN_EXIT_PX,
+          width: entry.rect.width,
+          height: entry.rect.height,
+        };
+        plannedMoves.push({
+          entry,
+          crossSpace: false,
+          target: exitTarget,
+          landingNode: null,
+          destHeader: null,
+          offscreenExit: toTop ? "top" : "bottom",
+        });
+        continue;
+      }
+
+      diagnostics.backgroundCount++;
     }
     diagnostics.backgroundCount += changed.length - visible.length;
 
-    const backgroundRoutes = diagnostics.backgroundCount
-      ? [...new Set(changed.filter((entry) => !entry.rect).map((entry) => {
-          if (!entry.toWorkspaceId) return "";
-          const spaces = new Map(win.gZenWorkspaces.getWorkspaces().map((space) => [space.uuid, space.name]));
-          return `${spaces.get(entry.workspaceId) || "Space"} → ${spaces.get(entry.toWorkspaceId) || "Space"}`;
-        }))].filter(Boolean)
-      : [];
-    const backgroundAnchor = diagnostics.backgroundCount
-      ? visibleRect(win, win.gZenWorkspaces.activeWorkspaceElement?.indicator)
-      : null;
+    let backgroundRoutes = [];
+    let backgroundAnchor = null;
+    if (diagnostics.backgroundCount > 0) {
+      const spaceNames = new Map((win.gZenWorkspaces.getWorkspaces?.() || []).map((space) => [space.uuid, space.name]));
+      backgroundRoutes = [...new Set(changed.filter((entry) => !entry.rect).map((entry) => {
+        if (!entry.toWorkspaceId) return "";
+        return `${spaceNames.get(entry.workspaceId) || "Space"} → ${spaceNames.get(entry.toWorkspaceId) || "Space"}`;
+      }))].filter(Boolean);
+      backgroundAnchor = visibleRect(win, activeSpaceEl?.indicator, false, null, winWidth2, winHeight2);
+    }
 
-    // Write phase: clean up unused prepared ghosts and launch all animations cleanly.
+    // Create presentation scope right after mutations settle so user scroll/click/abort
+    // immediately cancels animations and cleans up all ghosts.
+    scope = createPresentationScope(win, { container: scrollbox || activeSpaceEl || win.document, signal });
+    if (scope.cancelled) {
+      diagnostics.cancelled = true;
+      return result;
+    }
+
+    // Write phase: clean up unused prepared ghosts and launch 3-beat choreography.
     for (const [node, ghost] of prepared) {
-      if (!changed.some((entry) => entry.node === node)) {
+      if (!changedSet.has(node)) {
         ghost.remove();
-        node.removeAttribute("data-zao-in-flight");
+        unhide(node);
       }
     }
 
     const tasks = [];
+
+    // Beat 2 (lead): shift surviving siblings and reveal newly created folder headers immediately
+    // so space opens ahead of incoming flights without overlap collisions.
     for (const shift of layoutShifts) {
+      const shiftDuration = Math.min(budget, computeFlightDuration(Math.hypot(shift.dx, shift.dy), { min: 200, max: 300 }));
       tasks.push(animateSortElement(win, shift.node, {
         transform: [`translate3d(${shift.dx}px, ${shift.dy}px, 0)`, "translate3d(0, 0, 0)"],
-      }, { duration: 260, easing: EASE_OUT_EXPO, fill: "both" }));
+      }, { duration: shiftDuration, easing: SETTLE_EASE, fill: "both" }, scope.interrupted, signal));
     }
+
     for (const header of newGroupHeaders) {
       tasks.push(animateSortElement(win, header, {
         opacity: [0, 1],
         transform: ["translate3d(0, -6px, 0) scale(0.97)", "translate3d(0, 0, 0) scale(1)"],
-      }, { duration: 240, easing: EASE_OUT_EXPO, fill: "both" }));
+      }, { duration: Math.min(220, budget), easing: SETTLE_EASE, fill: "both" }, scope.interrupted, signal));
     }
 
-    const flipStagger = Math.min(18, Math.round(180 / Math.max(1, plannedMoves.length)));
-    const ghostDuration = Math.min(300, budget);
-    const ghostStagger = Math.min(20, Math.max(0, Math.min(200, budget - ghostDuration) / Math.max(1, plannedMoves.length - 1)));
+    // Beat 1 & Beat 3: elevate moving tabs into clipped/unclipped layers and cross-fade
+    // destination nodes in lockstep with ghost fade-out (eliminating 72%-100% blink).
+    const baseFlightDelay = (layoutShifts.length > 0 || newGroupHeaders.length > 0) ? 28 : 0;
+    const flightStagger = Math.min(20, Math.max(0, Math.min(180, budget - 260) / Math.max(1, plannedMoves.length - 1)));
 
     for (const [index, move] of plannedMoves.entries()) {
-      const { entry, crossSpace, target, useFlip } = move;
-      if (useFlip) {
-        const dx = entry.rect.left - target.left;
-        const dy = entry.rect.top - target.top;
-        if (Math.abs(dx) + Math.abs(dy) >= 1) {
-          diagnostics.flyCount++;
-          const delay = Math.min(index, 12) * flipStagger;
-          tasks.push(animateSortElement(win, entry.node, {
-            transform: [`translate3d(${dx}px, ${dy}px, 0)`, "translate3d(0, 0, 0)"],
-          }, { duration: Math.min(280, budget), delay, easing: EASE_OUT_EXPO, fill: "both" }));
-        }
+      const { entry, crossSpace, target, landingNode, destHeader, offscreenExit } = move;
+      const hostLayer = crossSpace
+        ? ensureUnclippedLayer()
+        : ensureClippedLayer(viewport2, winWidth2, winHeight2);
+
+      let ghost = prepared.get(entry.node);
+      if (ghost) {
+        if (ghost.parentElement !== hostLayer) hostLayer.appendChild(ghost);
+      } else {
+        ghost = createGhost(entry, hostLayer);
+      }
+
+      const dx = crossSpace
+        ? target.left + target.width / 2 - entry.rect.left - entry.rect.width / 2
+        : target.left - entry.rect.left;
+      const dy = crossSpace
+        ? target.top + target.height / 2 - entry.rect.top - entry.rect.height / 2
+        : target.top - entry.rect.top;
+      const dist = Math.hypot(dx, dy);
+      const duration = Math.min(
+        budget,
+        computeFlightDuration(dist, offscreenExit ? { min: 190, max: 300 } : { min: 210, max: 420 }),
+      );
+      const delay = baseFlightDelay + Math.min(index, 12) * flightStagger;
+
+      if (offscreenExit) {
+        unhide(entry.node);
+        diagnostics.offscreenExitCount++;
+        diagnostics.flyCount++;
+        tasks.push(
+          animateSortElement(win, ghost, {
+            transform: ["translate3d(0, 0, 0) scale(1)", `translate3d(${dx}px, ${dy}px, 0) scale(0.95)`],
+            opacity: [1, 0.85, 0],
+            offset: [0, 0.65, 1],
+          }, { duration, delay, easing: SETTLE_EASE, fill: "both" }, scope.interrupted, signal)
+            .finally(() => ghost.remove()),
+        );
         continue;
       }
 
-      ensureLayer();
-      const ghost = prepared.get(entry.node) || createGhost(entry);
-      hide(entry.node);
+      if (crossSpace) {
+        hide(entry.node);
+        diagnostics.flyCount++;
+        tasks.push(
+          animateSortElement(win, ghost, {
+            transform: ["translate3d(0, 0, 0) scale(1)", `translate3d(${dx}px, ${dy}px, 0) scale(0.28)`],
+            opacity: [1, 0.92, 0],
+            offset: [0, 0.72, 1],
+          }, { duration, delay, easing: SETTLE_EASE, fill: "both" }, scope.interrupted, signal)
+            .finally(() => {
+              ghost.remove();
+              unhide(entry.node);
+            }),
+        );
+        continue;
+      }
+
+      // Same-space elevated flight with lockstep landing crossfade.
       diagnostics.flyCount++;
-      const dx = target.left + target.width / 2 - entry.rect.left - entry.rect.width / 2;
-      const dy = target.top + target.height / 2 - entry.rect.top - entry.rect.height / 2;
-      const delay = Math.min(index, 12) * ghostStagger;
-      tasks.push(animate(win, ghost, dx, dy, delay, ghostDuration, crossSpace ? 0.25 : 0.92).finally(() => {
-        entry.node.removeAttribute("data-zao-in-flight");
-      }));
+      const scaleX = entry.rect.width > 0 ? Math.max(0.78, Math.min(1.18, target.width / entry.rect.width)) : 1;
+      const scaleY = entry.rect.height > 0 ? Math.max(0.82, Math.min(1.15, target.height / entry.rect.height)) : 1;
+
+      if (landingNode) {
+        // Start landing WAAPI with fill:"both" (opacity 0 from 0%..72%, crossfading to 1 at 100%)
+        // and remove data-zao-in-flight immediately so the node is visible during the 72%-100% blend.
+        const landingTask = animateSortElement(win, landingNode, {
+          opacity: [0, 0, 1],
+          transform: ["scale(0.97)", "scale(0.97)", "scale(1)"],
+          offset: [0, 0.72, 1],
+        }, { duration, delay, easing: SETTLE_EASE, fill: "both" }, scope.interrupted, signal);
+        unhide(landingNode);
+        tasks.push(landingTask);
+      } else {
+        hide(entry.node);
+      }
+
+      tasks.push(
+        animateSortElement(win, ghost, {
+          transform: ["translate3d(0, 0, 0) scale(1)", `translate3d(${dx}px, ${dy}px, 0) scale(${scaleX}, ${scaleY})`],
+          opacity: [1, 0.92, 0],
+          offset: [0, 0.72, 1],
+        }, { duration, delay, easing: SPRING_EASE, fill: "both" }, scope.interrupted, signal)
+          .finally(() => {
+            ghost.remove();
+            if (!landingNode) unhide(entry.node);
+          }),
+      );
+
+      if (destHeader) {
+        const meta = headerGlowMeta.get(destHeader);
+        if (meta) {
+          const arrivalAt = Math.max(0, Math.round(delay + duration * 0.72));
+          if (arrivalAt < meta.arrivalDelay) meta.arrivalDelay = arrivalAt;
+        }
+      }
     }
 
-    if (diagnostics.backgroundCount) {
-      ensureLayer();
-      const label = win.document.createElementNS(HTML, "div");
-      label.className = "zao-sort-background";
-      label.textContent = `${diagnostics.backgroundCount} weitere Elemente${backgroundRoutes.length ? `: ${backgroundRoutes.slice(0, 2).join(", ")}` : " werden einsortiert"}`;
-      Object.assign(label.style, { left: `${backgroundAnchor?.left || 16}px`, top: `${backgroundAnchor?.top || 70}px` });
-      label.style.maxWidth = `${Math.max(120, backgroundAnchor?.width || 240)}px`;
-      layer.appendChild(label);
-      tasks.push(animate(win, label, 0, -10, 0, 550));
+    // Subtle 240ms composited arrival glow on destination folder headers.
+    for (const meta of headerGlowMeta.values()) {
+      if (!Number.isFinite(meta.arrivalDelay)) continue;
+      const hostLayer = ensureClippedLayer(viewport2, winWidth2, winHeight2);
+      const glow = createArrivalGlow(hostLayer, meta.rect, meta.accent);
+      tasks.push(
+        animateSortElement(win, glow, {
+          opacity: [0, 0.95, 0],
+          transform: ["scale(0.985)", "scale(1)", "scale(1.005)"],
+          offset: [0, 0.35, 1],
+        }, { duration: 240, delay: meta.arrivalDelay, easing: SETTLE_EASE, fill: "both" }, scope.interrupted, signal)
+          .finally(() => glow.remove()),
+      );
+    }
+
+    // Route background-move summary cleanly via callback or toast (>=2200ms visible).
+    if (diagnostics.backgroundCount > 0) {
+      const summaryMessage = `${diagnostics.backgroundCount} weitere Elemente${backgroundRoutes.length ? `: ${backgroundRoutes.slice(0, 2).join(", ")}` : " wurden einsortiert"}`;
+      if (typeof onBackgroundSummary === "function") {
+        try {
+          onBackgroundSummary({
+            count: diagnostics.backgroundCount,
+            routes: backgroundRoutes,
+            message: summaryMessage,
+          });
+        } catch {}
+      } else {
+        let toasted = false;
+        try {
+          showToast(summaryMessage, { type: "info", duration: 2600, targetWindow: win });
+          toasted = true;
+        } catch {}
+        if (!toasted) {
+          const hostLayer = ensureUnclippedLayer();
+          const label = win.document.createElementNS(HTML, "div");
+          label.className = "zao-sort-background";
+          label.textContent = summaryMessage;
+          Object.assign(label.style, {
+            left: `${backgroundAnchor?.left || 16}px`,
+            top: `${backgroundAnchor?.top || 70}px`,
+            maxWidth: `${Math.max(140, backgroundAnchor?.width || 240)}px`,
+          });
+          hostLayer.appendChild(label);
+          tasks.push(
+            animateSortElement(win, label, {
+              transform: ["translate3d(0, 6px, 0)", "translate3d(0, 0, 0)", "translate3d(0, 0, 0)", "translate3d(0, -6px, 0)"],
+              opacity: [0, 1, 1, 0],
+              offset: [0, 0.08, 0.86, 1],
+            }, { duration: 2400, easing: SETTLE_EASE, fill: "both" }, scope.interrupted, signal)
+              .finally(() => label.remove()),
+          );
+        }
+      }
     }
 
     await Promise.allSettled(tasks);
+    diagnostics.cancelled = Boolean(scope?.cancelled);
     return result;
   } finally {
-    hidden.forEach((node) => node.removeAttribute("data-zao-in-flight"));
-    layer?.remove();
+    scope?.dispose();
+    for (const node of hidden) node.removeAttribute("data-zao-in-flight");
+    hidden.clear();
+    clippedLayer?.remove();
+    unclippedLayer?.remove();
     diagnostics.finished = true;
     diagnostics.finishedAt = Date.now();
   }

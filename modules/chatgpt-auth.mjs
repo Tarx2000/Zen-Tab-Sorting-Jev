@@ -4,25 +4,34 @@
 //   https://developers.openai.com/cookbook/articles/sign-in-with-chatgpt
 //   https://developers.openai.com/siwc/token-sharing-open-source/sign-in
 //
-// Key protocol details:
-//   1. Authorize at https://auth.openai.com/api/accounts/authorize with:
-//        - client_id: "dynamic_agent_client" (first time) or issued client_id ("oaiapp_...")
-//        - agent_name_hint: "Zen Tab Sorting"
-//        - ext_agent_host_id: "urn:uuid:<persistent-host-uuid>"
-//        - response_type: "code"
-//        - redirect_uri: "http://127.0.0.1:<port>/auth/callback"
-//        - scope: "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct"
-//        - resource: "https://api.openai.com/v1"
-//        - PKCE code_challenge (S256), state, nonce
-//   2. Exchange authorization code at POST https://auth.openai.com/api/accounts/oauth/token
-//      using the issued `client_id` returned in the callback query parameters.
-//   3. Auto-refresh expired access tokens using `grant_type=refresh_token`.
-//   4. Invoke models via POST https://api.openai.com/v1/responses (`store: false, stream: true`)
-//      and discover available models via GET https://api.openai.com/v1/models.
+// Security & reliability hardening:
+//   - Strict CSRF check: requires non-empty exact `state` match.
+//   - Strict OIDC nonce verification against `id_token` claims.
+//   - UTF-8 safe JWT decoding via Uint8Array + TextDecoder.
+//   - Buffered async loopback reader (`nsIAsyncInputStream.asyncWait`) until `\r\n\r\n`,
+//     ignoring `/favicon.ico` and rejecting immediately with error HTML on `?error=`.
+//   - Automatic cleanup of any prior pending sign-in flow and on window `unload`.
+//   - 15s AbortController timeouts on token exchange, refresh, and model listing;
+//     propagates HTTP/network errors from `fetchChatGPTModels`.
+//   - `forceRefreshChatGPTToken()` for 1x reactive 401 refresh + retry.
+//   - Token persistence via `secret-store.mjs` (`Services.logins`) when available,
+//     with clean fallback to prefs for locked/headless/test environments.
 
 import { CONFIG, LOG } from "./config.mjs";
+import { ProviderHttpError, parseRetryAfterMs } from "./provider-errors.mjs";
+import {
+  deleteSecret,
+  getCachedSecret,
+  isSecretStoreAvailable,
+  setSecret,
+} from "./secret-store.mjs";
 
 const BEARER_HEADER_KEY = ["author", "ization"].join("");
+const ACCESS_TOKEN_SECRET = "chatgpt.accessToken";
+const REFRESH_TOKEN_SECRET = "chatgpt.refreshToken";
+export const DEFAULT_AUTH_TIMEOUT_MS = 15_000;
+const LOOPBACK_MAX_REQUEST_BYTES = 16_384;
+const LOOPBACK_CONN_TIMEOUT_MS = 5_000;
 
 export class ChatGPTSignInRequiredError extends Error {
   constructor() {
@@ -116,10 +125,17 @@ export const readChatGPTSession = (prefs = globalThis.Services?.prefs) => {
     if (!raw || !raw.trim()) return null;
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object") return null;
+
+    const storedAccess = typeof parsed.accessToken === "string" ? parsed.accessToken.trim() : "";
+    const storedRefresh = typeof parsed.refreshToken === "string" ? parsed.refreshToken.trim() : "";
+    const useSecretStore = Boolean(parsed.tokensInSecretStore) || isSecretStoreAvailable();
+    const accessToken = (useSecretStore ? getCachedSecret(ACCESS_TOKEN_SECRET) : "") || storedAccess;
+    const refreshToken = (useSecretStore ? getCachedSecret(REFRESH_TOKEN_SECRET) : "") || storedRefresh;
+
     return {
       clientId: typeof parsed.clientId === "string" ? parsed.clientId.trim() : "",
-      accessToken: typeof parsed.accessToken === "string" ? parsed.accessToken.trim() : "",
-      refreshToken: typeof parsed.refreshToken === "string" ? parsed.refreshToken.trim() : "",
+      accessToken,
+      refreshToken,
       expiresAt: typeof parsed.expiresAt === "number" ? parsed.expiresAt : 0,
       email: typeof parsed.email === "string" ? parsed.email : "",
       subject: typeof parsed.subject === "string" ? parsed.subject : "",
@@ -133,9 +149,32 @@ export const readChatGPTSession = (prefs = globalThis.Services?.prefs) => {
 export const writeChatGPTSession = (prefs = globalThis.Services?.prefs, session) => {
   try {
     if (!session) {
+      if (isSecretStoreAvailable()) {
+        deleteSecret(ACCESS_TOKEN_SECRET).catch(() => {});
+        deleteSecret(REFRESH_TOKEN_SECRET).catch(() => {});
+      }
       prefs?.clearUserPref?.(CONFIG.AI_CHATGPT_SESSION_PREF);
       return;
     }
+
+    if (isSecretStoreAvailable()) {
+      const accessToken = String(session.accessToken || "").trim();
+      const refreshToken = String(session.refreshToken || "").trim();
+      // setSecret synchronously updates the in-memory cache before awaiting logins I/O
+      setSecret(ACCESS_TOKEN_SECRET, accessToken).catch(() => {});
+      setSecret(REFRESH_TOKEN_SECRET, refreshToken).catch(() => {});
+      const metadataOnly = {
+        clientId: String(session.clientId || "").trim(),
+        expiresAt: typeof session.expiresAt === "number" ? session.expiresAt : 0,
+        email: typeof session.email === "string" ? session.email : "",
+        subject: typeof session.subject === "string" ? session.subject : "",
+        scope: typeof session.scope === "string" ? session.scope : "",
+        tokensInSecretStore: true,
+      };
+      prefs?.setStringPref?.(CONFIG.AI_CHATGPT_SESSION_PREF, JSON.stringify(metadataOnly));
+      return;
+    }
+
     prefs?.setStringPref?.(CONFIG.AI_CHATGPT_SESSION_PREF, JSON.stringify(session));
   } catch (e) {
     console.error(`${LOG} failed to persist ChatGPT session:`, e);
@@ -145,6 +184,10 @@ export const writeChatGPTSession = (prefs = globalThis.Services?.prefs, session)
 export const clearChatGPTSession = (prefs = globalThis.Services?.prefs) => {
   try {
     const existing = readChatGPTSession(prefs);
+    if (isSecretStoreAvailable()) {
+      deleteSecret(ACCESS_TOKEN_SECRET).catch(() => {});
+      deleteSecret(REFRESH_TOKEN_SECRET).catch(() => {});
+    }
     if (existing?.clientId) {
       // Retain the dynamically registered clientId so future sign-ins reuse the same client registration
       writeChatGPTSession(prefs, {
@@ -207,15 +250,27 @@ export const parseCallbackQuery = (urlOrSearch) => {
   };
 };
 
-const decodeJwtClaims = (jwt) => {
+/**
+ * UTF-8 safe JWT payload decoder using Uint8Array + TextDecoder (fixes mojibake
+ * on non-ASCII claims when using raw `atob`).
+ */
+export const decodeJwtClaims = (jwt) => {
   try {
     const parts = String(jwt || "").split(".");
     if (parts.length < 2) return {};
     const b64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
     const padded = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
-    const json = typeof atob === "function"
-      ? atob(padded)
-      : Buffer.from(padded, "base64").toString("utf8");
+    let bytes;
+    if (typeof atob === "function") {
+      const binary = atob(padded);
+      bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) {
+        bytes[i] = binary.charCodeAt(i);
+      }
+    } else {
+      bytes = Uint8Array.from(Buffer.from(padded, "base64"));
+    }
+    const json = new TextDecoder("utf-8").decode(bytes);
     return JSON.parse(json) || {};
   } catch {
     return {};
@@ -237,11 +292,50 @@ const resolveFetch = (customFetch) => {
   return globalThis.fetch;
 };
 
-export const exchangeChatGPTAuthorizationCode = async (
-  { code, codeVerifier, redirectUri, clientId },
-  fetchImpl,
-) => {
+const fetchWithTimeout = async (url, init = {}, { fetchImpl, signal = null, timeoutMs = DEFAULT_AUTH_TIMEOUT_MS } = {}) => {
   const doFetch = resolveFetch(fetchImpl);
+  const controller = new AbortController();
+  const onExternalAbort = () => controller.abort();
+  if (signal?.aborted) {
+    throw new ProviderHttpError({ category: "abort", provider: "chatgpt", message: "ChatGPT request aborted" });
+  }
+  signal?.addEventListener?.("abort", onExternalAbort, { once: true });
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, Math.max(500, Math.round(timeoutMs)));
+  try {
+    return await doFetch(url, { ...init, signal: controller.signal });
+  } catch (err) {
+    if (timedOut) {
+      throw new ProviderHttpError({
+        category: "timeout",
+        provider: "chatgpt",
+        message: `ChatGPT request timed out after ${Math.round(timeoutMs)}ms`,
+        cause: err,
+      });
+    }
+    if (signal?.aborted || err?.name === "AbortError") {
+      throw new ProviderHttpError({
+        category: "abort",
+        provider: "chatgpt",
+        message: "ChatGPT request aborted",
+        cause: err,
+      });
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener?.("abort", onExternalAbort);
+  }
+};
+
+export const exchangeChatGPTAuthorizationCode = async (
+  { code, codeVerifier, redirectUri, clientId, expectedNonce },
+  fetchImpl,
+  { signal = null, timeoutMs = DEFAULT_AUTH_TIMEOUT_MS } = {},
+) => {
   const body = new URLSearchParams({
     grant_type: "authorization_code",
     client_id: clientId,
@@ -251,17 +345,35 @@ export const exchangeChatGPTAuthorizationCode = async (
     resource: SIWC_CONSTANTS.API_RESOURCE,
   });
 
-  const response = await doFetch(SIWC_CONSTANTS.TOKEN_URL, {
-    method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: body.toString(),
-  });
+  const response = await fetchWithTimeout(
+    SIWC_CONSTANTS.TOKEN_URL,
+    {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: body.toString(),
+    },
+    { fetchImpl, signal, timeoutMs },
+  );
   const text = await response.text();
   if (!response.ok) {
-    throw new Error(`ChatGPT token exchange failed (HTTP ${response.status}): ${text.slice(0, 200)}`);
+    throw new ProviderHttpError({
+      status: response.status,
+      body: text,
+      retryAfterMs: parseRetryAfterMs(response.headers?.get?.("retry-after")),
+      provider: "chatgpt",
+      message: `ChatGPT token exchange failed (HTTP ${response.status}): ${text.slice(0, 200)}`,
+    });
   }
   const data = JSON.parse(text);
   const claims = decodeJwtClaims(data.id_token);
+
+  // Verify OIDC nonce when provided by the active sign-in flow.
+  if (expectedNonce) {
+    if (!data.id_token || typeof claims.nonce !== "string" || claims.nonce !== expectedNonce) {
+      throw new Error("OAuth nonce mismatch in id_token. Please try signing in again.");
+    }
+  }
+
   const expiresInSec = Number.isFinite(data.expires_in) ? data.expires_in : 3600;
   return {
     clientId,
@@ -274,8 +386,11 @@ export const exchangeChatGPTAuthorizationCode = async (
   };
 };
 
-export const refreshChatGPTToken = async ({ clientId, refreshToken }, fetchImpl) => {
-  const doFetch = resolveFetch(fetchImpl);
+export const refreshChatGPTToken = async (
+  { clientId, refreshToken },
+  fetchImpl,
+  { signal = null, timeoutMs = DEFAULT_AUTH_TIMEOUT_MS } = {},
+) => {
   const body = new URLSearchParams({
     grant_type: "refresh_token",
     client_id: clientId,
@@ -283,11 +398,15 @@ export const refreshChatGPTToken = async ({ clientId, refreshToken }, fetchImpl)
     resource: SIWC_CONSTANTS.API_RESOURCE,
   });
 
-  const response = await doFetch(SIWC_CONSTANTS.TOKEN_URL, {
-    method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: body.toString(),
-  });
+  const response = await fetchWithTimeout(
+    SIWC_CONSTANTS.TOKEN_URL,
+    {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: body.toString(),
+    },
+    { fetchImpl, signal, timeoutMs },
+  );
   const text = await response.text();
   if (!response.ok) {
     let code;
@@ -299,9 +418,13 @@ export const refreshChatGPTToken = async ({ clientId, refreshToken }, fetchImpl)
       "refresh_token_invalidated", "refresh_token_reused"].includes(code)) {
       throw new ChatGPTSignInRequiredError();
     }
-    const error = new Error(`ChatGPT-Token konnte nicht erneuert werden (HTTP ${response.status}). Bitte später erneut versuchen.`);
-    error.status = response.status;
-    throw error;
+    throw new ProviderHttpError({
+      status: response.status,
+      body: text,
+      retryAfterMs: parseRetryAfterMs(response.headers?.get?.("retry-after")),
+      provider: "chatgpt",
+      message: `ChatGPT-Token konnte nicht erneuert werden (HTTP ${response.status}). Bitte später erneut versuchen.`,
+    });
   }
   const data = JSON.parse(text);
   if (typeof data.access_token !== "string" || !data.access_token.trim()) {
@@ -320,10 +443,50 @@ export const refreshChatGPTToken = async ({ clientId, refreshToken }, fetchImpl)
   };
 };
 
+const runSerializedRefresh = async (prefs, fetchImpl, stored, session, options = {}) => {
+  if (!session.refreshToken || !session.clientId) {
+    throw new ChatGPTSignInRequiredError();
+  }
+
+  const locks = refreshes();
+  const key = session.clientId;
+  if (locks.has(key)) return locks.get(key);
+  const pending = (async () => {
+    let refreshed;
+    try {
+      refreshed = await refreshChatGPTToken(session, fetchImpl, options);
+    } catch (error) {
+      const current = readChatGPTSession(prefs);
+      if (error.requiresSignIn && current?.clientId === session.clientId &&
+          current.refreshToken === session.refreshToken) {
+        clearChatGPTSession(prefs);
+      }
+      throw error;
+    }
+    const merged = {
+      ...session,
+      ...refreshed,
+      email: refreshed.email || session.email || "",
+      subject: refreshed.subject || session.subject || "",
+    };
+    const current = readChatGPTSession(prefs);
+    // A sign-out or new sign-in during the request must never be overwritten.
+    if (stored && (current?.clientId !== session.clientId || current.refreshToken !== session.refreshToken)) {
+      throw new ChatGPTSignInRequiredError();
+    }
+    if (stored) writeChatGPTSession(prefs, merged);
+    return merged.accessToken;
+  })();
+  locks.set(key, pending);
+  try { return await pending; }
+  finally { if (locks.get(key) === pending) locks.delete(key); }
+};
+
 export const ensureValidChatGPTToken = async (
   prefs = globalThis.Services?.prefs,
   fetchImpl,
   sessionOverride = null,
+  options = {},
 ) => {
   const stored = readChatGPTSession(prefs);
   if (stored && sessionOverride && stored.clientId !== sessionOverride.clientId) {
@@ -344,40 +507,32 @@ export const ensureValidChatGPTToken = async (
     return session.accessToken;
   }
 
-  if (!session.refreshToken || !session.clientId) {
-    throw new ChatGPTSignInRequiredError();
-  }
-
-  const locks = refreshes();
-  const key = session.clientId;
-  if (locks.has(key)) return locks.get(key);
-  const pending = (async () => {
-    let refreshed;
-    try {
-      refreshed = await refreshChatGPTToken(session, fetchImpl);
-    } catch (error) {
-      const current = readChatGPTSession(prefs);
-      if (error.requiresSignIn && current?.clientId === session.clientId &&
-          current.refreshToken === session.refreshToken) clearChatGPTSession(prefs);
-      throw error;
-    }
-    const merged = { ...session, ...refreshed,
-      email: refreshed.email || session.email || "",
-      subject: refreshed.subject || session.subject || "" };
-    const current = readChatGPTSession(prefs);
-    // A sign-out or new sign-in during the request must never be overwritten.
-    if (stored && (current?.clientId !== session.clientId || current.refreshToken !== session.refreshToken)) {
-      throw new ChatGPTSignInRequiredError();
-    }
-    if (stored) writeChatGPTSession(prefs, merged);
-    return merged.accessToken;
-  })();
-  locks.set(key, pending);
-  try { return await pending; }
-  finally { if (locks.get(key) === pending) locks.delete(key); }
+  return runSerializedRefresh(prefs, fetchImpl, stored, session, options);
 };
 
-export const buildChatGPTResponsesRequest = ({ accessToken, model, inputText, reasoningEffort }) => ({
+/**
+ * Force an immediate OAuth token refresh (ignoring `expiresAt`) for reactive 1x
+ * HTTP 401 retry flows. Serialized through the shared refresh lock so
+ * concurrent 401s rotate the refresh token at most once.
+ */
+export const forceRefreshChatGPTToken = async (
+  prefs = globalThis.Services?.prefs,
+  fetchImpl,
+  sessionOverride = null,
+  options = {},
+) => {
+  const stored = readChatGPTSession(prefs);
+  if (stored && sessionOverride && stored.clientId !== sessionOverride.clientId) {
+    throw new ChatGPTSignInRequiredError();
+  }
+  const session = stored || sessionOverride;
+  if (!session || !session.refreshToken || !session.clientId) {
+    throw new ChatGPTSignInRequiredError();
+  }
+  return runSerializedRefresh(prefs, fetchImpl, stored, session, options);
+};
+
+export const buildChatGPTResponsesRequest = ({ accessToken, model, inputText, systemPrompt, reasoningEffort }) => ({
   url: SIWC_CONSTANTS.RESPONSES_URL,
   init: {
     method: "POST",
@@ -388,6 +543,7 @@ export const buildChatGPTResponsesRequest = ({ accessToken, model, inputText, re
     },
     body: JSON.stringify({
       model: model || CONFIG.AI_CHATGPT_MODEL_DEFAULT,
+      ...(systemPrompt ? { instructions: systemPrompt } : {}),
       input: [
         {
           role: "user",
@@ -472,17 +628,37 @@ export const parseChatGPTResponsesOutput = (rawText) => {
   return finalOut || null;
 };
 
-export const fetchChatGPTModels = async (accessToken, fetchImpl) => {
-  const doFetch = resolveFetch(fetchImpl);
-  const response = await doFetch(SIWC_CONSTANTS.MODELS_URL, {
-    method: "GET",
-    headers: {
-      accept: "application/json",
-      [BEARER_HEADER_KEY]: `Bearer ${accessToken}`,
+/**
+ * Fetch available ChatGPT SIWC models with a 15s AbortController timeout.
+ * Propagates HTTP and network errors (never swallows them as `[]`).
+ */
+export const fetchChatGPTModels = async (
+  accessToken,
+  fetchImpl,
+  { signal = null, timeoutMs = DEFAULT_AUTH_TIMEOUT_MS } = {},
+) => {
+  const response = await fetchWithTimeout(
+    SIWC_CONSTANTS.MODELS_URL,
+    {
+      method: "GET",
+      headers: {
+        accept: "application/json",
+        [BEARER_HEADER_KEY]: `Bearer ${accessToken}`,
+      },
     },
-  });
-  if (!response.ok) return [];
-  const data = await response.json();
+    { fetchImpl, signal, timeoutMs },
+  );
+  const body = await response.text();
+  if (!response.ok) {
+    throw new ProviderHttpError({
+      status: response.status,
+      body,
+      retryAfterMs: parseRetryAfterMs(response.headers?.get?.("retry-after")),
+      provider: "chatgpt",
+      message: `ChatGPT model list failed (HTTP ${response.status}): ${body.slice(0, 200)}`,
+    });
+  }
+  const data = JSON.parse(body);
   if (Array.isArray(data?.models)) {
     return data.models
       .filter((m) => m && typeof m.slug === "string" && m.visibility !== "hidden")
@@ -503,36 +679,64 @@ export const fetchChatGPTModels = async (accessToken, fetchImpl) => {
 // callback URL if their OS firewall blocks local loopback sockets.
 let pendingSignInState = null;
 
+/**
+ * Expose pending state setter/resetter for unit tests and clean cancellation.
+ */
+export const cancelPendingChatGPTSignIn = (reason = "Sign in cancelled") => {
+  if (!pendingSignInState) return;
+  const prev = pendingSignInState;
+  pendingSignInState = null;
+  try {
+    prev.cleanup?.();
+  } catch {}
+  try {
+    prev.reject?.(new Error(reason));
+  } catch {}
+};
+
+// Test helper to prime pendingSignInState cleanly in Node tests.
+export const _setPendingSignInStateForTests = (state) => {
+  pendingSignInState = state || null;
+};
+
 export const completeChatGPTSignInFromCallbackUrl = async (
   callbackUrl,
   prefs = globalThis.Services?.prefs,
   fetchImpl,
+  options = {},
 ) => {
   if (!pendingSignInState) {
     throw new Error("No active Sign in with ChatGPT flow. Click 'Sign in with ChatGPT' first.");
   }
   const parsed = parseCallbackQuery(callbackUrl);
   if (parsed.error) {
-    throw new Error(`ChatGPT authorization error: ${parsed.errorDescription || parsed.error}`);
+    const errMsg = `ChatGPT sign-in error: ${parsed.errorDescription || parsed.error}`;
+    try { pendingSignInState.cleanup?.(); } catch {}
+    pendingSignInState = null;
+    throw new Error(errMsg);
+  }
+  // Strict CSRF protection: state MUST be present and match exactly.
+  if (!parsed.state || parsed.state !== pendingSignInState.state) {
+    throw new Error("OAuth state mismatch. Please try signing in again.");
   }
   if (!parsed.code) {
     throw new Error("Callback URL does not contain an authorization code.");
-  }
-  if (parsed.state && parsed.state !== pendingSignInState.state) {
-    throw new Error("OAuth state mismatch. Please try signing in again.");
   }
   const effectiveClientId = parsed.clientId || pendingSignInState.clientId;
   if (!effectiveClientId || effectiveClientId === SIWC_CONSTANTS.REGISTRATION_CLIENT_ID) {
     throw new Error("ChatGPT callback did not include an issued client_id.");
   }
+  const expectedNonce = pendingSignInState.nonce || "";
   const session = await exchangeChatGPTAuthorizationCode(
     {
       code: parsed.code,
       codeVerifier: pendingSignInState.codeVerifier,
       redirectUri: pendingSignInState.redirectUri,
       clientId: effectiveClientId,
+      expectedNonce,
     },
     fetchImpl,
+    options,
   );
   writeChatGPTSession(prefs, session);
   try {
@@ -542,15 +746,49 @@ export const completeChatGPTSignInFromCallbackUrl = async (
   return session;
 };
 
+const escapeHtml = (str) =>
+  String(str || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+
+const writeLoopbackHttpResponse = (transport, statusLine, htmlBody = "") => {
+  try {
+    const output = transport.openOutputStream(0, 0, 0);
+    if (!htmlBody) {
+      const resp = `HTTP/1.1 ${statusLine}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n`;
+      output.write(resp, resp.length);
+      output.close();
+      return;
+    }
+    const htmlBytes = new TextEncoder().encode(htmlBody).byteLength;
+    const httpResp =
+      `HTTP/1.1 ${statusLine}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ${htmlBytes}\r\nConnection: close\r\n\r\n${htmlBody}`;
+    output.write(httpResp, httpResp.length);
+    output.close();
+  } catch {}
+};
+
+const buildLoopbackHtml = (title, message) =>
+  "<!doctype html><html><head><meta charset='utf-8'><title>" + escapeHtml(title) + "</title>" +
+  "<style>body{font-family:system-ui,sans-serif;padding:3rem;text-align:center;background:#111;color:#eee}</style>" +
+  "</head><body><h2>" + escapeHtml(title) + "</h2><p>" + escapeHtml(message) + "</p></body></html>";
+
 // Starts a local loopback HTTP listener on 127.0.0.1:<ephemeral-port>/auth/callback
-// using Firefox/Gecko's nsIServerSocket and opens the OpenAI authorization page.
-// Also watches the opened browser tab's URL in case the loopback redirect is
-// intercepted in-browser.
+// using Firefox/Gecko's nsIServerSocket + buffered nsIAsyncInputStream.asyncWait
+// and opens the OpenAI authorization page.
 export const startChatGPTSignInFlow = async ({
   prefs = globalThis.Services?.prefs,
   onStatus,
   fetchImpl,
 } = {}) => {
+  // Clean up any prior unfinished sign-in flow before opening a new socket/tab.
+  if (pendingSignInState) {
+    cancelPendingChatGPTSignIn("Superseded by a new ChatGPT sign-in attempt.");
+  }
+
   const existing = readChatGPTSession(prefs);
   const hostId = getOrCreateHostId(prefs);
   const { codeVerifier, codeChallenge } = await generatePkcePair();
@@ -563,6 +801,7 @@ export const startChatGPTSignInFlow = async ({
   let timeoutTimer = null;
   let openedTab = null;
   let settled = false;
+  let unloadHandler = null;
 
   const cleanup = () => {
     if (timeoutTimer) {
@@ -573,6 +812,10 @@ export const startChatGPTSignInFlow = async ({
       clearInterval(tabWatchTimer);
       tabWatchTimer = null;
     }
+    if (unloadHandler && typeof window !== "undefined" && typeof window.removeEventListener === "function") {
+      try { window.removeEventListener("unload", unloadHandler); } catch {}
+      unloadHandler = null;
+    }
     if (serverSocket) {
       try { serverSocket.close(); } catch {}
       serverSocket = null;
@@ -580,11 +823,19 @@ export const startChatGPTSignInFlow = async ({
   };
 
   return new Promise((resolve, reject) => {
+    const rejectFlow = (err) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (pendingSignInState?.state === state) pendingSignInState = null;
+      reject(err);
+    };
+
     const finishWithUrl = async (rawUrl) => {
       if (settled) return;
       settled = true;
       try {
-        onStatus?.("Exchanging authorization code with ChatGPT…");
+        onStatus?.("Exchanging sign-in code with ChatGPT…");
         const session = await completeChatGPTSignInFromCallbackUrl(rawUrl, prefs, fetchImpl);
         if (openedTab) {
           try {
@@ -595,14 +846,68 @@ export const startChatGPTSignInFlow = async ({
         resolve(session);
       } catch (err) {
         cleanup();
+        if (pendingSignInState?.state === state) pendingSignInState = null;
         reject(err);
       }
+    };
+
+    const handleLoopbackRequest = (transport, requestText) => {
+      const firstLine = requestText.split(/\r?\n/)[0] || "";
+      const match = firstLine.match(/^GET\s+([^\s]+)\s+HTTP/i);
+      const pathAndQuery = match ? match[1] : "";
+
+      // Ignore browser favicon probes without terminating the flow.
+      if (pathAndQuery === "/favicon.ico" || pathAndQuery.startsWith("/favicon.ico?")) {
+        writeLoopbackHttpResponse(transport, "204 No Content");
+        return;
+      }
+
+      if (!pathAndQuery.startsWith("/auth/callback")) {
+        writeLoopbackHttpResponse(
+          transport,
+          "404 Not Found",
+          buildLoopbackHtml("Not Found", "Return to Zen Tab Sorting settings."),
+        );
+        return;
+      }
+
+      const parsed = parseCallbackQuery(pathAndQuery);
+      if (parsed.error) {
+        const detail = parsed.errorDescription || parsed.error;
+        writeLoopbackHttpResponse(
+          transport,
+          "400 Bad Request",
+          buildLoopbackHtml("Sign in failed", detail),
+        );
+        rejectFlow(new Error(`ChatGPT sign-in error: ${detail}`));
+        return;
+      }
+
+      if (parsed.code) {
+        writeLoopbackHttpResponse(
+          transport,
+          "200 OK",
+          buildLoopbackHtml(
+            "Signed in with ChatGPT",
+            "You can close this tab and return to Zen Tab Sorting settings.",
+          ),
+        );
+        finishWithUrl(pathAndQuery);
+        return;
+      }
+
+      writeLoopbackHttpResponse(
+        transport,
+        "400 Bad Request",
+        buildLoopbackHtml("Incomplete callback", "Missing sign-in code. Please try again."),
+      );
     };
 
     // 1. Try binding a Gecko nsIServerSocket on 127.0.0.1 with an OS-assigned port
     try {
       const Cc = globalThis.Cc || globalThis.Components?.classes;
       const Ci = globalThis.Ci || globalThis.Components?.interfaces;
+      const mainThread = globalThis.Services?.tm?.currentThread || globalThis.Services?.tm?.mainThread;
       if (Cc && Ci) {
         serverSocket = Cc["@mozilla.org/network/server-socket;1"].createInstance(Ci.nsIServerSocket);
         serverSocket.init(-1, true, -1); // port=-1 (ephemeral), loopbackOnly=true
@@ -610,41 +915,60 @@ export const startChatGPTSignInFlow = async ({
         serverSocket.asyncListen({
           onSocketAccepted(_serv, transport) {
             try {
-              const input = transport.openInputStream(0, 0, 0);
+              const rawInput = transport.openInputStream(0, 0, 0);
+              const asyncInput = rawInput.QueryInterface(Ci.nsIAsyncInputStream);
               const scriptable = Cc["@mozilla.org/scriptableinputstream;1"].createInstance(
-                Ci.nsIScriptableInputStream
+                Ci.nsIScriptableInputStream,
               );
-              scriptable.init(input);
-              // Wait briefly for the HTTP GET request bytes to arrive
-              setTimeout(() => {
-                let requestText = "";
-                try {
-                  const avail = scriptable.available();
-                  if (avail > 0) requestText = scriptable.read(avail);
-                } catch {}
-                const firstLine = requestText.split(/\r?\n/)[0] || "";
-                const match = firstLine.match(/^GET\s+([^\s]+)\s+HTTP/i);
-                const pathAndQuery = match ? match[1] : "";
+              scriptable.init(rawInput);
 
-                try {
-                  const output = transport.openOutputStream(0, 0, 0);
-                  const html =
-                    "<!doctype html><html><head><meta charset='utf-8'><title>Sign in with ChatGPT</title>" +
-                    "<style>body{font-family:system-ui,sans-serif;padding:3rem;text-align:center;background:#111;color:#eee}</style>" +
-                    "</head><body><h2>Signed in with ChatGPT</h2><p>You can close this tab and return to Zen Tab Sorting settings.</p></body></html>";
-                  const htmlBytes = new TextEncoder().encode(html).byteLength;
-                  const httpResp =
-                    `HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ${htmlBytes}\r\nConnection: close\r\n\r\n${html}`;
-                  output.write(httpResp, httpResp.length);
-                  output.close();
-                } catch {}
+              let requestBuffer = "";
+              let finishedConn = false;
+              const closeConn = () => {
+                if (finishedConn) return;
+                finishedConn = true;
+                clearTimeout(connTimer);
                 try { scriptable.close(); } catch {}
-                try { input.close(); } catch {}
+                try { rawInput.close(); } catch {}
+              };
 
-                if (pathAndQuery.includes("/auth/callback") && pathAndQuery.includes("code=")) {
-                  finishWithUrl(pathAndQuery);
+              const connTimer = setTimeout(() => {
+                if (!finishedConn) {
+                  handleLoopbackRequest(transport, requestBuffer);
+                  closeConn();
                 }
-              }, 60);
+              }, LOOPBACK_CONN_TIMEOUT_MS);
+
+              const waitForMore = () => {
+                asyncInput.asyncWait(
+                  {
+                    onInputStreamReady() {
+                      if (finishedConn) return;
+                      try {
+                        const avail = scriptable.available();
+                        if (avail > 0) {
+                          const toRead = Math.min(avail, LOOPBACK_MAX_REQUEST_BYTES - requestBuffer.length);
+                          if (toRead > 0) requestBuffer += scriptable.read(toRead);
+                        }
+                        if (requestBuffer.includes("\r\n\r\n") || requestBuffer.length >= LOOPBACK_MAX_REQUEST_BYTES || avail === 0) {
+                          handleLoopbackRequest(transport, requestBuffer);
+                          closeConn();
+                        } else {
+                          waitForMore();
+                        }
+                      } catch {
+                        if (requestBuffer) handleLoopbackRequest(transport, requestBuffer);
+                        closeConn();
+                      }
+                    },
+                  },
+                  0,
+                  0,
+                  mainThread,
+                );
+              };
+
+              waitForMore();
             } catch (e) {
               console.warn(`${LOG} loopback socket accept error:`, e);
             }
@@ -665,7 +989,16 @@ export const startChatGPTSignInFlow = async ({
       redirectUri,
       clientId: initialClientId,
       cleanup,
+      reject: rejectFlow,
     };
+
+    // Clean up socket and timers if the host window closes mid-sign-in.
+    if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+      unloadHandler = () => {
+        rejectFlow(new Error("Sign in with ChatGPT cancelled because the window closed."));
+      };
+      window.addEventListener("unload", unloadHandler, { once: true });
+    }
 
     const authorizeUrl = buildChatGPTAuthorizeUrl({
       redirectUri,
@@ -703,7 +1036,13 @@ export const startChatGPTSignInFlow = async ({
         const tabs = win?.gBrowser?.tabs ? Array.from(win.gBrowser.tabs) : [];
         for (const tab of tabs) {
           const spec = tab?.linkedBrowser?.currentURI?.spec || "";
-          if (spec.startsWith(`http://127.0.0.1:${port}/auth/callback`) && spec.includes("code=")) {
+          if (!spec.startsWith(`http://127.0.0.1:${port}/auth/callback`)) continue;
+          if (spec.includes("error=")) {
+            const parsed = parseCallbackQuery(spec);
+            rejectFlow(new Error(`ChatGPT sign-in error: ${parsed.errorDescription || parsed.error}`));
+            return;
+          }
+          if (spec.includes("code=")) {
             openedTab = tab;
             finishWithUrl(spec);
             return;
@@ -714,11 +1053,7 @@ export const startChatGPTSignInFlow = async ({
 
     // Timeout after 3 minutes
     timeoutTimer = setTimeout(() => {
-      if (!settled) {
-        settled = true;
-        cleanup();
-        reject(new Error("Sign in with ChatGPT timed out after 3 minutes."));
-      }
+      rejectFlow(new Error("Sign in with ChatGPT timed out after 3 minutes."));
     }, 180_000);
   });
 };
