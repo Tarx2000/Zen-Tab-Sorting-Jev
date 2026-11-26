@@ -269,6 +269,14 @@ export const setupGroupDrag = (win = globalThis.window) => {
 
   const resolveDraggedFolder = (candidate) => {
     if (!candidate) return null;
+    const candidateTag = tagOf(candidate);
+    if (
+      candidateTag === "input" ||
+      candidateTag === "textarea" ||
+      candidate.closest?.("input, textarea, [contenteditable]")
+    ) {
+      return null;
+    }
     if (isDraggableFolder(candidate)) return candidate;
     const isLabelHit =
       candidate.classList?.contains?.("tab-group-label") ||
@@ -281,6 +289,9 @@ export const setupGroupDrag = (win = globalThis.window) => {
 
   const getHeaderRect = (header) => {
     if (!header) return null;
+    // During an active folder drag, siblings shift via translate3d; read live
+    // visual bounds without caching so edge-reorder & drop indicators stay exact.
+    if (activeDrag) return header.getBoundingClientRect?.() || null;
     const cached = headerRects.get(header);
     if (cached) return cached;
     const rect = header.getBoundingClientRect?.();
@@ -739,9 +750,6 @@ export const setupGroupDrag = (win = globalThis.window) => {
   const start = function (event, tab, options = {}, ...rest) {
     invalidateDragCache();
     const draggedFolder = resolveDraggedFolder(tab);
-    if (draggedFolder) {
-      beginFolderDrag(draggedFolder, event);
-    }
 
     const group = tab?.group;
     const isManagedLabel = tab?.classList?.contains("tab-group-label") && managed(group);
@@ -751,6 +759,7 @@ export const setupGroupDrag = (win = globalThis.window) => {
       !options.dragImageSource &&
       (rect && (rect.width < 2 || rect.height < 2 || !group.collapsed));
 
+    let result;
     if (needsHeaderImage) {
       // Some native tab-group layouts use display:contents (0x0 group rect), and
       // expanded groups span all their child tabs. Let Zen's existing dragImageSource
@@ -780,15 +789,23 @@ export const setupGroupDrag = (win = globalThis.window) => {
         }
       }
       try {
-        return nativeStart.call(this, event, tab, { ...options, dragImageSource: header }, ...rest);
+        result = nativeStart.call(this, event, tab, { ...options, dragImageSource: header }, ...rest);
       } finally {
         for (const [name, value, priority] of previous) {
           if (value) setStyleProp(header, name, value, priority);
           else removeStyleProp(header, name);
         }
       }
+    } else {
+      result = nativeStart.call(this, event, tab, options, ...rest);
     }
-    return nativeStart.call(this, event, tab, options, ...rest);
+
+    // Begin live preview & dimming AFTER nativeStart so Zen captures setDragImage
+    // at full opacity and throws/aborts in nativeStart never leak activeDrag.
+    if (draggedFolder) {
+      beginFolderDrag(draggedFolder, event);
+    }
+    return result;
   };
   if (nativeStart) service.startTabDrag = start;
 
@@ -907,9 +924,11 @@ export const setupGroupDrag = (win = globalThis.window) => {
 
   const onDragStart = (event) => {
     invalidateDragCache();
-    const draggedFolder = resolveDraggedFolder(event?.target);
-    if (draggedFolder) {
-      beginFolderDrag(draggedFolder, event);
+    if (!nativeStart) {
+      const draggedFolder = resolveDraggedFolder(event?.target);
+      if (draggedFolder) {
+        beginFolderDrag(draggedFolder, event);
+      }
     }
   };
 

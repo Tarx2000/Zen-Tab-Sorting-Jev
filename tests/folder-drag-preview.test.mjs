@@ -661,3 +661,89 @@ test("folder drag preview: ignores split-view groups and sidebar copies", () => 
     teardownGroupDrag(win);
   }
 });
+
+// ─── 5. Verifier edge cases: post-nativeStart dimming, rename input, live headerRect ─
+
+test("folder drag preview: dims only after nativeStart, ignores rename input drags, and reads live headerRect during shifts", () => {
+  const { doc, makeEl } = createDragDom();
+  const tabContainer = makeEl("div");
+  const ws = makeEl("zen-workspace");
+  const strip = makeEl("div");
+
+  const f1 = makeFolder(makeEl, { label: "First", top: 0, height: 36, collapsed: true });
+  const f2 = makeFolder(makeEl, { label: "Second", top: 36, height: 36, collapsed: true });
+
+  // Inline rename input inside f1 header
+  const renameInput = makeEl("input");
+  renameInput.classList.add("zao-folder-rename-input");
+  f1.header.appendChild(renameInput);
+
+  strip.appendChild(f1.group);
+  strip.appendChild(f2.group);
+  ws.appendChild(strip);
+  tabContainer.appendChild(ws);
+  doc.body.appendChild(tabContainer);
+
+  let dimmedDuringNativeStart = null;
+  let shouldThrow = false;
+  const service = {
+    startTabDrag() {
+      dimmedDuringNativeStart = f1.group.hasAttribute("data-zao-dragging-folder");
+      if (shouldThrow) throw new Error("aborted drag");
+    },
+    handle_dragover() {},
+  };
+  tabContainer.tabDragAndDrop = service;
+
+  class FakeMutationObserver {
+    observe() {}
+    disconnect() {}
+  }
+
+  const win = {
+    document: doc,
+    MutationObserver: FakeMutationObserver,
+    gBrowser: { tabContainer },
+    getComputedStyle: (el) => el._computed || { display: "flex", visibility: "visible", getPropertyValue: () => "" },
+    addEventListener() {},
+    removeEventListener() {},
+  };
+
+  setupGroupDrag(win);
+  try {
+    // 1. Dragging text inside inline rename input must NOT start a folder drag
+    service.startTabDrag({ clientY: 18 }, renameInput, {});
+    assert.equal(doc.querySelector(".zao-folder-drag-preview"), null);
+    assert.equal(f1.group.hasAttribute("data-zao-dragging-folder"), false);
+
+    // 2. If nativeStart throws, activeDrag must not leak and folder must not be dimmed
+    shouldThrow = true;
+    assert.throws(() => service.startTabDrag({ clientY: 18 }, f1.labelEl, {}), /aborted drag/);
+    assert.equal(f1.group.hasAttribute("data-zao-dragging-folder"), false);
+    assert.equal(doc.querySelector(".zao-folder-drag-preview"), null);
+    shouldThrow = false;
+
+    // 3. On normal start, folder is NOT dimmed during nativeStart (full-opacity setDragImage), then dimmed after
+    // Also ensure capture-phase dragstart does not prematurely dim when nativeStart exists.
+    doc.dispatchEvent({ type: "dragstart", target: f1.labelEl, clientY: 18 });
+    assert.equal(f1.group.hasAttribute("data-zao-dragging-folder"), false, "dragstart waits for nativeStart");
+    service.startTabDrag({ clientY: 18 }, f1.labelEl, {});
+    assert.equal(dimmedDuringNativeStart, false, "Folder must stay at full opacity while nativeStart captures setDragImage");
+    assert.equal(f1.group.getAttribute("data-zao-dragging-folder"), "true");
+
+    // 4. Live headerRect during active drag: simulate f2 visually shifted up to top=0
+    f2.header._rect = { left: 8, top: 0, width: 220, height: 36, right: 228, bottom: 36 };
+    doc.dispatchEvent({
+      type: "dragover",
+      target: f2.labelEl,
+      clientY: 2, // top edge of live shifted rect (0..36), NOT cached unshifted rect (36..72)
+      dataTransfer: { types: ["application/x-moz-tabbrowser-tab"] },
+    });
+    assert.equal(f2.header.hasAttribute("data-zao-edge-reorder"), true, "Edge reorder uses live shifted header rect");
+    assert.equal(win._zaoGroupDrag.headerRects.has(f2.header), false, "Shifted rect must not be cached in headerRects");
+
+    doc.dispatchEvent({ type: "dragend" });
+  } finally {
+    teardownGroupDrag(win);
+  }
+});
