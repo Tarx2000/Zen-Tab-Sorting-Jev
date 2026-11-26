@@ -1,12 +1,18 @@
 # Advanced Tab Groups
 
-The group header drag edge targeting in `modules/group-drag.mjs` is adapted from
-[Advanced Tab Groups](https://github.com/Vertex-Mods/Advanced-Tab-Groups),
-commit a6c43a2ae8c77324d562d770deb192a4fb01e42e.
+The following modules and stylesheets adapt portions of
+[Advanced Tab Groups](https://github.com/Vertex-Mods/Advanced-Tab-Groups)
+(including `folder-look` by `imthi`), commit a6c43a2ae8c77324d562d770deb192a4fb01e42e:
+
+- `modules/group-drag.mjs` (group header drag edge targeting)
+- `modules/folder-engine.mjs` (native Zen folder look, active-in-collapsed semantics, Library shadow-DOM integration, group shortcut handling)
+- `modules/folder-sync.mjs` (multi-window group sync, workspace visibility, nested group cycle guards)
+- `styles/folder-engine.css` (Zia-compatible `(0,3,x)` folder header specificity contract and 3D SVG icon rules)
+- `styles/folder-library.css` (Zen Library shadow-DOM folder styles)
 
 MIT License
 
-Copyright (c) 2025 12th-devs
+Copyright (c) 2025 12th-devs (including `folder-look` contributions by `imthi`)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
