@@ -23,6 +23,14 @@
   display: none !important;
 }
 
+/* ---- Keep direct children rendered while mid-collapse WAAPI animates them shut ---- */
+#tabbrowser-tabs tab-group[collapsed][data-zao-collapsing="true"]:not([split-view-group]):not([drag-image]) > .tab-group-container > tab:not([zen-empty-tab]):not([atg-folder-active]):not([selected]),
+#tabbrowser-tabs tab-group[collapsed][data-zao-collapsing="true"]:not([split-view-group]):not([drag-image]) > .tab-group-container > tab-group:not([split-view-group]):not(:has(tab[atg-folder-active], tab[selected])) {
+  display: flex !important;
+  visibility: visible !important;
+  pointer-events: none !important;
+}
+
 /* ---- Collapsed groups keep their active tabs visible, matching native Zen folders ---- */
 #tabbrowser-tabs tab-group[collapsed]:not([split-view-group]) .tab-group-container tab[atg-folder-active] {
   display: flex !important;
@@ -127,6 +135,7 @@ tab-group[atg-folder-look]:not([split-view-group]) {
       height: 100% !important;
       mask-image: none !important;
       background: transparent !important;
+      user-select: none !important;
 
       :root:not([zen-sidebar-expanded]) & {
         padding: 0 !important;

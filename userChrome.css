@@ -7,11 +7,11 @@
    every surface adapts to Zen's light/dark/accent themes and remains
    compatible with Zia and Advanced Tab Groups. */
 
-/* --- Tab-group collapse fix (guarded to avoid split views & drag images) --- */
-tab-group[collapsed]:not([split-view-group]):not([drag-image]) tab[aria-hidden="true"] {
+/* --- Tab-group collapse fix (guarded to avoid split views, drag images & mid-collapse WAAPI) --- */
+tab-group[collapsed]:not([split-view-group]):not([drag-image]):not([data-zao-collapsing="true"]) tab[aria-hidden="true"] {
   display: none !important;
 }
-tab-group[collapsed]:not([split-view-group]):not([drag-image]) > .tab-group-container > :is(tab-group, zen-folder) {
+tab-group[collapsed]:not([split-view-group]):not([drag-image]):not([data-zao-collapsing="true"]) > .tab-group-container > :is(tab-group, zen-folder) {
   display: none !important;
 }
 
