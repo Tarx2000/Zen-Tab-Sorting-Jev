@@ -1,27 +1,60 @@
-export const PROVIDER_NAMES = [
+// Zen Tab Sorting — Registry-driven Provider Readiness & Consent Gate.
+//
+// Rules:
+// - `"off"`, `"none"`, and `"local"` (Firefox bundled ML) are not remote/LLM
+//   provider endpoints -> `{ ok: false, reason: "provider_disabled" }`.
+// - Consent (`consentToSendData`) is required for ALL non-loopback endpoints
+//   (including a remote Ollama host on LAN/VPS!) and waived for loopback
+//   endpoints (`localhost`, `127.0.0.0/8`, `::1`, including Ollama, LM Studio,
+//   llama.cpp, vLLM, and local custom servers).
+// - `apiKey` is optional whenever `!requiresApiKeyForProfile(profile)`.
+
+import {
+  PROVIDER_PRESETS,
+  getProviderPreset,
+  isLoopbackHost,
+  requiresApiKeyForProfile,
+  requiresConsentForProfile,
+  resolveProfileEndpoint,
+} from "./provider-registry.mjs";
+
+export const PROVIDER_NAMES = Object.freeze([
   "off",
+  "none",
   "local",
-  "ollama",
-  "openai",
-  "primalabs",
-  "chatgpt",
-  "gemini",
-  "custom",
-];
+  ...PROVIDER_PRESETS.map((p) => p.id),
+]);
+
+const DISABLED_PROVIDERS = new Set(["", "off", "none", "local"]);
 
 export const getProviderReadiness = (settings) => {
-  if (settings.provider === "off" || settings.provider === "local") {
+  if (!settings || typeof settings !== "object") {
     return { ok: false, reason: "provider_disabled" };
   }
-  if (settings.provider === "ollama") {
-    const missingFields = missingStringFields({ endpoint: settings.endpoint, model: settings.model });
-    return missingFields.length > 0 ? { ok: false, reason: "missing_required_config", missingFields } : { ok: true, value: settings };
+  const provider = String(settings.provider || "off").trim().toLowerCase();
+  if (DISABLED_PROVIDERS.has(provider)) {
+    return { ok: false, reason: "provider_disabled" };
   }
-  if (!settings.consentToSendData) {
+
+  const preset = getProviderPreset(provider);
+  if (!preset) {
+    if (!settings.consentToSendData) {
+      return { ok: false, reason: "consent_required" };
+    }
+    return { ok: false, reason: "missing_required_config", missingFields: ["provider"] };
+  }
+
+  const endpoint = resolveProfileEndpoint(settings);
+  const isLoopback = Boolean(endpoint && isLoopbackHost(endpoint));
+
+  if (!isLoopback && requiresConsentForProfile(settings) && !settings.consentToSendData) {
     return { ok: false, reason: "consent_required" };
   }
-  const missingFields = getMissingRequiredFields(settings);
-  return missingFields.length > 0 ? { ok: false, reason: "missing_required_config", missingFields } : { ok: true, value: settings };
+
+  const missingFields = getMissingRequiredFields(settings, preset, endpoint);
+  return missingFields.length > 0
+    ? { ok: false, reason: "missing_required_config", missingFields }
+    : { ok: true, value: settings };
 };
 
 export const requestProviderFetch = async (settings, fetchProvider) => {
@@ -30,34 +63,38 @@ export const requestProviderFetch = async (settings, fetchProvider) => {
   return { ok: true, value: await fetchProvider(readiness.value) };
 };
 
-const getMissingRequiredFields = (settings) => {
-  switch (settings.provider) {
-    case "openai":
-    case "primalabs":
-      return missingStringFields({ endpoint: settings.endpoint, apiKey: settings.apiKey, model: settings.model });
-    case "chatgpt": {
-      const hasToken =
-        (typeof settings.accessToken === "string" && settings.accessToken.trim().length > 0) ||
-        (typeof settings.refreshToken === "string" && settings.refreshToken.trim().length > 0);
-      const missing = missingStringFields({ model: settings.model });
-      if (!hasToken) missing.unshift("accessToken");
-      return missing;
-    }
-    case "gemini":
-      return missingStringFields({ apiKey: settings.apiKey, model: settings.model });
-    case "custom":
-      return missingStringFields({
-        endpoint: settings.endpoint,
-        model: settings.model,
-        format: settings.format,
-        ...(settings.format === "openai" ? { apiKey: settings.apiKey } : {}),
-      });
-    default:
-      return ["provider"];
-  }
-};
+const getMissingRequiredFields = (settings, preset, resolvedEndpoint) => {
+  const missing = [];
 
-const missingStringFields = (fields) =>
-  Object.entries(fields)
-    .filter(([, value]) => typeof value !== "string" || value.trim().length === 0)
-    .map(([field]) => field);
+  // Endpoint check:
+  // - If caller explicitly passed an empty `endpoint: ""` string on a profile
+  //   that expects one (or if preset has no defaultBaseUrl), flag `endpoint`.
+  const hasExplicitEmptyEndpoint =
+    Object.hasOwn(settings, "endpoint") &&
+    (typeof settings.endpoint !== "string" || settings.endpoint.trim().length === 0) &&
+    preset.id !== "gemini" &&
+    preset.id !== "chatgpt";
+
+  if (hasExplicitEmptyEndpoint || (!resolvedEndpoint && preset.requiresEndpoint)) {
+    missing.push("endpoint");
+  }
+
+  // OAuth vs API Key check
+  if (preset.requiresOAuth) {
+    const hasToken =
+      (typeof settings.accessToken === "string" && settings.accessToken.trim().length > 0) ||
+      (typeof settings.refreshToken === "string" && settings.refreshToken.trim().length > 0);
+    if (!hasToken) missing.push("accessToken");
+  } else if (requiresApiKeyForProfile(settings)) {
+    if (typeof settings.apiKey !== "string" || settings.apiKey.trim().length === 0) {
+      missing.push("apiKey");
+    }
+  }
+
+  // Model check
+  if (typeof settings.model !== "string" || settings.model.trim().length === 0) {
+    missing.push("model");
+  }
+
+  return missing;
+};
