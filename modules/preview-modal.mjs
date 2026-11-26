@@ -1,27 +1,13 @@
-// Zen Tab Sorting — Plan Mode preview modal (Phase 4d).
+// Zen Tab Sorting — Plan Mode preview modal.
 //
 // Interactive modal that lets the user review the AI's proposed groupings
-// before they're applied. Used both for explicit "Plan Mode" (identify-only)
-// and as a confirmation step in Auto-add / Always-add modes (so the user
-// can veto rule mutations before they hit the table).
-//
-// Features:
-//   - Toggle each proposed NEW group keep/skip (accent fill = kept).
-//   - Toggle each "→ Existing" target keep/skip (same UX, dimmed border).
-//   - "Re-assign to planned" — pending tabs get classified into one of the
-//     CURRENTLY-KEPT groups in this modal (constrained vocabulary).
-//   - "Re-assign to existing" — pending tabs get classified into one of the
-//     user's defined RULES (regardless of what's kept in the modal). Useful
-//     for pulling a tab into a rule-named group the AI didn't propose.
-//   - "Re-assign to new" — open-ended clustering, may invent new categories.
-//   - Apply commits ONLY kept items; unkept tabs become skipped.
-//   - Cancel returns null; caller does nothing.
-//
-// State model: `kept` is a Set of prefixed keys —
-//   "new:<lowercase-name>"      for newGroups entries
-//   "existing:<lowercase-name>" for assignedToExisting target groups
-// This avoids collisions when the AI proposes a new group with the same name
-// as an existing rule (rare but possible in auto-add modes).
+// before they're applied. Supports:
+//   - In-place keep/skip toggles (preserving keyboard focus & scroll position)
+//   - Inline group rename (double-click or edit button)
+//   - Per-tab exclude (×) back to Skipped
+//   - Compact segmented Re-assign bar (Planned / Existing / New) with per-button spinner
+//   - Optional header model badge, quick model switcher, and Re-run action
+//   - Dynamic Apply (N groups · M tabs) label and AbortSignal auto-close
 
 import { LOG, h } from "./config.mjs";
 
@@ -29,13 +15,11 @@ const newKey = (name) => `new:${name.toLowerCase()}`;
 const existingKey = (name) => `existing:${name.toLowerCase()}`;
 
 const clonePlan = (p) => ({
-  assignedToExisting: (p.assignedToExisting || []).map((a) => ({ ...a })),
-  newGroups: (p.newGroups || []).map((g) => ({ name: g.name, tabs: [...g.tabs] })),
-  skipped: [...(p.skipped || [])],
+  assignedToExisting: (p?.assignedToExisting || []).map((a) => ({ ...a })),
+  newGroups: (p?.newGroups || []).map((g) => ({ name: g.name, tabs: [...(g.tabs || [])] })),
+  skipped: [...(p?.skipped || [])],
 });
 
-// Group the assignedToExisting array by target groupName into the same
-// { name, tabs } shape as newGroups, so we can render them uniformly.
 const groupExistingByTarget = (assignedToExisting) => {
   const byName = new Map();
   for (const a of assignedToExisting) {
@@ -46,40 +30,115 @@ const groupExistingByTarget = (assignedToExisting) => {
   return [...byName.values()];
 };
 
+const normalizeModelOption = (entry) => {
+  if (typeof entry === "string") return { id: entry, label: entry };
+  if (entry && typeof entry === "object") {
+    const id = String(entry.id ?? entry.value ?? entry.label ?? "");
+    const label = String(entry.label ?? entry.name ?? id);
+    return { id, label };
+  }
+  return null;
+};
+
+let modalSeq = 0;
+
 /**
  * Show the AI plan as an interactive modal.
  *
  * @param {object} args
  * @param {Plan} args.plan
- * @param {(pending) => Promise<{newGroups,skipped}>}   [args.onReassignToNew]
+ * @param {(pending) => Promise<{newGroups,skipped}>} [args.onReassignToNew]
  * @param {(pending,buckets) => Promise<{assignments,skipped}>} [args.onAssignToPlanned]
- *   `buckets` is the modal's currently-kept groups (new + existing-target).
  * @param {(pending) => Promise<{assignments,skipped}>} [args.onAssignToExisting]
- *   Classifies pending tabs against the user's full rules table (regardless
- *   of what's kept in the modal). Lets the user route a pending tab into a
- *   rule-defined group that the AI didn't propose this run.
- *
- * @returns {Promise<Plan | null>} The filtered plan to apply, or null on cancel.
+ * @param {string} [args.activeModelLabel]
+ * @param {Array<string|{id:string,label?:string}>} [args.models]
+ * @param {(modelId:string) => Promise<Plan|null>} [args.onModelChangeAndRerun]
+ * @param {AbortSignal} [args.signal]
+ * @returns {Promise<Plan | null>}
  */
-export const showPreviewModal = ({ plan, onReassignToNew, onAssignToPlanned, onAssignToExisting }) =>
-  new Promise((resolve) => {
-    let currentPlan = clonePlan(plan);
-    // Default: every entry is kept.
-    const kept = new Set();
-    for (const g of currentPlan.newGroups) kept.add(newKey(g.name));
-    for (const a of currentPlan.assignedToExisting) kept.add(existingKey(a.groupName));
+export const showPreviewModal = ({
+  plan,
+  onReassignToNew,
+  onAssignToPlanned,
+  onAssignToExisting,
+  activeModelLabel = "",
+  models = null,
+  onModelChangeAndRerun = null,
+  signal = null,
+}) => {
+  if (signal?.aborted) return Promise.resolve(null);
 
+  return new Promise((resolve) => {
+    let currentPlan = clonePlan(plan);
+    const kept = new Set();
+
+    const seedKeptFromPlan = (nextPlan) => {
+      kept.clear();
+      for (const g of nextPlan.newGroups) kept.add(newKey(g.name));
+      for (const a of nextPlan.assignedToExisting) kept.add(existingKey(a.groupName));
+    };
+    seedKeptFromPlan(currentPlan);
+
+    const titleId = `zao-preview-title-${++modalSeq}`;
     const dialog = h("dialog", { class: "zao-preview-dialog" });
+    dialog.setAttribute("aria-labelledby", titleId);
 
     // ─── Header ────────────────────────────────────────────────────────────
     const header = h("div", { class: "zao-preview-header" });
-    header.appendChild(h("h2", { class: "zao-preview-title", text: "AI grouping preview" }));
+    const titleEl = h("h2", { class: "zao-preview-title", text: "AI grouping preview" });
+    titleEl.id = titleId;
+    header.appendChild(titleEl);
+
+    const headerControls = h("div", { class: "zao-preview-header-controls" });
+    const normalizedModels = Array.isArray(models)
+      ? models.map(normalizeModelOption).filter((m) => m && m.id)
+      : [];
+    let modelSelect = null;
+    let rerunBtn = null;
+    let modelBadge = null;
+
+    if (normalizedModels.length > 0 && typeof onModelChangeAndRerun === "function") {
+      const modelBar = h("div", { class: "zao-preview-model-bar" });
+      modelSelect = h("select", { class: "zao-preview-model-select" });
+      modelSelect.setAttribute("aria-label", "AI model");
+      for (const m of normalizedModels) {
+        const opt = h("option", { text: m.label });
+        opt.value = m.id;
+        if (activeModelLabel && (m.id === activeModelLabel || m.label === activeModelLabel)) {
+          opt.selected = true;
+        }
+        modelSelect.appendChild(opt);
+      }
+      rerunBtn = h("button", { class: "zao-preview-btn zao-preview-btn-rerun", text: "Re-run" });
+      rerunBtn.type = "button";
+      rerunBtn.title = "Re-run grouping with the selected model";
+      rerunBtn.addEventListener("click", onRerunClick);
+      modelBar.append(modelSelect, rerunBtn);
+      headerControls.appendChild(modelBar);
+    } else if (activeModelLabel || typeof onModelChangeAndRerun === "function") {
+      const modelBar = h("div", { class: "zao-preview-model-bar" });
+      if (activeModelLabel) {
+        modelBadge = h("span", { class: "zao-preview-model-badge", text: activeModelLabel });
+        modelBadge.title = `Active AI model: ${activeModelLabel}`;
+        modelBar.appendChild(modelBadge);
+      }
+      if (typeof onModelChangeAndRerun === "function") {
+        rerunBtn = h("button", { class: "zao-preview-btn zao-preview-btn-rerun", text: "Re-run" });
+        rerunBtn.type = "button";
+        rerunBtn.title = "Re-run grouping";
+        rerunBtn.addEventListener("click", onRerunClick);
+        modelBar.appendChild(rerunBtn);
+      }
+      headerControls.appendChild(modelBar);
+    }
+
     const closeBtn = h("button", { class: "zao-preview-close" });
     closeBtn.setAttribute("type", "button");
     closeBtn.setAttribute("aria-label", "Close");
     closeBtn.textContent = "×";
     closeBtn.addEventListener("click", () => cleanup(null));
-    header.appendChild(closeBtn);
+    headerControls.appendChild(closeBtn);
+    header.appendChild(headerControls);
     dialog.appendChild(header);
 
     const body = h("div", { class: "zao-preview-body" });
@@ -90,33 +149,38 @@ export const showPreviewModal = ({ plan, onReassignToNew, onAssignToPlanned, onA
     const footerLeft = h("div", { class: "zao-preview-footer-left" });
     const footerRight = h("div", { class: "zao-preview-footer-right" });
 
-    const reassignToPlannedBtn = h("button", { class: "zao-preview-btn zao-preview-btn-reassign" });
+    const reassignBar = h("div", { class: "zao-preview-reassign-group" });
+    reassignBar.setAttribute("role", "group");
+    reassignBar.setAttribute("aria-label", "Re-assign unkept tabs");
+    reassignBar.appendChild(h("span", { class: "zao-preview-reassign-label", text: "Re-assign:" }));
+
+    const reassignToPlannedBtn = h("button", { class: "zao-preview-btn zao-preview-btn-reassign", text: "Planned" });
     reassignToPlannedBtn.setAttribute("type", "button");
-    reassignToPlannedBtn.textContent = "Re-assign to planned";
+    reassignToPlannedBtn.setAttribute("aria-label", "Re-assign to planned");
     reassignToPlannedBtn.addEventListener("click", onReassignToPlannedClick);
-    footerLeft.appendChild(reassignToPlannedBtn);
+    reassignBar.appendChild(reassignToPlannedBtn);
 
-    const reassignToExistingBtn = h("button", { class: "zao-preview-btn zao-preview-btn-reassign" });
+    const reassignToExistingBtn = h("button", { class: "zao-preview-btn zao-preview-btn-reassign", text: "Existing" });
     reassignToExistingBtn.setAttribute("type", "button");
-    reassignToExistingBtn.textContent = "Re-assign to existing";
+    reassignToExistingBtn.setAttribute("aria-label", "Re-assign to existing");
     reassignToExistingBtn.addEventListener("click", onReassignToExistingClick);
-    footerLeft.appendChild(reassignToExistingBtn);
+    reassignBar.appendChild(reassignToExistingBtn);
 
-    const reassignToNewBtn = h("button", { class: "zao-preview-btn zao-preview-btn-reassign" });
+    const reassignToNewBtn = h("button", { class: "zao-preview-btn zao-preview-btn-reassign", text: "New" });
     reassignToNewBtn.setAttribute("type", "button");
-    reassignToNewBtn.textContent = "Re-assign to new";
+    reassignToNewBtn.setAttribute("aria-label", "Re-assign to new");
     reassignToNewBtn.addEventListener("click", onReassignToNewClick);
-    footerLeft.appendChild(reassignToNewBtn);
+    reassignBar.appendChild(reassignToNewBtn);
 
-    const cancelBtn = h("button", { class: "zao-preview-btn zao-preview-btn-cancel" });
+    footerLeft.appendChild(reassignBar);
+
+    const cancelBtn = h("button", { class: "zao-preview-btn zao-preview-btn-cancel", text: "Cancel" });
     cancelBtn.setAttribute("type", "button");
-    cancelBtn.textContent = "Cancel";
     cancelBtn.addEventListener("click", () => cleanup(null));
     footerRight.appendChild(cancelBtn);
 
-    const applyBtn = h("button", { class: "zao-preview-btn zao-preview-btn-apply" });
+    const applyBtn = h("button", { class: "zao-preview-btn zao-preview-btn-apply", text: "Apply" });
     applyBtn.setAttribute("type", "button");
-    applyBtn.textContent = "Apply";
     applyBtn.addEventListener("click", onApplyClick);
     footerRight.appendChild(applyBtn);
 
@@ -124,12 +188,13 @@ export const showPreviewModal = ({ plan, onReassignToNew, onAssignToPlanned, onA
     footer.appendChild(footerRight);
     dialog.appendChild(footer);
 
-    // ─── Rendering ─────────────────────────────────────────────────────────
-    function render() {
-      while (body.firstChild) body.firstChild.remove();
+    let summaryEl = null;
+    let busy = false;
 
+    // ─── Summary & Footer sync (in-place, zero DOM rebuild) ────────────────
+    function updateSummaryAndFooter() {
       const existingTargets = groupExistingByTarget(currentPlan.assignedToExisting);
-      const totalKept = countKept(existingTargets);
+      const keptCounts = countKeptStats(existingTargets);
       const totalGroups = currentPlan.newGroups.length + existingTargets.length;
       const skippedCount = currentPlan.skipped.length;
       const pendingForReassign = pendingTabs(existingTargets).length;
@@ -137,8 +202,46 @@ export const showPreviewModal = ({ plan, onReassignToNew, onAssignToPlanned, onA
       const summaryText =
         totalGroups === 0 && skippedCount === 0
           ? "The AI found nothing to group."
-          : `${totalKept}/${totalGroups} group(s) kept · ${skippedCount} tab(s) ungrouped`;
-      body.appendChild(h("p", { class: "zao-preview-summary", text: summaryText }));
+          : `${keptCounts.groups}/${totalGroups} group(s) kept · ${keptCounts.tabs} tab(s) moving · ${skippedCount} ungrouped`;
+      if (summaryEl) summaryEl.textContent = summaryText;
+
+      applyBtn.textContent = keptCounts.groups > 0
+        ? `Apply (${keptCounts.groups} ${keptCounts.groups === 1 ? "group" : "groups"} · ${keptCounts.tabs} ${keptCounts.tabs === 1 ? "tab" : "tabs"})`
+        : "Apply (0 groups)";
+
+      if (busy) return;
+
+      reassignToPlannedBtn.disabled =
+        pendingForReassign === 0 || keptCounts.groups === 0 || typeof onAssignToPlanned !== "function";
+      reassignToPlannedBtn.title =
+        pendingForReassign === 0 ? "Nothing to re-assign — every tab is in a kept group"
+        : keptCounts.groups === 0 ? "No kept groups to assign into — keep at least one first"
+        : `Try fitting ${pendingForReassign} unkept tab(s) into your ${keptCounts.groups} kept group(s)`;
+
+      reassignToExistingBtn.disabled =
+        pendingForReassign === 0 || typeof onAssignToExisting !== "function";
+      reassignToExistingBtn.title =
+        pendingForReassign === 0 ? "Nothing to re-assign — every tab is in a kept group"
+        : typeof onAssignToExisting !== "function" ? "No existing rule groups to assign into"
+        : `Try fitting ${pendingForReassign} unkept tab(s) into one of your existing rule groups`;
+
+      reassignToNewBtn.disabled =
+        pendingForReassign === 0 || typeof onReassignToNew !== "function";
+      reassignToNewBtn.title = pendingForReassign === 0
+        ? "Nothing to re-assign — every tab is in a kept group"
+        : `Cluster ${pendingForReassign} unkept tab(s) into fresh new categories`;
+    }
+
+    // ─── Full Rendering (preserves scrollTop) ──────────────────────────────
+    function render() {
+      const prevScrollTop = body.scrollTop;
+      while (body.firstChild) body.firstChild.remove();
+
+      const existingTargets = groupExistingByTarget(currentPlan.assignedToExisting);
+      const skippedCount = currentPlan.skipped.length;
+
+      summaryEl = h("p", { class: "zao-preview-summary" });
+      body.appendChild(summaryEl);
 
       if (currentPlan.newGroups.length > 0) {
         const sec = h("section", { class: "zao-preview-section" });
@@ -168,77 +271,178 @@ export const showPreviewModal = ({ plan, onReassignToNew, onAssignToPlanned, onA
           text: `Skipped (${skippedCount}) — will remain ungrouped`,
         }));
         const ul = h("ul", { class: "zao-preview-tab-list" });
-        for (const t of currentPlan.skipped) ul.appendChild(renderTabRow(t));
+        for (const t of currentPlan.skipped) ul.appendChild(renderTabRow(t, null));
         sec.appendChild(ul);
         body.appendChild(sec);
       }
 
-      // Re-assign-to-planned: needs pending tabs AND at least one kept group
-      //   in this modal to assign INTO.
-      // Re-assign-to-existing: needs pending tabs AND the caller's callback
-      //   (which classifies against the user's full rules table, regardless
-      //   of what's kept in the modal).
-      // Re-assign-to-new: just needs pending tabs.
-      const keptGroupCount = totalKept;
-      reassignToPlannedBtn.disabled =
-        pendingForReassign === 0 || keptGroupCount === 0 || typeof onAssignToPlanned !== "function";
-      reassignToPlannedBtn.title =
-        pendingForReassign === 0 ? "Nothing to re-assign — every tab is in a kept group"
-        : keptGroupCount === 0 ? "No kept groups to assign into — keep at least one first"
-        : `Try fitting ${pendingForReassign} unkept tab(s) into your ${keptGroupCount} kept group(s)`;
-      reassignToExistingBtn.disabled =
-        pendingForReassign === 0 || typeof onAssignToExisting !== "function";
-      reassignToExistingBtn.title =
-        pendingForReassign === 0 ? "Nothing to re-assign — every tab is in a kept group"
-        : typeof onAssignToExisting !== "function" ? "No existing rule groups to assign into"
-        : `Try fitting ${pendingForReassign} unkept tab(s) into one of your existing rule groups`;
-      reassignToNewBtn.disabled = pendingForReassign === 0 || typeof onReassignToNew !== "function";
-      reassignToNewBtn.title = pendingForReassign === 0
-        ? "Nothing to re-assign — every tab is in a kept group"
-        : `Cluster ${pendingForReassign} unkept tab(s) into fresh new categories`;
+      updateSummaryAndFooter();
+      body.scrollTop = prevScrollTop;
+    }
+
+    function renameNewGroup(groupObj, nextRawName) {
+      const nextName = String(nextRawName || "").trim();
+      if (!nextName || nextName === groupObj.name) return false;
+
+      const oldKey = newKey(groupObj.name);
+      const targetKey = newKey(nextName);
+      const wasKept = kept.has(oldKey);
+
+      const collision = currentPlan.newGroups.find(
+        (other) => other !== groupObj && other.name.toLowerCase() === nextName.toLowerCase(),
+      );
+      if (collision) {
+        collision.tabs.push(...groupObj.tabs);
+        currentPlan.newGroups = currentPlan.newGroups.filter((g) => g !== groupObj);
+        kept.delete(oldKey);
+        if (wasKept) kept.add(targetKey);
+        render();
+        return true;
+      }
+
+      groupObj.name = nextName;
+      kept.delete(oldKey);
+      if (wasKept) kept.add(targetKey);
+      return true;
+    }
+
+    function excludeTabFromGroup(tabInfo, groupObj, kind) {
+      if (kind === "new") {
+        const idx = groupObj.tabs.indexOf(tabInfo);
+        if (idx === -1) return;
+        groupObj.tabs.splice(idx, 1);
+        if (groupObj.tabs.length === 0) {
+          currentPlan.newGroups = currentPlan.newGroups.filter((g) => g !== groupObj);
+          kept.delete(newKey(groupObj.name));
+        }
+      } else {
+        const targetLower = groupObj.name.toLowerCase();
+        const idx = currentPlan.assignedToExisting.findIndex(
+          (a) => a.tabInfo === tabInfo && a.groupName.toLowerCase() === targetLower,
+        );
+        if (idx === -1) return;
+        currentPlan.assignedToExisting.splice(idx, 1);
+        const remaining = currentPlan.assignedToExisting.some(
+          (a) => a.groupName.toLowerCase() === targetLower,
+        );
+        if (!remaining) kept.delete(existingKey(groupObj.name));
+      }
+      currentPlan.skipped.push(tabInfo);
+      render();
     }
 
     function renderGroupBlock(g, kind) {
-      const key = kind === "new" ? newKey(g.name) : existingKey(g.name);
-      const isKept = kept.has(key);
+      const getKey = () => (kind === "new" ? newKey(g.name) : existingKey(g.name));
+      const isKeptInitial = kept.has(getKey());
       const classes = ["zao-preview-group"];
-      if (isKept) classes.push("zao-kept");
+      if (isKeptInitial) classes.push("zao-kept");
       if (kind === "existing") classes.push("zao-preview-group-existing");
       const block = h("div", { class: classes.join(" ") });
       block.setAttribute("role", "button");
-      block.setAttribute("aria-pressed", isKept ? "true" : "false");
+      block.setAttribute("aria-pressed", isKeptInitial ? "true" : "false");
       block.tabIndex = 0;
-      block.addEventListener("click", () => {
-        if (isKept) kept.delete(key);
-        else kept.add(key);
-        render();
+
+      const head = h("div", { class: "zao-preview-group-head" });
+      const headLeft = h("div", { class: "zao-preview-group-head-left" });
+      const prefix = kind === "existing" ? "→ " : "";
+
+      const nameEl = h("span", {
+        class: "zao-preview-group-name",
+        text: `${prefix}${g.name}`,
+      });
+      const countEl = h("span", {
+        class: "zao-preview-group-count",
+        text: `(${g.tabs.length})`,
+      });
+      headLeft.append(nameEl, countEl);
+
+      const startInlineRename = (e) => {
+        e?.stopPropagation?.();
+        if (kind !== "new" || headLeft.querySelector(".zao-preview-rename-input")) return;
+        const input = h("input", { class: "zao-preview-rename-input" });
+        input.type = "text";
+        input.value = g.name;
+        input.setAttribute("aria-label", `Rename group ${g.name}`);
+
+        let finished = false;
+        const finish = (commit) => {
+          if (finished) return;
+          finished = true;
+          const nextValue = input.value;
+          input.replaceWith(nameEl);
+          if (commit) {
+            const changed = renameNewGroup(g, nextValue);
+            if (changed && nameEl.isConnected) {
+              nameEl.textContent = g.name;
+              updateSummaryAndFooter();
+            }
+          }
+          if (block.isConnected) block.focus();
+        };
+
+        input.addEventListener("click", (ev) => ev.stopPropagation());
+        input.addEventListener("keydown", (ev) => {
+          ev.stopPropagation();
+          if (ev.key === "Enter") { ev.preventDefault(); finish(true); }
+          else if (ev.key === "Escape") { ev.preventDefault(); finish(false); }
+        });
+        input.addEventListener("blur", () => finish(true));
+
+        nameEl.replaceWith(input);
+        input.focus();
+        input.select();
+      };
+
+      if (kind === "new") {
+        nameEl.title = "Double-click to rename group";
+        nameEl.addEventListener("dblclick", startInlineRename);
+        const renameBtn = h("button", { class: "zao-preview-group-rename-btn", text: "✎" });
+        renameBtn.type = "button";
+        renameBtn.title = "Rename group";
+        renameBtn.setAttribute("aria-label", `Rename group ${g.name}`);
+        renameBtn.addEventListener("click", startInlineRename);
+        headLeft.appendChild(renameBtn);
+      }
+
+      const stateEl = h("span", {
+        class: "zao-preview-group-state",
+        text: isKeptInitial ? "✓ keep" : "skip",
+      });
+      head.append(headLeft, stateEl);
+      block.appendChild(head);
+
+      const toggleInPlace = () => {
+        const key = getKey();
+        const nextKept = !kept.has(key);
+        if (nextKept) kept.add(key);
+        else kept.delete(key);
+        block.classList.toggle("zao-kept", nextKept);
+        block.setAttribute("aria-pressed", nextKept ? "true" : "false");
+        stateEl.textContent = nextKept ? "✓ keep" : "skip";
+        updateSummaryAndFooter();
+      };
+
+      block.addEventListener("click", (e) => {
+        if (e.target.closest?.("button, input")) return;
+        toggleInPlace();
       });
       block.addEventListener("keydown", (e) => {
+        if (e.target !== block) return;
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
-          block.click();
+          toggleInPlace();
         }
       });
 
-      const head = h("div", { class: "zao-preview-group-head" });
-      const prefix = kind === "existing" ? "→ " : "";
-      head.appendChild(h("span", {
-        class: "zao-preview-group-name",
-        text: `${prefix}${g.name} (${g.tabs.length})`,
-      }));
-      head.appendChild(h("span", {
-        class: "zao-preview-group-state",
-        text: isKept ? "✓ keep" : "skip",
-      }));
-      block.appendChild(head);
-
       const ul = h("ul", { class: "zao-preview-tab-list" });
-      for (const t of g.tabs) ul.appendChild(renderTabRow(t));
+      for (const t of g.tabs) {
+        ul.appendChild(renderTabRow(t, () => excludeTabFromGroup(t, g, kind)));
+      }
       block.appendChild(ul);
       return block;
     }
 
-    function renderTabRow(tabInfo) {
+    function renderTabRow(tabInfo, onExclude) {
       const li = h("li", { class: "zao-preview-tab" });
       const iconSrc = tabInfo?._tab?.image;
       if (iconSrc) {
@@ -250,20 +454,44 @@ export const showPreviewModal = ({ plan, onReassignToNew, onAssignToPlanned, onA
       }
       li.appendChild(h("span", { class: "zao-preview-tab-host", text: tabInfo.hostname || "(no host)" }));
       const title = (tabInfo.title || "").replace(/\s+/g, " ").trim();
-      if (title) li.appendChild(h("span", { class: "zao-preview-tab-title", text: ` — ${title}` }));
+      if (title) {
+        const titleSpan = h("span", { class: "zao-preview-tab-title", text: ` — ${title}` });
+        titleSpan.title = title;
+        li.appendChild(titleSpan);
+      }
+      if (typeof onExclude === "function") {
+        const excludeBtn = h("button", { class: "zao-preview-tab-exclude", text: "×" });
+        excludeBtn.type = "button";
+        excludeBtn.title = "Exclude tab (move to skipped)";
+        excludeBtn.setAttribute("aria-label", `Exclude ${tabInfo.hostname || "tab"} from group`);
+        excludeBtn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          onExclude();
+        });
+        li.appendChild(excludeBtn);
+      }
       return li;
     }
 
     // ─── State helpers ─────────────────────────────────────────────────────
-    function countKept(existingTargets) {
-      let n = 0;
-      for (const g of currentPlan.newGroups) if (kept.has(newKey(g.name))) n++;
-      for (const t of existingTargets) if (kept.has(existingKey(t.name))) n++;
-      return n;
+    function countKeptStats(existingTargets) {
+      let groups = 0;
+      let tabs = 0;
+      for (const g of currentPlan.newGroups) {
+        if (kept.has(newKey(g.name))) {
+          groups++;
+          tabs += g.tabs.length;
+        }
+      }
+      for (const t of existingTargets) {
+        if (kept.has(existingKey(t.name))) {
+          groups++;
+          tabs += t.tabs.length;
+        }
+      }
+      return { groups, tabs };
     }
 
-    // Tabs eligible for re-assign: from un-kept new groups + un-kept existing
-    // targets + currently-skipped tabs.
     function pendingTabs(existingTargets = groupExistingByTarget(currentPlan.assignedToExisting)) {
       const fromUnkeptNew = currentPlan.newGroups
         .filter((g) => !kept.has(newKey(g.name)))
@@ -274,8 +502,6 @@ export const showPreviewModal = ({ plan, onReassignToNew, onAssignToPlanned, onA
       return [...fromUnkeptNew, ...fromUnkeptExisting, ...currentPlan.skipped];
     }
 
-    // All currently-kept "buckets" the AI can sort INTO, in unified { name, tabs }
-    // shape. Includes both proposed new groups and existing-target groupings.
     function keptBuckets() {
       const existingTargets = groupExistingByTarget(currentPlan.assignedToExisting);
       const out = [];
@@ -284,79 +510,100 @@ export const showPreviewModal = ({ plan, onReassignToNew, onAssignToPlanned, onA
       return out;
     }
 
-    // ─── Spinner-wrapped action runner ─────────────────────────────────────
-    async function runWithSpinner(fn) {
-      const reassignButtons = [reassignToPlannedBtn, reassignToExistingBtn, reassignToNewBtn];
-      const allBtns = [...reassignButtons, cancelBtn, applyBtn];
-      const wasDisabled = allBtns.map((b) => b.disabled);
-      for (const b of allBtns) b.disabled = true;
-      const originalTexts = reassignButtons.map((b) => b.textContent);
-      const createSpinner = () => {
-        const SVG = "http://www.w3.org/2000/svg";
-        if (typeof document.createElementNS === "function") {
-          const svg = document.createElementNS(SVG, "svg");
-          svg.setAttribute("class", "zao-spinner-svg");
-          svg.setAttribute("viewBox", "0 0 24 24");
-          svg.setAttribute("width", "14");
-          svg.setAttribute("height", "14");
-          svg.setAttribute("fill", "none");
-          svg.setAttribute("aria-label", "Working");
-          const track = document.createElementNS(SVG, "circle");
-          track.setAttribute("class", "zao-loading-track");
-          track.setAttribute("cx", "12");
-          track.setAttribute("cy", "12");
-          track.setAttribute("r", "8.5");
-          const arc = document.createElementNS(SVG, "circle");
-          arc.setAttribute("class", "zao-loading-arc");
-          arc.setAttribute("cx", "12");
-          arc.setAttribute("cy", "12");
-          arc.setAttribute("r", "8.5");
-          svg.append(track, arc);
-          return svg;
-        }
-        const s = h("span", { class: "zao-spinner" });
-        s.setAttribute("aria-label", "Working");
-        return s;
-      };
-      const spinners = [];
-      for (const b of reassignButtons) {
-        b.textContent = "";
-        const s = createSpinner();
-        b.appendChild(s);
-        spinners.push(s);
+    // ─── Per-button spinner-wrapped action runner ──────────────────────────
+    const createSpinner = () => {
+      const SVG = "http://www.w3.org/2000/svg";
+      if (typeof document.createElementNS === "function") {
+        const svg = document.createElementNS(SVG, "svg");
+        svg.setAttribute("class", "zao-spinner-svg");
+        svg.setAttribute("viewBox", "0 0 24 24");
+        svg.setAttribute("width", "14");
+        svg.setAttribute("height", "14");
+        svg.setAttribute("fill", "none");
+        svg.setAttribute("aria-label", "Working");
+        const track = document.createElementNS(SVG, "circle");
+        track.setAttribute("class", "zao-loading-track");
+        track.setAttribute("cx", "12");
+        track.setAttribute("cy", "12");
+        track.setAttribute("r", "8.5");
+        const arc = document.createElementNS(SVG, "circle");
+        arc.setAttribute("class", "zao-loading-arc");
+        arc.setAttribute("cx", "12");
+        arc.setAttribute("cy", "12");
+        arc.setAttribute("r", "8.5");
+        svg.append(track, arc);
+        return svg;
       }
+      const s = h("span", { class: "zao-spinner" });
+      s.setAttribute("aria-label", "Working");
+      return s;
+    };
+
+    async function runWithSpinner(activeBtn, fn) {
+      if (busy) return;
+      busy = true;
+      const allControls = [
+        reassignToPlannedBtn,
+        reassignToExistingBtn,
+        reassignToNewBtn,
+        cancelBtn,
+        applyBtn,
+        ...(rerunBtn ? [rerunBtn] : []),
+        ...(modelSelect ? [modelSelect] : []),
+      ];
+      const wasDisabled = allControls.map((el) => el.disabled);
+      for (const el of allControls) el.disabled = true;
+
+      const originalText = activeBtn.textContent;
+      activeBtn.textContent = "";
+      const spinner = createSpinner();
+      activeBtn.appendChild(spinner);
+      activeBtn.setAttribute("aria-busy", "true");
+
       try {
         await fn();
       } catch (e) {
         console.error(`${LOG} preview modal: action failed:`, e);
       } finally {
-        for (const s of spinners) s.remove();
-        for (let i = 0; i < reassignButtons.length; i++) reassignButtons[i].textContent = originalTexts[i];
-        for (let i = 0; i < allBtns.length; i++) allBtns[i].disabled = wasDisabled[i];
-        render();
+        busy = false;
+        spinner.remove();
+        activeBtn.removeAttribute("aria-busy");
+        activeBtn.textContent = originalText;
+        for (let i = 0; i < allControls.length; i++) allControls[i].disabled = wasDisabled[i];
+        if (!done) render();
       }
+    }
+
+    // ─── Model switcher / Re-run handler ───────────────────────────────────
+    async function onRerunClick() {
+      if (!rerunBtn || rerunBtn.disabled || typeof onModelChangeAndRerun !== "function") return;
+      const selectedModel = modelSelect ? modelSelect.value : activeModelLabel;
+      await runWithSpinner(rerunBtn, async () => {
+        const nextPlan = await onModelChangeAndRerun(selectedModel);
+        if (!nextPlan || done) return;
+        currentPlan = clonePlan(nextPlan);
+        seedKeptFromPlan(currentPlan);
+        if (modelBadge && selectedModel) modelBadge.textContent = selectedModel;
+        console.log(`${LOG} preview modal: re-ran grouping with model "${selectedModel || "default"}"`);
+      });
     }
 
     // ─── Re-assign handlers ────────────────────────────────────────────────
     async function onReassignToNewClick() {
       if (reassignToNewBtn.disabled) return;
       const pending = pendingTabs();
-      if (pending.length === 0) return;
-      if (typeof onReassignToNew !== "function") return;
-      await runWithSpinner(async () => {
+      if (pending.length === 0 || typeof onReassignToNew !== "function") return;
+      await runWithSpinner(reassignToNewBtn, async () => {
         const result = await onReassignToNew(pending);
         const incomingGroups = (result && result.newGroups) || [];
         const newSkipped = (result && result.skipped) || [];
 
-        // Drop un-kept new groups + un-kept existing-target assignments —
-        // their tabs were the "pending" set, now redistributed.
         currentPlan.newGroups = currentPlan.newGroups.filter((g) => kept.has(newKey(g.name)));
         currentPlan.assignedToExisting = currentPlan.assignedToExisting.filter((a) =>
-          kept.has(existingKey(a.groupName))
+          kept.has(existingKey(a.groupName)),
         );
         currentPlan.newGroups.push(...incomingGroups);
         currentPlan.skipped = newSkipped;
-        // Auto-keep the newly proposed groups.
         for (const g of incomingGroups) kept.add(newKey(g.name));
         console.log(`${LOG} preview modal: re-assigned ${pending.length} tab(s) to new → ${incomingGroups.length} new group(s), ${newSkipped.length} skipped`);
       });
@@ -367,17 +614,13 @@ export const showPreviewModal = ({ plan, onReassignToNew, onAssignToPlanned, onA
       const pending = pendingTabs();
       if (pending.length === 0) return;
       const buckets = keptBuckets();
-      if (buckets.length === 0) return;
-      if (typeof onAssignToPlanned !== "function") return;
+      if (buckets.length === 0 || typeof onAssignToPlanned !== "function") return;
 
-      await runWithSpinner(async () => {
+      await runWithSpinner(reassignToPlannedBtn, async () => {
         const result = await onAssignToPlanned(pending, buckets);
         const assignments = (result && result.assignments) || [];
         const newSkipped = (result && result.skipped) || [];
 
-        // Index the kept buckets so we can route assignments back into
-        // either newGroups (if matched to a kept new bucket) or
-        // assignedToExisting (if matched to a kept existing-target bucket).
         const newByLower = new Map();
         const existingByLower = new Set();
         for (const g of currentPlan.newGroups) {
@@ -387,24 +630,20 @@ export const showPreviewModal = ({ plan, onReassignToNew, onAssignToPlanned, onA
           if (kept.has(existingKey(a.groupName))) existingByLower.add(a.groupName.toLowerCase());
         }
 
-        // First, drop un-kept newGroups + un-kept existing-target assignments —
-        // their tabs were in the pending pool and are about to be redistributed.
         currentPlan.newGroups = currentPlan.newGroups.filter((g) => kept.has(newKey(g.name)));
         currentPlan.assignedToExisting = currentPlan.assignedToExisting.filter((a) =>
-          kept.has(existingKey(a.groupName))
+          kept.has(existingKey(a.groupName)),
         );
 
         let placed = 0;
         for (const { tabInfo, groupName } of assignments) {
           const lower = String(groupName || "").toLowerCase();
-          // Prefer matching a kept new bucket first, then a kept existing one.
           if (newByLower.has(lower)) {
             newByLower.get(lower).tabs.push(tabInfo);
             placed++;
           } else if (existingByLower.has(lower)) {
-            // Find the canonical-case group name to reuse.
             const canonical = [...currentPlan.assignedToExisting].find(
-              (a) => a.groupName.toLowerCase() === lower
+              (a) => a.groupName.toLowerCase() === lower,
             )?.groupName || groupName;
             currentPlan.assignedToExisting.push({ tabInfo, groupName: canonical, similarity: 1.0 });
             placed++;
@@ -420,24 +659,18 @@ export const showPreviewModal = ({ plan, onReassignToNew, onAssignToPlanned, onA
     async function onReassignToExistingClick() {
       if (reassignToExistingBtn.disabled) return;
       const pending = pendingTabs();
-      if (pending.length === 0) return;
-      if (typeof onAssignToExisting !== "function") return;
+      if (pending.length === 0 || typeof onAssignToExisting !== "function") return;
 
-      await runWithSpinner(async () => {
+      await runWithSpinner(reassignToExistingBtn, async () => {
         const result = await onAssignToExisting(pending);
         const assignments = (result && result.assignments) || [];
         const newSkipped = (result && result.skipped) || [];
 
-        // Drop un-kept newGroups + un-kept existing-target assignments —
-        // their tabs were in the pending pool and are about to be redistributed.
         currentPlan.newGroups = currentPlan.newGroups.filter((g) => kept.has(newKey(g.name)));
         currentPlan.assignedToExisting = currentPlan.assignedToExisting.filter((a) =>
-          kept.has(existingKey(a.groupName))
+          kept.has(existingKey(a.groupName)),
         );
 
-        // Each assignment becomes an entry in assignedToExisting and gets
-        // its target marked kept, so the new row renders in the "Into existing
-        // groups" section with the right keep state.
         let placed = 0;
         for (const { tabInfo, groupName } of assignments) {
           const name = String(groupName || "").trim();
@@ -456,7 +689,6 @@ export const showPreviewModal = ({ plan, onReassignToNew, onAssignToPlanned, onA
 
     // ─── Apply ─────────────────────────────────────────────────────────────
     function onApplyClick() {
-      // Keep only the entries the user kept; tabs from unkept entries go to skipped.
       const droppedTabs = [];
       const finalNewGroups = currentPlan.newGroups.filter((g) => {
         if (kept.has(newKey(g.name))) return true;
@@ -475,7 +707,7 @@ export const showPreviewModal = ({ plan, onReassignToNew, onAssignToPlanned, onA
       });
     }
 
-    // ─── Cancel paths ──────────────────────────────────────────────────────
+    // ─── Cancel paths & AbortSignal ────────────────────────────────────────
     dialog.addEventListener("cancel", (e) => {
       e.preventDefault();
       cleanup(null);
@@ -484,11 +716,17 @@ export const showPreviewModal = ({ plan, onReassignToNew, onAssignToPlanned, onA
       if (e.target === dialog) cleanup(null);
     });
 
+    const onAbort = () => cleanup(null);
+    if (signal && typeof signal.addEventListener === "function") {
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+
     // ─── Lifecycle ─────────────────────────────────────────────────────────
     let done = false;
     function cleanup(result) {
       if (done) return;
       done = true;
+      try { signal?.removeEventListener?.("abort", onAbort); } catch {}
       try { dialog.close(); } catch {}
       dialog.remove();
       console.log(`${LOG} preview modal closed (apply=${result !== null})`);
@@ -501,3 +739,4 @@ export const showPreviewModal = ({ plan, onReassignToNew, onAssignToPlanned, onA
     applyBtn.focus();
     console.log(`${LOG} preview modal opened`);
   });
+};

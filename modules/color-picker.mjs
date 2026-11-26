@@ -1,10 +1,11 @@
 // Zen Tab Sorting — color picker UI used inside the settings widget rows.
-// Includes the swatch, the popover with 9 Zen presets + a hex input, and a runtime
-// fetch of Zen's actual rendered palette so swatches match the live theme.
+// Includes the swatch, the popover with Reset/Auto + 9 Zen presets + hex input,
+// and a single-recalc batched runtime fetch of Zen's actual rendered palette.
 
 import {
   CONFIG,
   LOG,
+  HTML_NS,
   PRESET_COLORS,
   HEX_BY_NAME,
   h,
@@ -14,27 +15,38 @@ import {
 } from "./config.mjs";
 
 // Zen's --tab-group-color-* CSS vars are defined in tabs.css which only loads in
-// browser.xhtml, not in about:preferences. Reach into the main browser window and
-// ask it to compute each color (using the same light-dark expression Zen uses to
-// render a group label background), then update HEX_BY_NAME so picker swatches match
-// the live theme.
+// browser.xhtml, not in about:preferences. Batch all 9 probe nodes in a single
+// DocumentFragment so computing the full palette costs 1 style recalc instead of 9.
 export const fetchZenColorsFromBrowser = () => {
   try {
     const browserWin = Services.wm.getMostRecentWindow("navigator:browser");
     if (!browserWin?.document?.documentElement) return;
     const browserDoc = browserWin.document;
+    const createDiv = () =>
+      typeof browserDoc.createElementNS === "function"
+        ? browserDoc.createElementNS(HTML_NS, "div")
+        : browserDoc.createElement("div");
+
+    const fragment = browserDoc.createDocumentFragment();
+    const probes = [];
     for (const { name } of PRESET_COLORS) {
-      const probe = browserDoc.createElement("div");
+      const probe = createDiv();
       probe.style.cssText = `background: light-dark(var(--tab-group-color-${name}), var(--tab-group-color-${name}-invert)); display: none;`;
-      browserDoc.documentElement.appendChild(probe);
-      const computed = browserWin.getComputedStyle(probe).backgroundColor;
-      probe.remove();
-      // Filter the sentinel values getComputedStyle returns when a var() reference
-      // doesn't resolve: pure black / fully transparent. (Zen's palette never
-      // includes either, so this is a safe heuristic for "var was undefined".)
-      if (computed && computed !== "rgb(0, 0, 0)" && computed !== "rgba(0, 0, 0, 0)") {
-        HEX_BY_NAME.set(name, computed);
+      fragment.appendChild(probe);
+      probes.push({ name, probe });
+    }
+
+    browserDoc.documentElement.appendChild(fragment);
+    try {
+      for (const { name, probe } of probes) {
+        const computed = browserWin.getComputedStyle(probe).backgroundColor;
+        // Filter sentinel values getComputedStyle returns when a var() doesn't resolve.
+        if (computed && computed !== "rgb(0, 0, 0)" && computed !== "rgba(0, 0, 0, 0)") {
+          HEX_BY_NAME.set(name, computed);
+        }
       }
+    } finally {
+      for (const { probe } of probes) probe.remove();
     }
     console.log(`${LOG} fetched Zen tab-group palette (theme-rendered) from browser window`);
   } catch (e) {
@@ -47,114 +59,200 @@ export const updateSwatchAppearance = (swatch, color) => {
     swatch.style.background = bgForName(color);
     swatch.classList.remove("zao-swatch-empty");
     swatch.title = `Color: ${color}`;
+    swatch.setAttribute("aria-label", `Group color: ${color}`);
   } else if (color && isValidHex(color)) {
     swatch.style.background = color;
     swatch.classList.remove("zao-swatch-empty");
     swatch.title = `Color: ${color}`;
+    swatch.setAttribute("aria-label", `Group color: ${color}`);
   } else {
     swatch.style.background = "";
     swatch.classList.add("zao-swatch-empty");
-    swatch.title = "Click to pick a color";
+    swatch.title = "Auto color — click to pick";
+    swatch.setAttribute("aria-label", "Group color: auto");
   }
 };
 
-// Open the color popover anchored above the given swatch element.
+// Open the color popover anchored above (or below) the given swatch element.
 // `onChange` is called whenever the rule's color is mutated (so the caller can persist).
 export const openColorPopover = (rule, swatch, onChange) => {
-  document.querySelectorAll(".zao-color-popover").forEach((p) => p.remove());
+  document.querySelectorAll(".zao-color-popover").forEach((p) => {
+    if (typeof p._zaoClose === "function") p._zaoClose();
+    else p.remove();
+  });
 
-  const pop = h("div");
-  pop.className = "zao-color-popover";
+  const pop = h("div", { class: "zao-color-popover" });
+  pop.setAttribute("role", "dialog");
+  pop.setAttribute("aria-label", "Choose group color");
 
-  const presets = h("div");
-  presets.className = "zao-presets";
+  const presets = h("div", { class: "zao-presets" });
+  let hexInput;
 
-  let hexInput; // declared up here so preset clicks can clear it
+  const syncPresetStates = (activeValue) => {
+    presets.querySelectorAll(".zao-preset").forEach((btn) => {
+      const active = (btn.dataset.zaoColor || "") === (activeValue || "");
+      btn.classList.toggle("zao-preset-active", active);
+      btn.setAttribute("aria-pressed", active ? "true" : "false");
+    });
+  };
+
+  const clearHexInvalid = () => {
+    if (!hexInput) return;
+    hexInput.classList.remove("zao-color-hex-invalid");
+    hexInput.removeAttribute("aria-invalid");
+  };
+
+  // Reset / Auto swatch button
+  const resetDot = h("button", { class: "zao-preset zao-preset-reset" });
+  resetDot.type = "button";
+  resetDot.dataset.zaoColor = "";
+  resetDot.title = "Auto / reset color";
+  resetDot.setAttribute("aria-label", "Auto / reset color");
+  resetDot.setAttribute("aria-pressed", !rule.color ? "true" : "false");
+  if (!rule.color) resetDot.classList.add("zao-preset-active");
+  resetDot.addEventListener("click", (e) => {
+    e.stopPropagation();
+    delete rule.color;
+    onChange();
+    updateSwatchAppearance(swatch, null);
+    syncPresetStates("");
+    if (hexInput) {
+      hexInput.value = "";
+      clearHexInvalid();
+    }
+  });
+  presets.appendChild(resetDot);
 
   for (const { name } of PRESET_COLORS) {
-    const dot = h("div");
-    dot.className = "zao-preset";
-    dot.setAttribute("role", "button");
-    dot.setAttribute("tabindex", "0");
+    const dot = h("button", { class: "zao-preset" });
+    dot.type = "button";
     dot.dataset.zaoColor = name;
     dot.style.background = bgForName(name);
-    if (rule.color === name) dot.classList.add("zao-preset-active");
+    const isActive = rule.color === name;
+    if (isActive) dot.classList.add("zao-preset-active");
     dot.title = name;
+    dot.setAttribute("aria-label", `Color: ${name}`);
+    dot.setAttribute("aria-pressed", isActive ? "true" : "false");
     dot.addEventListener("click", (e) => {
       e.stopPropagation();
       rule.color = name;
       onChange();
       updateSwatchAppearance(swatch, name);
-      presets.querySelectorAll(".zao-preset").forEach((p) =>
-        p.classList.toggle("zao-preset-active", p.dataset.zaoColor === name)
-      );
-      if (hexInput) hexInput.value = "";
+      syncPresetStates(name);
+      if (hexInput) {
+        hexInput.value = "";
+        clearHexInvalid();
+      }
     });
     presets.appendChild(dot);
   }
   pop.appendChild(presets);
 
-  hexInput = h("input");
+  hexInput = h("input", { class: "zao-color-hex" });
   hexInput.type = "text";
-  hexInput.className = "zao-color-hex";
   hexInput.placeholder = "#hex";
-  hexInput.value = rule.color || "";
+  hexInput.setAttribute("aria-label", "Custom hex color");
+  hexInput.value = rule.color && isValidHex(rule.color) ? rule.color : "";
   hexInput.spellcheck = false;
   hexInput.addEventListener("input", () => {
     const v = hexInput.value.trim();
     if (v === "") {
+      clearHexInvalid();
       delete rule.color;
       onChange();
       updateSwatchAppearance(swatch, null);
+      syncPresetStates("");
     } else if (isValidHex(v)) {
+      clearHexInvalid();
       rule.color = v;
       onChange();
       updateSwatchAppearance(swatch, v);
+      syncPresetStates(null);
+    } else {
+      hexInput.classList.add("zao-color-hex-invalid");
+      hexInput.setAttribute("aria-invalid", "true");
     }
   });
   hexInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter" || e.key === "Escape") {
       e.preventDefault();
-      pop.remove();
-      cleanup();
+      close();
     }
   });
   hexInput.addEventListener("click", (e) => e.stopPropagation());
   pop.appendChild(hexInput);
 
   // Append INSIDE the dialog (not document.body) so the popover shares the
-  // top-layer that .showModal() creates. Anything outside the dialog gets hidden
-  // by the modal backdrop.
+  // top-layer that .showModal() creates.
   const dialog = swatch.closest(".sineItemPreferenceDialog") || document.body;
   dialog.appendChild(pop);
 
-  // Position above the swatch (fixed coords, relative to viewport).
-  // Reading popRect right after appendChild works because layout has already run;
-  // the popover starts off-screen at (0,0) until we set top/left below.
-  const r = swatch.getBoundingClientRect();
-  const popRect = pop.getBoundingClientRect();
-  const gap = CONFIG.POPOVER_GAP_PX;
-  pop.style.left = `${Math.max(gap, r.left)}px`;
-  const aboveTop = r.top - popRect.height - gap;
-  pop.style.top = `${aboveTop >= gap ? aboveTop : r.bottom + gap}px`;
+  let closed = false;
+  let attachTimer = null;
+
+  const positionPopover = () => {
+    if (closed || !pop.isConnected || !swatch.isConnected) {
+      close();
+      return;
+    }
+    const r = swatch.getBoundingClientRect();
+    const popRect = pop.getBoundingClientRect();
+    const gap = CONFIG.POPOVER_GAP_PX;
+
+    // If the swatch scrolled out of the visible viewport, dismiss cleanly.
+    if (r.bottom < 0 || r.top > window.innerHeight || r.right < 0 || r.left > window.innerWidth) {
+      close();
+      return;
+    }
+
+    const maxLeft = Math.max(gap, window.innerWidth - popRect.width - gap);
+    const clampedLeft = Math.min(Math.max(gap, r.left), maxLeft);
+    pop.style.left = `${clampedLeft}px`;
+
+    const aboveTop = r.top - popRect.height - gap;
+    const belowTop = r.bottom + gap;
+    const maxTop = Math.max(gap, window.innerHeight - popRect.height - gap);
+    pop.style.top = `${aboveTop >= gap ? aboveTop : Math.min(belowTop, maxTop)}px`;
+  };
 
   const closeIfOutside = (e) => {
-    if (!pop.contains(e.target) && e.target !== swatch) {
-      pop.remove();
-      cleanup();
-    }
+    if (!pop.contains(e.target) && e.target !== swatch) close();
   };
   const onKey = (e) => {
     if (e.key === "Escape") {
-      pop.remove();
-      cleanup();
+      e.stopPropagation();
+      close();
+      swatch.focus?.();
     }
   };
+  const onScrollOrResize = () => positionPopover();
+
   const cleanup = () => {
+    if (attachTimer != null) {
+      clearTimeout(attachTimer);
+      attachTimer = null;
+    }
     document.removeEventListener("mousedown", closeIfOutside, true);
     document.removeEventListener("keydown", onKey, true);
+    dialog.removeEventListener("scroll", onScrollOrResize, true);
+    window.removeEventListener("resize", onScrollOrResize);
   };
-  setTimeout(() => {
+
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    cleanup();
+    pop.remove();
+  };
+  pop._zaoClose = close;
+
+  positionPopover();
+
+  dialog.addEventListener("scroll", onScrollOrResize, { capture: true, passive: true });
+  window.addEventListener("resize", onScrollOrResize, { passive: true });
+  attachTimer = setTimeout(() => {
+    attachTimer = null;
+    if (closed) return;
     document.addEventListener("mousedown", closeIfOutside, true);
     document.addEventListener("keydown", onKey, true);
   }, 0);

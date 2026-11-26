@@ -6,13 +6,46 @@ export const setupGroupDrag = (win = globalThis.window) => {
   if (win._zaoGroupDrag) return;
   const doc = win.document;
   const headers = new Map();
+  const headerRects = new Map();
+  let cachedThreshold = null;
   let edgeHeader = null;
+
   const managed = (group) => group?.localName === "tab-group" &&
     !group.hasAttribute("split-view-group") && !group.isZenFolder && !isSidebarCopy(group) &&
     Boolean(group.closest("zen-workspace"));
+
+  const invalidateDragCache = () => {
+    headerRects.clear();
+    cachedThreshold = null;
+  };
+
+  const getHeaderRect = (header) => {
+    if (!header) return null;
+    const cached = headerRects.get(header);
+    if (cached) return cached;
+    const rect = header.getBoundingClientRect();
+    headerRects.set(header, rect);
+    return rect;
+  };
+
+  const getEdgeThreshold = () => {
+    if (cachedThreshold != null) return cachedThreshold;
+    try {
+      const services = win.Services || globalThis.Services;
+      cachedThreshold = Math.min(
+        0.45,
+        Math.max(0.05, (services?.prefs?.getIntPref("zen.tabs.folder-dragover-threshold-percent", 20) ?? 20) / 100),
+      );
+    } catch {
+      cachedThreshold = 0.2;
+    }
+    return cachedThreshold;
+  };
+
   const service = win.gBrowser.tabContainer.tabDragAndDrop;
   const nativeStart = service?.startTabDrag;
   const start = function(event, tab, options = {}, ...rest) {
+    invalidateDragCache();
     const group = tab?.group;
     const rect = tab?.classList?.contains("tab-group-label") && managed(group) ? group.getBoundingClientRect() : null;
     if (!options.dragImageSource && rect && (rect.width < 2 || rect.height < 2)) {
@@ -36,6 +69,7 @@ export const setupGroupDrag = (win = globalThis.window) => {
     return nativeStart.call(this, event, tab, options, ...rest);
   };
   if (nativeStart) service.startTabDrag = start;
+
   const nativeOver = service?.handle_dragover;
   const over = function(event, ...args) {
     const result = nativeOver.call(this, event, ...args);
@@ -49,7 +83,8 @@ export const setupGroupDrag = (win = globalThis.window) => {
       const data = dragged?._dragData;
       const moving = dragged?.group || dragged;
       if (!data || moving === group || moving?.contains?.(group) || Boolean(dragged.pinned) !== Boolean(group.labelElement.pinned)) return result;
-      const rect = header.getBoundingClientRect();
+      const rect = getHeaderRect(header);
+      if (!rect?.height) return result;
       const before = event.clientY < rect.top + rect.height / 2;
       // Native geometry can resolve a display:contents group to the hidden
       // placeholder instead of its header. Correct the native target and native
@@ -66,6 +101,7 @@ export const setupGroupDrag = (win = globalThis.window) => {
     return result;
   };
   if (nativeOver) service.handle_dragover = over;
+
   const prepare = (root) => {
     const groups = root.matches?.("tab-group") ? [root] : root.querySelectorAll?.("tab-group") || [];
     for (const group of groups) {
@@ -76,11 +112,42 @@ export const setupGroupDrag = (win = globalThis.window) => {
       header.classList.add("zen-drop-target");
     }
   };
+
+  const pruneNode = (root) => {
+    if (!root || root.nodeType !== 1) return;
+    if (headers.has(root)) {
+      headers.delete(root);
+      headerRects.delete(root);
+    }
+    const nested = root.querySelectorAll?.(".tab-group-label-container");
+    if (nested) {
+      for (const header of nested) {
+        headers.delete(header);
+        headerRects.delete(header);
+      }
+    }
+  };
+
   const restore = () => {
     if (edgeHeader?.isConnected) edgeHeader.classList.add("zen-drop-target");
     edgeHeader?.removeAttribute("data-zao-edge-reorder");
     edgeHeader = null;
   };
+
+  const onDragLeave = (event) => {
+    if (edgeHeader?.contains(event.relatedTarget)) return;
+    restore();
+  };
+
+  const onDragEndOrDrop = () => {
+    restore();
+    invalidateDragCache();
+  };
+
+  const onDragStart = () => {
+    invalidateDragCache();
+  };
+
   const onDragOver = (event) => {
     const types = [...(event.dataTransfer?.types || [])];
     if (!types.some((type) => ["application/x-moz-tabbrowser-tab", "application/x-moz-tab", "text/tab"].includes(type))) return;
@@ -88,10 +155,9 @@ export const setupGroupDrag = (win = globalThis.window) => {
     const group = header?.closest("tab-group");
     if (!managed(group)) { restore(); return; }
     if (edgeHeader && edgeHeader !== header) restore();
-    const rect = header.getBoundingClientRect();
-    if (!rect.height) return;
-    const threshold = Math.min(0.45, Math.max(0.05,
-      (win.Services || globalThis.Services).prefs.getIntPref("zen.tabs.folder-dragover-threshold-percent", 20) / 100));
+    const rect = getHeaderRect(header);
+    if (!rect?.height) return;
+    const threshold = getEdgeThreshold();
     const overlap = (event.clientY - rect.top) / rect.height;
     const count = group.childGroupsAndTabs?.length || 0;
     const edge = overlap < threshold || (overlap > 1 - threshold && (group.collapsed || count < 2));
@@ -100,25 +166,64 @@ export const setupGroupDrag = (win = globalThis.window) => {
     edgeHeader = edge ? header : null;
     // No preventDefault, stopPropagation or second setDragImage: Zen decides.
   };
+
   const observer = new win.MutationObserver((mutations) => {
-    for (const mutation of mutations) for (const node of mutation.addedNodes) if (node.nodeType === 1 && !isSidebarCopy(node)) prepare(node);
-    for (const header of headers.keys()) if (!header.isConnected) headers.delete(header);
+    for (const mutation of mutations) {
+      for (const node of mutation.addedNodes) {
+        if (node.nodeType === 1 && !isSidebarCopy(node)) prepare(node);
+      }
+      for (const node of mutation.removedNodes) {
+        if (node.nodeType === 1) pruneNode(node);
+      }
+    }
   });
+
+  const tabContainer = win.gBrowser.tabContainer;
   prepare(doc);
-  observer.observe(win.gBrowser.tabContainer, { childList: true, subtree: true });
+  observer.observe(tabContainer, { childList: true, subtree: true });
+  doc.addEventListener("dragstart", onDragStart, true);
   doc.addEventListener("dragover", onDragOver, true);
-  for (const name of ["drop", "dragend", "dragleave"]) doc.addEventListener(name, restore, true);
-  win._zaoGroupDrag = { headers, observer, onDragOver, restore, service, nativeStart, start, nativeOver, over };
+  doc.addEventListener("dragleave", onDragLeave, true);
+  doc.addEventListener("drop", onDragEndOrDrop, true);
+  doc.addEventListener("dragend", onDragEndOrDrop, true);
+  tabContainer.addEventListener("scroll", invalidateDragCache, { capture: true, passive: true });
+  win.addEventListener("resize", invalidateDragCache, { passive: true });
+
+  win._zaoGroupDrag = {
+    headers,
+    headerRects,
+    observer,
+    tabContainer,
+    onDragStart,
+    onDragOver,
+    onDragLeave,
+    onDragEndOrDrop,
+    invalidateDragCache,
+    restore,
+    service,
+    nativeStart,
+    start,
+    nativeOver,
+    over,
+  };
 };
 
 export const teardownGroupDrag = (win = globalThis.window) => {
   const state = win?._zaoGroupDrag;
   if (!state) return;
   state.restore();
+  state.invalidateDragCache();
   state.observer.disconnect();
+  win.document.removeEventListener("dragstart", state.onDragStart, true);
   win.document.removeEventListener("dragover", state.onDragOver, true);
-  for (const name of ["drop", "dragend", "dragleave"]) win.document.removeEventListener(name, state.restore, true);
-  for (const [header, originallyTarget] of state.headers) if (!originallyTarget) header.classList.remove("zen-drop-target");
+  win.document.removeEventListener("dragleave", state.onDragLeave, true);
+  win.document.removeEventListener("drop", state.onDragEndOrDrop, true);
+  win.document.removeEventListener("dragend", state.onDragEndOrDrop, true);
+  state.tabContainer?.removeEventListener("scroll", state.invalidateDragCache, true);
+  win.removeEventListener("resize", state.invalidateDragCache);
+  for (const [header, originallyTarget] of state.headers) {
+    if (!originallyTarget) header.classList.remove("zen-drop-target");
+  }
   if (state.service?.startTabDrag === state.start) state.service.startTabDrag = state.nativeStart;
   if (state.service?.handle_dragover === state.over) state.service.handle_dragover = state.nativeOver;
   delete win._zaoGroupDrag;
