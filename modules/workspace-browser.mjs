@@ -235,6 +235,9 @@ export const moveWorkspaceUnit = (win, unit, targetId) => {
   const oldIds = [node, ...unit._groups.map(({ node: group }) => group), ...unit._tabs]
     .map((element) => [element, element.getAttribute("zen-workspace-id")]);
 
+  let nativeFolderMoved = false;
+  let nativeTabMoved = false;
+
   const mutate = () => {
     if (unit.kind === "folder") {
       if (typeof win.gZenFolders?.changeFolderToSpace !== "function") {
@@ -242,6 +245,7 @@ export const moveWorkspaceUnit = (win, unit, targetId) => {
       }
       // Native recursive folder bookkeeping, without a workspace switch.
       win.gZenFolders.changeFolderToSpace(node, targetId, { hasDndSwitch: true });
+      nativeFolderMoved = true;
     }
     for (const { node: group } of unit._groups) group.setAttribute("zen-workspace-id", targetId);
     for (const tab of unit._tabs) tab.setAttribute("zen-workspace-id", targetId);
@@ -254,6 +258,7 @@ export const moveWorkspaceUnit = (win, unit, targetId) => {
   try {
     if (unit.kind === "tab") {
       manager.moveTabToWorkspace(node, targetId);
+      nativeTabMoved = true;
       // Avoid redundant double-move when Zen already placed the tab at the section end.
       if (!isAlreadyLastInSection(container, node)) {
         browser.zenHandleTabMove(node, () => appendInSection(container, node));
@@ -274,10 +279,11 @@ export const moveWorkspaceUnit = (win, unit, targetId) => {
     if (!workspaceUnitIsAtTarget(win, unit, targetId)) {
       // Real rollback via Zen APIs wrapped in try/catch so a partial transfer
       // never leaves corrupted folder/tab/workspace metadata behind.
+      // Only invoke native Zen rollback APIs when the corresponding forward API call succeeded.
       try {
-        if (unit.kind === "folder" && typeof win.gZenFolders?.changeFolderToSpace === "function") {
+        if (nativeFolderMoved && unit.kind === "folder" && typeof win.gZenFolders?.changeFolderToSpace === "function") {
           try { win.gZenFolders.changeFolderToSpace(node, unit.workspaceId, { hasDndSwitch: true }); } catch {}
-        } else if (unit.kind === "tab" && typeof manager.moveTabToWorkspace === "function") {
+        } else if (nativeTabMoved && unit.kind === "tab" && typeof manager.moveTabToWorkspace === "function") {
           try { manager.moveTabToWorkspace(node, unit.workspaceId); } catch {}
         }
         for (const [element, id] of oldIds) {

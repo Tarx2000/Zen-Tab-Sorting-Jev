@@ -889,7 +889,6 @@ export const handleOrganizeClick = ({ workspaceId, fromLibrary = false } = {}) =
   }
   const originalSpace = manager.activeWorkspace;
   const originalTab = window.gBrowser?.selectedTab;
-  let sortTab;
   let animated = false;
   try {
     if (isAbortedOrClosed(signal)) return { aborted: true };
@@ -897,20 +896,19 @@ export const handleOrganizeClick = ({ workspaceId, fromLibrary = false } = {}) =
     // Library's copies. Activate the requested card inside the shared sort lock.
     if (originalSpace !== workspaceId) await manager.changeWorkspaceWithID(workspaceId);
     if (isAbortedOrClosed(signal)) return { aborted: true };
-    sortTab = window.gBrowser?.selectedTab;
     return await organizeCurrentWorkspace(signal, { onAnimated: () => { animated = true; } });
   } finally {
     if (!window.closed) {
       try {
-        // Respect navigation while the provider was working.
+        // Restore original Space & tab unless the user navigated to a different Space.
         if (
-          originalSpace !== workspaceId &&
+          originalSpace &&
+          originalSpace !== manager?.activeWorkspace &&
           manager?.activeWorkspace === workspaceId &&
-          window.gBrowser?.selectedTab === sortTab &&
           manager?.getWorkspaces?.().some((space) => space.uuid === originalSpace)
         ) {
           await manager.changeWorkspaceWithID(originalSpace);
-          if (originalTab?.isConnected && !originalTab.closing && window.gBrowser) {
+          if (!window.closed && originalTab?.isConnected && !originalTab.closing && window.gBrowser) {
             window.gBrowser.selectedTab = originalTab;
           }
         }
@@ -918,7 +916,7 @@ export const handleOrganizeClick = ({ workspaceId, fromLibrary = false } = {}) =
         console.warn(`${LOG} failed to restore original workspace after Library sort:`, e);
       }
       // Avoid double refreshStripsNow() when animateSidebarChanges already refreshed Library strips.
-      if (!animated) {
+      if (!window.closed && !animated) {
         try {
           window.document?.querySelector?.("zen-library-spaces-section")?.refreshStripsNow?.();
         } catch {}

@@ -242,12 +242,14 @@ test("workspace-browser: collapsed snapshot/restore, rollback on mid-move error,
   wsA.tabsContainer.appendChild(anchorTab);
   win.gZenWorkspaces.allStoredTabs = [fTab, anchorTab];
 
-  // 1. Rollback test: simulate partial mutation then throw
+  // 1. Rollback test: simulate partial mutation then throw in changeFolderToSpace
   const snap1 = snapshotWorkspaceUnits(win, []);
   const folderUnit1 = snap1.units.find((u) => u.name === "Collapsed Folder");
   const origChangeFolder = win.gZenFolders.changeFolderToSpace;
   let shouldThrow = true;
+  let folderApiCalls = 0;
   win.gZenFolders.changeFolderToSpace = (node, targetId, opts) => {
+    folderApiCalls += 1;
     if (shouldThrow && targetId === "ws-b") {
       node.setAttribute("zen-workspace-id", targetId);
       fTab.setAttribute("zen-workspace-id", targetId);
@@ -258,14 +260,36 @@ test("workspace-browser: collapsed snapshot/restore, rollback on mid-move error,
   };
 
   assert.throws(() => moveWorkspaceUnit(win, folderUnit1, "ws-b"), /Simulated folder transfer failure/);
+  assert.equal(folderApiCalls, 1, "Rollback must NOT re-call changeFolderToSpace when the forward call itself threw");
   assert.equal(folder.parentElement, wsA.tabsContainer, "Rollback restores DOM parent");
   assert.equal(folder.nextSibling, anchorTab, "Rollback restores exact sibling position");
   assert.equal(folder.getAttribute("zen-workspace-id"), "ws-a", "Rollback restores folder workspace ID");
   assert.equal(fTab.getAttribute("zen-workspace-id"), "ws-a", "Rollback restores tab workspace ID");
   assert.equal(folder.collapsed, true, "Rollback restores collapsed state");
 
-  // 2. Successful move preserves collapsed even if native move expands it
+  // 1b. Rollback test when forward changeFolderToSpace SUCCEEDS and a later step fails
   shouldThrow = false;
+  folderApiCalls = 0;
+  const rollbackTargets = [];
+  win.gZenFolders.changeFolderToSpace = (node, targetId, opts) => {
+    folderApiCalls += 1;
+    rollbackTargets.push(targetId);
+    return origChangeFolder(node, targetId, opts);
+  };
+  const origInsertBeforeB = wsB.tabsContainer.insertBefore.bind(wsB.tabsContainer);
+  wsB.tabsContainer.insertBefore = () => { throw new Error("Simulated post-folder DOM append failure"); };
+  const snap1b = snapshotWorkspaceUnits(win, []);
+  const folderUnit1b = snap1b.units.find((u) => u.name === "Collapsed Folder");
+  assert.throws(() => moveWorkspaceUnit(win, folderUnit1b, "ws-b"), /Simulated post-folder DOM append failure/);
+  wsB.tabsContainer.insertBefore = origInsertBeforeB;
+  assert.equal(folderApiCalls, 2, "Rollback invokes changeFolderToSpace back to origin when forward call succeeded");
+  assert.deepEqual(rollbackTargets, ["ws-b", "ws-a"]);
+  assert.equal(folder.parentElement, wsA.tabsContainer);
+  assert.equal(folder.getAttribute("zen-workspace-id"), "ws-a");
+  assert.equal(fTab.getAttribute("zen-workspace-id"), "ws-a");
+  assert.equal(folder.collapsed, true);
+
+  // 2. Successful move preserves collapsed even if native move expands it
   win.gZenFolders.changeFolderToSpace = (node, targetId, opts) => {
     node.collapsed = false; // Simulate native Zen auto-expanding on move
     return origChangeFolder(node, targetId, opts);
