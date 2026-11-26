@@ -313,6 +313,48 @@ test("workspace-browser: isWorkspaceContainerCompatible enforces container-bound
   );
 });
 
+test("workspace-browser: split-view moves cleanly without dedicated gZenViewSplitter workspace method and calls optional sync if present", () => {
+  const { win, wsA, wsB } = createWorkspaceFixture();
+  // Real Zen exposes gZenViewSplitter without a dedicated workspace-change method.
+  win.gZenViewSplitter = {};
+
+  const splitGroup = createNode("tab-group", {
+    label: "Dev Split",
+    "split-view-group": "true",
+    "zen-workspace-id": "ws-a",
+  });
+  const s1 = createNode("tab", { label: "Split A", "zen-workspace-id": "ws-a", url: "https://github.com/a" });
+  const s2 = createNode("tab", { label: "Split B", "zen-workspace-id": "ws-a", url: "https://github.com/b" });
+  splitGroup.appendChild(s1);
+  splitGroup.appendChild(s2);
+  wsA.tabsContainer.appendChild(splitGroup);
+  win.gZenWorkspaces.allStoredTabs = [s1, s2];
+
+  const snap1 = snapshotWorkspaceUnits(win, []);
+  const splitUnit = snap1.units.find((u) => u.kind === "split-view");
+  assert.ok(splitUnit, "Split view unit must be snapshotted");
+
+  assert.doesNotThrow(() => moveWorkspaceUnit(win, splitUnit, "ws-b"));
+  assert.equal(workspaceUnitIsAtTarget(win, splitUnit, "ws-b"), true);
+  assert.equal(splitGroup.parentElement, wsB.tabsContainer);
+  assert.equal(splitGroup.getAttribute("zen-workspace-id"), "ws-b");
+  assert.equal(s1.getAttribute("zen-workspace-id"), "ws-b");
+  assert.equal(s2.getAttribute("zen-workspace-id"), "ws-b");
+
+  // When an optional gZenViewSplitter workspace sync method exists, invoke it safely.
+  const synced = [];
+  win.gZenViewSplitter = {
+    moveSplitViewToWorkspace: (node, targetId) => synced.push({ node, targetId }),
+  };
+  const snap2 = snapshotWorkspaceUnits(win, []);
+  const splitUnitBack = snap2.units.find((u) => u.kind === "split-view");
+  moveWorkspaceUnit(win, splitUnitBack, "ws-a");
+  assert.equal(synced.length, 1);
+  assert.equal(synced[0].node, splitGroup);
+  assert.equal(synced[0].targetId, "ws-a");
+  assert.equal(splitGroup.parentElement, wsA.tabsContainer);
+});
+
 // ─── 2. new-group-consolidation.mjs ──────────────────────────────────────────
 
 test("new-group-consolidation: German umlauts Bücher vs Bächer, CJK/empty-norm guard, non-mutating clone, duplicate-key preservation", async () => {

@@ -10,6 +10,7 @@ export const buildZenEnv = (sourceEnv = process.env, headed = false, marionetteP
   for (const [name, value] of Object.entries(sourceEnv)) {
     if (!PROVIDER_ENV_PREFIX.test(name) && !SENSITIVE_ENV_TOKEN.test(name)) env[name] = value;
   }
+  env.MOZ_REMOTE_ALLOW_SYSTEM_ACCESS = "1";
   if (!headed) env.MOZ_HEADLESS = "1";
   if (Number.isInteger(marionettePort) && marionettePort > 0) {
     env.MOZ_MARIONETTE_PORT = String(marionettePort);

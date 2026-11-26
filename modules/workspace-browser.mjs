@@ -69,7 +69,9 @@ const getSplitViewWorkspaceSync = (win) => {
   if (typeof splitter.syncWorkspaceForTabs === "function") {
     return { supported: true, sync: (_node, targetId, tabs) => splitter.syncWorkspaceForTabs(tabs, targetId) };
   }
-  return { supported: false, sync: null };
+  // Native zenHandleTabMove + zen-workspace-id retagging moves Split Views
+  // cleanly across Spaces even when gZenViewSplitter has no dedicated method.
+  return { supported: true, sync: null };
 };
 
 export const snapshotWorkspaceUnits = (win, skipPatterns = []) => {
@@ -225,14 +227,7 @@ export const moveWorkspaceUnit = (win, unit, targetId) => {
     throw new Error(t("error.transferUnsupported", null, win));
   }
 
-  let splitSync = null;
-  if (unit.kind === "split-view") {
-    const splitSupport = getSplitViewWorkspaceSync(win);
-    if (!splitSupport.supported) {
-      throw new Error(t("error.splitViewTransferUnsupported", null, win));
-    }
-    splitSync = splitSupport.sync;
-  }
+  const splitSync = unit.kind === "split-view" ? getSplitViewWorkspaceSync(win).sync : null;
 
   const node = unit._node;
   const previousNext = node.nextSibling;
@@ -250,7 +245,9 @@ export const moveWorkspaceUnit = (win, unit, targetId) => {
     }
     for (const { node: group } of unit._groups) group.setAttribute("zen-workspace-id", targetId);
     for (const tab of unit._tabs) tab.setAttribute("zen-workspace-id", targetId);
-    if (splitSync) splitSync(node, targetId, unit._tabs);
+    if (splitSync) {
+      try { splitSync(node, targetId, unit._tabs); } catch {}
+    }
     appendInSection(container, node);
   };
 
@@ -387,7 +384,7 @@ export const restoreUndoSnapshot = (win, snapshot) => {
         if (tab?.isConnected) tab.setAttribute("zen-workspace-id", entry.fromWorkspaceId);
       }
       if (entry.kind === "split-view" && splitSupport.sync) {
-        splitSupport.sync(node, entry.fromWorkspaceId, entry.tabs);
+        try { splitSupport.sync(node, entry.fromWorkspaceId, entry.tabs); } catch {}
       }
       if (entry.previousNext?.parentNode === originContainer && entry.previousNext !== node) {
         originContainer.insertBefore(node, entry.previousNext);

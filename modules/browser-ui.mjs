@@ -97,7 +97,17 @@ const syncWorkspaceScopedButtonIds = () => {
 };
 
 let isReconcilingLibrary = false;
+let libraryReconcilePending = false;
 let libraryReconcileRaf = null;
+
+const ensureLibraryObserver = () => {
+  if (typeof window === "undefined" || typeof document === "undefined") return;
+  const library = document.querySelector("zen-library");
+  if (library && !window._zaoLibraryButtonObserver) {
+    window._zaoLibraryButtonObserver = new window.MutationObserver(scheduleLibraryReconcile);
+    window._zaoLibraryButtonObserver.observe(library, { childList: true, subtree: true });
+  }
+};
 
 // Library strips clone sidebar markup, including our icon, but not listeners.
 // Replace those copies with one persistent header action.
@@ -105,6 +115,7 @@ export const reconcileLibraryButtons = () => {
   if (isReconcilingLibrary) return;
   isReconcilingLibrary = true;
   try {
+    ensureLibraryObserver();
     for (const copy of document.querySelectorAll("zen-library [data-zao-in-flight]")) {
       copy.removeAttribute("data-zao-in-flight");
     }
@@ -112,7 +123,9 @@ export const reconcileLibraryButtons = () => {
       const header = card.querySelector(".zen-library-space-header");
       if (!header) continue;
       const buttons = [...card.querySelectorAll(BUTTONS)].filter(isOrganizeButton);
-      let button = buttons.find((node) => node.hasAttribute("data-zao-library-organize"));
+      let button = buttons.find(
+        (node) => node.hasAttribute("data-zao-library-organize") && Boolean(node.querySelector?.(".zao-loading-icon")),
+      );
       if (!button) {
         button = window.MozXULElement.parseXULToFragment(buttonXul()).firstChild;
         button.id = `${CONFIG.BUTTON_ID}-library-${card.dataset.uuid}`;
@@ -120,6 +133,7 @@ export const reconcileLibraryButtons = () => {
       }
       for (const duplicate of buttons) if (duplicate !== button) duplicate.remove();
       if (button.parentElement !== header) header.insertBefore(button, header.querySelector("toolbarbutton"));
+      button.setAttribute("data-zao-library-organize", "true");
       button.classList.add("zao-organize-button");
       button.removeAttribute("command");
       const tip = computeWandTooltip(button);
@@ -133,11 +147,20 @@ export const reconcileLibraryButtons = () => {
 };
 
 const scheduleLibraryReconcile = () => {
-  if (isReconcilingLibrary || libraryReconcileRaf != null) return;
-  libraryReconcileRaf = window.requestAnimationFrame(() => {
+  if (isReconcilingLibrary || libraryReconcilePending) return;
+  libraryReconcilePending = true;
+  const run = () => {
+    libraryReconcilePending = false;
     libraryReconcileRaf = null;
     if (!window.closed) reconcileLibraryButtons();
-  });
+  };
+  if (typeof queueMicrotask === "function") {
+    queueMicrotask(run);
+  } else if (typeof window.requestAnimationFrame === "function") {
+    libraryReconcileRaf = window.requestAnimationFrame(run);
+  } else {
+    run();
+  }
 };
 
 // ─── Right-Click Quick-Model / Provider Switcher Popover ────────────────────
@@ -560,10 +583,8 @@ export const setupCommand = () => {
     }
   }
 
-  const library = document.querySelector("zen-library");
-  if (library && !window._zaoLibraryButtonObserver) {
-    window._zaoLibraryButtonObserver = new window.MutationObserver(scheduleLibraryReconcile);
-    window._zaoLibraryButtonObserver.observe(library, { childList: true, subtree: true });
+  ensureLibraryObserver();
+  if (document.querySelector("zen-library")) {
     reconcileLibraryButtons();
   }
 
@@ -592,6 +613,7 @@ export const setupCommand = () => {
 
 export const teardownOrganizeUI = () => {
   closeQuickSwitcher();
+  libraryReconcilePending = false;
   if (libraryReconcileRaf != null) {
     window.cancelAnimationFrame?.(libraryReconcileRaf);
     libraryReconcileRaf = null;

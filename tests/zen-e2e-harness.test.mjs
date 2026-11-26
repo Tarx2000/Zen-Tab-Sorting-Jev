@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { buildZenEnv } from "../scripts/zen-e2e-driver.mjs";
 import { helpText, parseArgs } from "../scripts/zen-e2e-harness.mjs";
 import { scenarioPrefs } from "../scripts/zen-e2e-profile.mjs";
+import { promptLines } from "../scripts/zen-e2e-servers.mjs";
 
 test("Given no Zen E2E args When parsed Then defaults target the full isolated gate", () => {
   const options = parseArgs([]);
@@ -74,6 +75,7 @@ test("Given Zen E2E launches When building browser env Then provider secrets sta
   }, false, 4545);
 
   assert.equal(env.PATH, "/bin");
+  assert.equal(env.MOZ_REMOTE_ALLOW_SYSTEM_ACCESS, "1");
   assert.equal(env.MOZ_HEADLESS, "1");
   assert.equal(env.MOZ_MARIONETTE_PORT, "4545");
   assert.equal(env.OPENROUTER_API_KEY, undefined);
@@ -99,4 +101,34 @@ test("Given invalid Zen E2E args When parsed Then the operator gets a bounded er
   assert.throws(() => parseArgs(["--wat"]), /Unknown argument/);
   assert.match(helpText(), /--scenario <all\|full-ai\|hybrid>/);
   assert.match(helpText(), /--provider <fake\|real>/);
+});
+
+test("Given system+user untrusted_tabs_data JSON or legacy regex messages When parsing promptLines Then both formats extract tabs", () => {
+  const jsonLines = promptLines({
+    messages: [
+      { role: "system", content: "You are a tab organizer." },
+      {
+        role: "user",
+        content:
+          'Ungrouped Tabs:\n<untrusted_tabs_data>\n[{"id":0,"host":"github.com","title":"Pull Request #42"},{"index":1,"hostname":"figma.com","title":"Design Tokens"}]\n</untrusted_tabs_data>',
+      },
+    ],
+  });
+  assert.deepEqual(jsonLines, [
+    { index: "0", host: "github.com", title: "Pull Request #42" },
+    { index: "1", host: "figma.com", title: "Design Tokens" },
+  ]);
+
+  const legacyLines = promptLines({
+    messages: [
+      {
+        role: "user",
+        content: 'Tabs:\n0. docs.rs — "Rust Docs"\n1. amazon.com — "Mechanical Keyboard"',
+      },
+    ],
+  });
+  assert.deepEqual(legacyLines, [
+    { index: "0", host: "docs.rs", title: "Rust Docs" },
+    { index: "1", host: "amazon.com", title: "Mechanical Keyboard" },
+  ]);
 });

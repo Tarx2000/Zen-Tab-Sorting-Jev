@@ -41,12 +41,23 @@ const fakeProviderHandler = (calls) => async (request, response) => {
   const { body, rawBody } = await readJsonBody(request);
   const lines = promptLines(body);
   calls.push({ provider: "fake", tabCount: lines.length, requestBytes: Buffer.byteLength(rawBody) });
-  const assignments = Object.fromEntries(lines.map((line) => [
-    line.index,
-    `${familyForPromptText(line.host, line.title)} AI`,
-  ]));
+  const wantsAssignmentsArray = Boolean(
+    body?.response_format?.type === "json_schema" &&
+    body?.response_format?.json_schema?.schema?.properties?.assignments,
+  );
+  const payload = wantsAssignmentsArray
+    ? {
+        assignments: lines.map((line) => ({
+          id: Number.parseInt(line.index, 10),
+          group: `${familyForPromptText(line.host, line.title)} AI`,
+        })),
+      }
+    : Object.fromEntries(lines.map((line) => [
+        line.index,
+        `${familyForPromptText(line.host, line.title)} AI`,
+      ]));
   response.writeHead(200, { "content-type": "application/json" });
-  response.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(assignments) } }] }));
+  response.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(payload) } }] }));
 };
 
 const realProviderHandler = (calls, config) => async (request, response) => {
@@ -84,13 +95,56 @@ const readJsonBody = async (request) => {
   return { body: JSON.parse(rawBody || "{}"), rawBody };
 };
 
-const promptLines = (body) => {
-  const content = body.messages?.[0]?.content || "";
-  return [...String(content).matchAll(/^(\d+)\. ([^\n]+?) — "([^"]*)"/gm)].map((match) => ({
-    index: match[1],
-    host: match[2],
-    title: match[3],
-  }));
+const extractMessageText = (content) => {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => (typeof part === "string" ? part : (part?.text || "")))
+      .join("\n");
+  }
+  return "";
+};
+
+export const promptLines = (body) => {
+  const messages = Array.isArray(body?.messages) ? body.messages : [];
+  const ordered = [
+    ...messages.filter((msg) => msg?.role === "user"),
+    ...messages.filter((msg) => msg?.role !== "user"),
+  ];
+
+  for (const msg of ordered) {
+    const content = extractMessageText(msg?.content);
+    if (!content) continue;
+
+    const blockMatch = content.match(/<untrusted_tabs_data>([\s\S]*?)<\/untrusted_tabs_data>/i);
+    if (blockMatch) {
+      const inner = blockMatch[1].trim();
+      try {
+        const parsed = JSON.parse(inner);
+        if (Array.isArray(parsed)) {
+          const mapped = parsed
+            .filter((item) => item && typeof item === "object" && (item.id != null || item.index != null))
+            .map((item) => ({
+              index: String(item.id ?? item.index),
+              host: String(item.host ?? item.hostname ?? ""),
+              title: String(item.title ?? ""),
+            }));
+          if (mapped.length > 0) return mapped;
+        }
+      } catch {
+        // Not JSON inside <untrusted_tabs_data> — fall back to line regex below.
+      }
+    }
+
+    const legacyLines = [...content.matchAll(/^(\d+)\. ([^\n]+?) — "([^"]*)"/gm)].map((match) => ({
+      index: match[1],
+      host: match[2],
+      title: match[3],
+    }));
+    if (legacyLines.length > 0) return legacyLines;
+  }
+
+  return [];
 };
 
 const realProviderConfig = () => {

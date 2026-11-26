@@ -46,6 +46,7 @@ export const ATTR_TAB_COUNT = "data-zao-tab-count";
 export const ATTR_FOLDER_EMOJI = "data-zao-folder-emoji";
 export const ATTR_COLLAPSING = "data-zao-collapsing";
 
+const SVG_NS = "http://www.w3.org/2000/svg";
 const FOLDER_EMOJIS_KEY = "zen-tab-sorting-folder-emojis-v1";
 const FOLDER_COLORS_KEY = "zen-tab-sorting-folder-colors-v1";
 const CONTEXT_MENU_ID = "zao-folder-context-menu";
@@ -54,6 +55,72 @@ const COLLAPSED_GROUP_SELECTOR = "tab-group[collapsed]:not([split-view-group])";
 
 const WINDOW_ENGINE_STATE = new WeakMap();
 const ACTIVE_TOGGLE_ANIMS = new WeakMap();
+
+/**
+ * Crisp built-in Zen-compatible folder SVG matching Zen's `.back`/`.front`/
+ * `.dots`/`.icon` structure when `customElements.get("zen-folder")?.rawIcon`
+ * is unavailable or not directly cloneable.
+ */
+export const createFallbackFolderSvg = (doc) => {
+  const make = (tag, attrs = {}) => {
+    const el = typeof doc.createElementNS === "function"
+      ? doc.createElementNS(SVG_NS, tag)
+      : doc.createElement(tag);
+    for (const [k, v] of Object.entries(attrs)) {
+      el.setAttribute(k, String(v));
+    }
+    return el;
+  };
+
+  const svg = make("svg", {
+    xmlns: SVG_NS,
+    width: "28",
+    height: "28",
+    viewBox: "0 0 28 28",
+    fill: "none",
+    "aria-hidden": "true",
+    "data-zao-fallback-icon": "true",
+  });
+
+  const back = make("g", { class: "back" });
+  back.appendChild(make("path", {
+    d: "M4.5 9.25C4.5 8.007 5.507 7 6.75 7H11.2C11.82 7 12.41 7.26 12.83 7.72L14.05 9.05C14.33 9.35 14.73 9.52 15.14 9.52H21.25C22.493 9.52 23.5 10.527 23.5 11.77V19.75C23.5 20.993 22.493 22 21.25 22H6.75C5.507 22 4.5 20.993 4.5 19.75V9.25Z",
+    fill: "var(--zen-folder-behind-bgcolor, color-mix(in srgb, currentColor 24%, transparent))",
+    stroke: "var(--zen-folder-stroke, color-mix(in srgb, currentColor 55%, transparent))",
+    "stroke-width": "1.25",
+  }));
+
+  const front = make("g", { class: "front" });
+  front.appendChild(make("rect", {
+    x: "4.5",
+    y: "10.75",
+    width: "19",
+    height: "11.25",
+    rx: "2.5",
+    fill: "var(--zen-folder-front-bgcolor, color-mix(in srgb, currentColor 14%, Canvas))",
+    stroke: "var(--zen-folder-stroke, color-mix(in srgb, currentColor 55%, transparent))",
+    "stroke-width": "1.25",
+  }));
+
+  const dots = make("g", { class: "dots" });
+  for (const cx of ["10.75", "14", "17.25"]) {
+    dots.appendChild(make("circle", {
+      cx,
+      cy: "16.5",
+      r: "1.25",
+      fill: "var(--zen-folder-stroke, currentColor)",
+    }));
+  }
+
+  const icon = make("g", { class: "icon" });
+  icon.appendChild(make("image", { width: "11", height: "11" }));
+
+  svg.appendChild(back);
+  svg.appendChild(front);
+  svg.appendChild(dots);
+  svg.appendChild(icon);
+  return svg;
+};
 
 // ─── Localization (uses i18n.mjs getLocale) ──────────────────────────────────
 
@@ -630,6 +697,36 @@ export const setupFolderEngine = (win = globalThis.window) => {
 
   const getIconTemplate = () => win.customElements?.get?.("zen-folder")?.rawIcon ?? null;
 
+  const createFolderIconNode = () => {
+    const raw = getIconTemplate();
+    if (raw && typeof raw.cloneNode === "function") {
+      try {
+        const cloned = raw.cloneNode(true);
+        const isSvg =
+          (cloned.localName || cloned.tagName || "").toLowerCase() === "svg" ||
+          Boolean(cloned.querySelector?.("svg"));
+        if (isSvg) return cloned;
+      } catch {}
+    } else if (typeof raw === "string" && raw.includes("<svg")) {
+      try {
+        const Parser = win.DOMParser || globalThis.DOMParser;
+        if (typeof Parser === "function") {
+          const parsed = new Parser().parseFromString(raw, "image/svg+xml");
+          if (
+            parsed?.documentElement &&
+            (parsed.documentElement.localName || "").toLowerCase() === "svg" &&
+            !parsed.querySelector?.("parsererror")
+          ) {
+            return typeof doc.importNode === "function"
+              ? doc.importNode(parsed.documentElement, true)
+              : parsed.documentElement;
+          }
+        }
+      } catch {}
+    }
+    return createFallbackFolderSvg(doc);
+  };
+
   // ── Q2 ATG Conflict Check ──
   const checkAtgConflict = () => {
     if (state.disposed || win.closed) return;
@@ -714,16 +811,17 @@ export const setupFolderEngine = (win = globalThis.window) => {
 
     if (group.hasAttribute?.("collapsed")) markSelectedTabsInGroup(group);
 
-    if (!labelContainer.querySelector?.(":scope > .tab-group-folder-icon")) {
-      const template = getIconTemplate();
-      if (template) {
-        const holder = typeof doc.createElementNS === "function"
-          ? doc.createElementNS(HTML_NS, "div")
-          : doc.createElement("div");
-        holder.className = "tab-group-folder-icon";
-        holder.appendChild(template.cloneNode(true));
-        labelContainer.prepend(holder);
-      }
+    let holder = labelContainer.querySelector?.(":scope > .tab-group-folder-icon");
+    if (!holder) {
+      holder = typeof doc.createElementNS === "function"
+        ? doc.createElementNS(HTML_NS, "div")
+        : doc.createElement("div");
+      holder.className = "tab-group-folder-icon";
+      labelContainer.prepend(holder);
+    }
+    if (!holder.querySelector?.("svg")) {
+      const iconNode = createFolderIconNode();
+      if (iconNode) holder.appendChild(iconNode);
     }
 
     group.setAttribute(ATTR_FOLDER_LOOK, "true");
@@ -1128,17 +1226,20 @@ export const setupFolderEngine = (win = globalThis.window) => {
   };
 
   const decorateLibrary = (root) => {
-    const template = getIconTemplate();
     for (const wrapper of root.querySelectorAll?.(".library-workspace-tab-group") || []) {
       const header = wrapper.querySelector?.(":scope > .library-workspace-item.atg-tab-group");
       if (!header) continue;
-      if (!header.querySelector?.(":scope > .tab-group-folder-icon") && template) {
-        const holder = typeof doc.createElementNS === "function"
+      let holder = header.querySelector?.(":scope > .tab-group-folder-icon");
+      if (!holder) {
+        holder = typeof doc.createElementNS === "function"
           ? doc.createElementNS(HTML_NS, "span")
           : doc.createElement("span");
         holder.className = "tab-group-folder-icon folder-icon";
-        holder.appendChild(template.cloneNode(true));
         header.prepend(holder);
+      }
+      if (!holder.querySelector?.("svg")) {
+        const iconNode = createFolderIconNode();
+        if (iconNode) holder.appendChild(iconNode);
       }
       wrapper.setAttribute(ATTR_FOLDER_LOOK, "true");
       for (const row of wrapper.querySelectorAll?.(".library-workspace-item:not(.atg-tab-group)") || []) {
@@ -1228,17 +1329,42 @@ export const setupFolderEngine = (win = globalThis.window) => {
     // toggles and added/removed tab-groups (never observes document.body!).
     state.tabObserver = new win.MutationObserver((mutations) => {
       let needsRefresh = false;
+      const immediateGroups = new Set();
       for (const m of mutations) {
         if (m.type === "attributes" && m.attributeName === "collapsed" && isPlainTabGroup(m.target)) {
           onGroupCollapsedChanged(m.target);
         } else if (m.type === "childList") {
-          for (const node of [...(m.addedNodes || []), ...(m.removedNodes || [])]) {
+          const targetGroup = isPlainTabGroup(m.target)
+            ? m.target
+            : m.target?.closest?.(NORMAL_GROUP_SELECTOR) || null;
+          if (targetGroup && isPlainTabGroup(targetGroup)) {
+            immediateGroups.add(targetGroup);
+          }
+          for (const node of m.addedNodes || []) {
+            if (isPlainTabGroup(node)) {
+              immediateGroups.add(node);
+              needsRefresh = true;
+            } else if (node?.localName === "tab") {
+              needsRefresh = true;
+            }
+            if (typeof node?.querySelectorAll === "function") {
+              for (const nested of node.querySelectorAll(NORMAL_GROUP_SELECTOR)) {
+                if (isPlainTabGroup(nested)) {
+                  immediateGroups.add(nested);
+                  needsRefresh = true;
+                }
+              }
+            }
+          }
+          for (const node of m.removedNodes || []) {
             if (isPlainTabGroup(node) || node?.localName === "tab") {
               needsRefresh = true;
-              break;
             }
           }
         }
+      }
+      for (const group of immediateGroups) {
+        decorateGroup(group);
       }
       if (needsRefresh) scheduleRefreshAll();
     });
@@ -1328,15 +1454,16 @@ export const setupFolderEngine = (win = globalThis.window) => {
       attachLibrary();
     }
 
-    // Ensure zen-folder custom element is defined before first icon clone
-    if (getIconTemplate()) {
-      scheduleRefreshAll();
-    } else if (typeof win.customElements?.whenDefined === "function") {
+    // Decorate existing groups immediately (fallback SVG guarantees instant rendering
+    // even before/without zen-folder.rawIcon) and refresh again once zen-folder defines.
+    for (const group of container.querySelectorAll?.(NORMAL_GROUP_SELECTOR) || []) {
+      decorateGroup(group);
+    }
+    scheduleRefreshAll();
+    if (!getIconTemplate() && typeof win.customElements?.whenDefined === "function") {
       win.customElements.whenDefined("zen-folder").then(() => {
         if (!state.disposed && state.running) scheduleRefreshAll();
       }).catch(() => {});
-    } else {
-      scheduleRefreshAll();
     }
 
     console.log(`${LOG} folder-engine initialized`);

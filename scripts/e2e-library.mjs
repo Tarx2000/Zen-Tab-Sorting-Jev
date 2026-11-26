@@ -125,7 +125,7 @@ try {
     return { busy: button.getAttribute("aria-busy"), disabled: button.disabled,
       othersIdle: other.every(node => node.getAttribute("aria-busy") === "false"),
       ringOpacity: getComputedStyle(ring).opacity,
-      rotating: ring.querySelector("path").getAnimations().some(animation => animation.playState === "running") };
+      rotating: [ring, ...ring.querySelectorAll("path, circle")].some(el => el.getAnimations().some(animation => animation.playState === "running")) };
   `);
   console.log(JSON.stringify({ loading }));
   assert.equal(loading.busy, "true");
@@ -136,7 +136,8 @@ try {
   const state = await execute(`
     const s = win.__libraryLab;
     const card = [...win.document.querySelectorAll(".zen-library-space[data-uuid]")].find(card => card.dataset.uuid === s.target);
-    const session = JSON.parse(Services.prefs.getStringPref("extensions.zen-auto-organize.ai-chatgpt-session-json"));
+    const { readChatGPTSession } = ChromeUtils.importESModule("chrome://sine/content/zen-tab-sorting/modules/chatgpt-auth.mjs");
+    const session = readChatGPTSession(Services.prefs) || {};
     s.initialColorGroup = s.tabs[0].group;
     s.initialColor = { strength: s.initialColorGroup.getAttribute("data-zao-color-strength"),
       normal: s.initialColorGroup.style.getPropertyValue("--zao-group-color-strength"),
@@ -219,13 +220,15 @@ try {
     win.gBrowser.ungroupTab(s.tabs[1]);
     Services.prefs.setStringPref("extensions.zen-auto-organize.ai-engine", "jev");
     Services.prefs.setStringPref("extensions.zen-auto-organize.ai-fallback-provider", "chatgpt");
-    Services.prefs.setStringPref("extensions.zen-auto-organize.ai-chatgpt-session-json", JSON.stringify({ clientId: "library-test-client", accessToken: "expired", refreshToken: "revoked", expiresAt: 1 }));
+    const { writeChatGPTSession } = ChromeUtils.importESModule("chrome://sine/content/zen-tab-sorting/modules/chatgpt-auth.mjs");
+    writeChatGPTSession(Services.prefs, { clientId: "library-test-client", accessToken: "expired", refreshToken: "revoked", expiresAt: 1 });
     s.invalid = true;
     await win.ZenTabSorting.handleOrganizeClick();
   `);
   const failed = await execute(`
     const s = win.__libraryLab;
-    const session = JSON.parse(Services.prefs.getStringPref("extensions.zen-auto-organize.ai-chatgpt-session-json"));
+    const { readChatGPTSession } = ChromeUtils.importESModule("chrome://sine/content/zen-tab-sorting/modules/chatgpt-auth.mjs");
+    const session = readChatGPTSession(Services.prefs) || {};
     return { tokenCalls: s.tokenCalls, providerCalls: s.providerCalls, cleared: !session.refreshToken && !session.accessToken,
       retainedClient: session.clientId === "library-test-client", busy: !!win._zaoSortSession,
       toast: [...win.document.querySelectorAll('[id*="toast"]')].map(node => node.textContent).join(" ") };

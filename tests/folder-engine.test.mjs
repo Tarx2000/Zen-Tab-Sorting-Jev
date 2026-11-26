@@ -19,6 +19,7 @@ import {
   updateGroupVisibility,
 } from "../modules/folder-sync.mjs";
 import {
+  createFallbackFolderSvg,
   detectAtgConflict,
   countDirectFolderTabs,
   parseFolderShortcut,
@@ -456,4 +457,19 @@ test("Q4 & Zia CSS contract: zero max-height 4000px hacks and proper userChrome.
   assert.ok(engineCss.includes("atg-folder-active"), "active-in-collapsed selector must be present");
   assert.ok(engineCss.includes(".zao-move-folder-popover"), "Quick-Pick popover styles must be present");
   assert.ok(userChrome.startsWith('@import url("styles/folder-engine.css");'), "userChrome.css must import styles/folder-engine.css at the very top");
+});
+
+test("createFallbackFolderSvg builds a Zen-compatible SVG with .back/.front/.dots/.icon structure", () => {
+  const mockDoc = {
+    createElementNS: (_ns, tag) => createMockElement(tag),
+  };
+  const svg = createFallbackFolderSvg(mockDoc);
+  assert.equal(svg.localName, "svg");
+  assert.equal(svg.getAttribute("width"), "28");
+  assert.equal(svg.getAttribute("height"), "28");
+  assert.equal(svg.getAttribute("viewBox"), "0 0 28 28");
+  const childClasses = svg.children.map((c) => c.getAttribute("class"));
+  assert.deepEqual(childClasses, ["back", "front", "dots", "icon"]);
+  const iconGroup = svg.children[3];
+  assert.equal(iconGroup.children[0]?.localName, "image");
 });

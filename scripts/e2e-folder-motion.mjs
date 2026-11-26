@@ -204,7 +204,11 @@ export const runFolderMotionE2E = async (options) => {
         const labelEl = group.querySelector(".tab-group-label");
         const labelBefore = labelEl ? win.getComputedStyle(labelEl, "::before") : null;
         const containerStyle = container ? win.getComputedStyle(container) : null;
-        const svgIcon = header?.querySelector("svg") || group.querySelector(".zao-folder-icon, .atg-folder-icon, svg");
+        const svgIcon =
+          header?.querySelector(":scope > .tab-group-folder-icon > svg") ||
+          group.querySelector(".tab-group-folder-icon > svg") ||
+          header?.querySelector("svg") ||
+          group.querySelector(".zao-folder-icon, .atg-folder-icon, svg");
         const svgRect = svgIcon?.getBoundingClientRect?.();
         const hasMaskOrBgSvg =
           (labelBefore?.maskImage && labelBefore.maskImage !== "none") ||
@@ -212,13 +216,12 @@ export const runFolderMotionE2E = async (options) => {
           (headerStyle?.backgroundImage && headerStyle.backgroundImage.includes("svg"));
         return {
           label: group.getAttribute("label") || "",
-          hasAtgFolderLookAttr:
-            group.classList.contains("atg-folder-look") ||
-            win.document.documentElement.hasAttribute("data-zao-folder-look") ||
-            Boolean(group.querySelector("[data-zao-folder-icon], .atg-folder-icon, .zao-folder-icon")),
+          hasAtgFolderLookAttr: group.hasAttribute("atg-folder-look"),
           svgRendered: Boolean(
             (svgIcon && svgRect && svgRect.width > 0 && svgRect.height > 0) || hasMaskOrBgSvg
           ),
+          "data-zao-tab-count": group.getAttribute("data-zao-tab-count") || "",
+          folderEngineActive: Boolean(win.ZenTabSorting),
           containerTransitionProperty: containerStyle?.transitionProperty || "",
           containerMaxHeight: containerStyle?.maxHeight || "",
         };
@@ -284,6 +287,7 @@ export const runFolderMotionE2E = async (options) => {
       }
 
       return {
+        folderEngineActive: Boolean(win.ZenTabSorting),
         maxHeight4000Transitions: maxHeight4000Matches.length,
         maxHeight4000Matches,
         folderLookChecks,
@@ -299,6 +303,7 @@ export const runFolderMotionE2E = async (options) => {
       copyZia: options.copyZia,
       copiedMods: lab.copiedMods,
       strippedMods: lab.strippedMods,
+      folderEngineActive: report.folderEngineActive,
       maxHeight4000Transitions: report.maxHeight4000Transitions,
       maxHeight4000Matches: report.maxHeight4000Matches,
       folderLookChecks: report.folderLookChecks,
