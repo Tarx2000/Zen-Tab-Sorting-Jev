@@ -1,7 +1,18 @@
 // One sort at a time per browser window, including all command entry points.
 export const isSortRunning = (win = globalThis.window) => Boolean(win?._zaoSortSession);
 
+export const abortSortSession = (win = globalThis.window) => {
+  const session = win?._zaoSortSession;
+  if (!session?.controller || session.controller.signal.aborted) return false;
+  session.controller.abort();
+  return true;
+};
+
 const BUTTON_SELECTOR = ".zao-organize-button, #tab-wand-button, #zao-sort-workspaces";
+const GROUP_STATE_READY_TIMEOUT_MS = 3000;
+
+const isWandButton = (button) =>
+  button?.id === "tab-wand-button" || button?.getAttribute?.("id") === "tab-wand-button";
 
 const buttonMatchesSession = (button, session) => {
   const space = button.closest?.(".zen-library-space[data-uuid], zen-workspace");
@@ -12,47 +23,114 @@ const buttonMatchesSession = (button, session) => {
 export const updateSortButtonState = (button, win = globalThis.window) => {
   const session = win?._zaoSortSession;
   const busy = buttonMatchesSession(button, session);
-  button.disabled = Boolean(session);
+  // Keep the primary wand clickable while busy so a second click can abort the active session.
+  const canClickToAbort = Boolean(session && busy && isWandButton(button));
+  button.disabled = Boolean(session) && !canClickToAbort;
   button.setAttribute("aria-busy", String(busy));
+  if (canClickToAbort) {
+    button.setAttribute?.("data-zao-cancellable", "true");
+  } else {
+    button.removeAttribute?.("data-zao-cancellable");
+  }
 };
 
-export const withSortSession = async (kind, run, win = globalThis.window, { workspaceId } = {}) => {
-  if (!win || isSortRunning(win)) return { busy: true };
+const waitForGroupStateReady = (win, signal, timeoutMs = GROUP_STATE_READY_TIMEOUT_MS) => {
+  const ready = win?._zaoGroupState?.ready;
+  if (!ready || typeof ready.then !== "function") return Promise.resolve();
+  if (signal?.aborted) return Promise.resolve();
+
+  return new Promise((resolve) => {
+    let settled = false;
+    let timer = null;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      if (timer !== null) clearTimeout(timer);
+      signal?.removeEventListener?.("abort", done);
+      resolve();
+    };
+    timer = setTimeout(done, timeoutMs);
+    timer?.unref?.();
+    signal?.addEventListener?.("abort", done, { once: true });
+    Promise.resolve(ready).then(done, done);
+  });
+};
+
+export const withSortSession = async (
+  kind,
+  run,
+  win = globalThis.window,
+  { workspaceId, abortOnBusy = false } = {},
+) => {
+  if (!win) return { busy: true };
+  if (isSortRunning(win)) {
+    if (abortOnBusy) {
+      abortSortSession(win);
+      return { aborted: true, busy: true };
+    }
+    return { busy: true };
+  }
+
   if (win._zaoDoneTimer) {
     win.clearTimeout?.(win._zaoDoneTimer);
     delete win._zaoDoneTimer;
   }
-  const session = { kind, workspaceId: workspaceId || win.gZenWorkspaces?.activeWorkspace, controller: new AbortController() };
+
+  const session = {
+    kind,
+    workspaceId: workspaceId || win.gZenWorkspaces?.activeWorkspace,
+    controller: new AbortController(),
+  };
   win._zaoSortSession = session;
+
   const update = () => {
+    if (!win || win.closed || !win.document) return;
     for (const button of win.document.querySelectorAll(BUTTON_SELECTOR)) {
       button.removeAttribute?.("data-zao-done");
       updateSortButtonState(button, win);
     }
   };
+
   const abort = () => session.controller.abort();
+  const onWandAbortClick = (event) => {
+    if (event.type === "click" && event.button !== 0) return;
+    const button = event.target?.closest?.("#tab-wand-button");
+    if (!button || !buttonMatchesSession(button, session)) return;
+    event.preventDefault();
+    event.stopImmediatePropagation?.();
+    session.controller.abort();
+  };
+
+  win.addEventListener("beforeunload", abort, { once: true });
   win.addEventListener("unload", abort, { once: true });
+  win.document?.addEventListener?.("click", onWandAbortClick, true);
   update();
+
   let completed = false;
   try {
-    await win._zaoGroupState?.ready;
+    await waitForGroupStateReady(win, session.controller.signal);
     if (session.controller.signal.aborted) return { aborted: true };
     const result = await run(session.controller.signal);
-    completed = !session.controller.signal.aborted && !result?.aborted && !result?.busy;
+    completed =
+      !session.controller.signal.aborted &&
+      !result?.aborted &&
+      !result?.failed &&
+      !result?.busy;
     return result;
-  }
-  finally {
+  } finally {
+    win.removeEventListener("beforeunload", abort);
     win.removeEventListener("unload", abort);
+    win.document?.removeEventListener?.("click", onWandAbortClick, true);
     if (win._zaoSortSession === session) delete win._zaoSortSession;
     update();
-    if (completed && !win.closed) {
+    if (completed && !win.closed && win.document) {
       for (const button of win.document.querySelectorAll(BUTTON_SELECTOR)) {
         if (buttonMatchesSession(button, session)) button.setAttribute?.("data-zao-done", "true");
       }
       if (typeof win.setTimeout === "function") {
         win._zaoDoneTimer = win.setTimeout(() => {
           delete win._zaoDoneTimer;
-          if (win.closed) return;
+          if (win.closed || !win.document) return;
           for (const button of win.document.querySelectorAll(BUTTON_SELECTOR)) {
             button.removeAttribute?.("data-zao-done");
           }

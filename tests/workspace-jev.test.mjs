@@ -37,22 +37,64 @@ test("A complete folder tree is one question; duplicate Space names retain separ
   assert.doesNotMatch(JSON.stringify(payload), /_tab/);
 });
 
-test("Argmax uses every Space score and requires strictly more than ten points over the origin", () => {
+test("Argmax applies balanced ping-pong protection by default and legacy >0.10 margin in aggressive mode", () => {
+  // Balanced (default): requires score >= max(0.30, 1.5/N), runnerUp margin >= 0.05, improvement > 0.10.
   assert.equal(evaluateWorkspaceAnswer(unit(), spaces, answer(0.40, 0.49)).shouldMove, false);
   assert.equal(evaluateWorkspaceAnswer(unit(), spaces, answer(0.40, 0.50)).shouldMove, false);
   assert.equal(evaluateWorkspaceAnswer(unit(), spaces, answer(0.60, 0.70)).shouldMove, false);
-  const result = evaluateWorkspaceAnswer(unit(), spaces, answer(0.40, 0.51));
-  assert.equal(result.toWorkspaceId, "b");
-  assert.equal(result.shouldMove, true); // Even though answer.choice says a.
-  // The runner-up has no influence on the requested origin-relative margin.
+  assert.equal(evaluateWorkspaceAnswer(unit(), spaces, answer(0.40, 0.51)).shouldMove, false);
+  const balancedMove = evaluateWorkspaceAnswer(unit(), spaces, answer(0.20, 0.80));
+  assert.equal(balancedMove.toWorkspaceId, "b");
+  assert.equal(balancedMove.shouldMove, true);
+
   const three = [...spaces, { id: "c", name: "Other" }];
-  assert.equal(evaluateWorkspaceAnswer(unit(), three, { probabilities: { a: 0.1, b: 0.46, c: 0.44 } }).toWorkspaceId, "b");
+  // Balanced blocks close runner-up ambiguity (0.51 vs 0.48) and sub-floor scores (0.46 < 0.50).
+  assert.equal(evaluateWorkspaceAnswer(unit(), three, { probabilities: { a: 0.1, b: 0.46, c: 0.44 } }).shouldMove, false);
+  assert.equal(evaluateWorkspaceAnswer(unit(), three, { probabilities: { a: 0.01, b: 0.51, c: 0.48 } }).shouldMove, false);
+  assert.equal(evaluateWorkspaceAnswer(unit(), three, { probabilities: { a: 0.10, b: 0.55, c: 0.35 } }).toWorkspaceId, "b");
+
+  // Conservative requires stricter floor (max(0.45, 1.8/N)), >= 0.10 runner-up margin, > 0.15 improvement.
+  assert.equal(evaluateWorkspaceAnswer(unit(), spaces, answer(0.20, 0.80), { strictness: "conservative" }).shouldMove, false);
+  assert.equal(evaluateWorkspaceAnswer(unit(), spaces, answer(0.08, 0.92), { strictness: "conservative" }).shouldMove, true);
+
+  // Aggressive preserves legacy origin-only > 0.10 behavior.
+  const aggressiveMove = evaluateWorkspaceAnswer(unit(), spaces, answer(0.40, 0.51), { strictness: "aggressive" });
+  assert.equal(aggressiveMove.toWorkspaceId, "b");
+  assert.equal(aggressiveMove.shouldMove, true);
+  assert.equal(evaluateWorkspaceAnswer(unit(), three, { probabilities: { a: 0.1, b: 0.46, c: 0.44 } }, { strictness: "aggressive" }).toWorkspaceId, "b");
 });
 
 test("Exact ties keep the origin or otherwise use the existing Space order", () => {
   assert.equal(evaluateWorkspaceAnswer(unit(), [...spaces].reverse(), answer(0.5, 0.5)).toWorkspaceId, "a");
   const three = [...spaces, { id: "c", name: "Other" }];
-  assert.equal(evaluateWorkspaceAnswer(unit(), three, { probabilities: { a: 0.1, b: 0.45, c: 0.45 } }).toWorkspaceId, "b");
+  assert.equal(evaluateWorkspaceAnswer(unit(), three, { probabilities: { a: 0.1, b: 0.45, c: 0.45 } }, { strictness: "aggressive" }).toWorkspaceId, "b");
+});
+
+test("Container-bound Spaces restrict cross-space candidates to matching or unpinned Spaces when enabled", () => {
+  const containerSpaces = [
+    { id: "work", name: "Work", containerTabId: 2 },
+    { id: "personal", name: "Personal", containerTabId: 3 },
+    { id: "general", name: "General", containerTabId: 0 },
+  ];
+  const workUnit = {
+    id: "u_work",
+    name: "Work tab",
+    kind: "tab",
+    workspaceId: "work",
+    originContainerTabId: 2,
+    userContextIds: [2],
+    tabs: [{ title: "Jira", hostname: "jira.test", userContextId: 2 }],
+  };
+  const payload = buildWorkspaceJevPayload({ model: "jev-test", workspaces: containerSpaces, units: [workUnit] });
+  assert.deepEqual(Object.keys(payload.questions.unit_0.criteria), ["work", "general"]);
+
+  const unrestricted = buildWorkspaceJevPayload({
+    model: "jev-test",
+    workspaces: containerSpaces,
+    units: [workUnit],
+    respectContainers: false,
+  });
+  assert.deepEqual(Object.keys(unrestricted.questions.unit_0.criteria), ["work", "personal", "general"]);
 });
 
 test("Missing, invalid and out-of-range scores never guess a target", () => {

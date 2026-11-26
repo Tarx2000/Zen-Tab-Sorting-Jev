@@ -228,8 +228,14 @@ test("applyGroupColor supports hex colors via CSS color-mix and findExistingGrou
 
   assert.doesNotThrow(() => applyGroupColor(groupEl, "#336699"));
   assert.deepEqual(props.get("--tab-group-color"), ["#336699", "important"]);
-  assert.match(props.get("--tab-group-color-invert")[0], /^color-mix\(in srgb, #336699 55%, white\)$/);
-  assert.match(props.get("--tab-group-color-pale")[0], /^color-mix\(in srgb, #336699 20%, white\)$/);
+  assert.match(
+    props.get("--tab-group-color-invert")[0],
+    /^light-dark\(color-mix\(in srgb, #336699 55%, white\), color-mix\(in srgb, #336699 55%, black\)\)$/,
+  );
+  assert.match(
+    props.get("--tab-group-color-pale")[0],
+    /^light-dark\(color-mix\(in srgb, #336699 20%, white\), color-mix\(in srgb, #336699 20%, black\)\)$/,
+  );
 
   const emptyGroup = {
     isConnected: true,

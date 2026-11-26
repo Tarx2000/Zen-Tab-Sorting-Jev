@@ -53,10 +53,11 @@ export const CONFIG = {
   STRICT_RULES_PREF: "extensions.zen-auto-organize.strict-rules",
   DEBUG_MODE_PREF: "extensions.zen-auto-organize.debug-mode",
   DEBUG_LOGS_PREF: "extensions.zen-auto-organize.debug-logs-json",
+  MIGRATION_VERSION_PREF: "extensions.zen-auto-organize.migration-version",
+  SORT_GROUP_ORDER_PREF: "extensions.zen-auto-organize.sort-group-order",
 
-  // Collapsed-group pip (the colored marker drawn left of a collapsed group's
-  // name — see userChrome.css). Every pip pref shares the `pip-` infix so one
-  // prefix observer catches any of them changing.
+  // @deprecated Legacy collapsed-group pip prefs & bounds — kept for backward
+  // compatibility with rules.mjs and tests/pip-style.test.mjs.
   PIP_SHAPE_PREF: "extensions.zen-auto-organize.pip-shape",
   // Size is stored per shape: a circle and a rounded square rarely read as the
   // same weight at the same pixel size, so switching shapes keeps whatever the
@@ -100,6 +101,8 @@ export const CONFIG = {
   AI_SORT_MODE_PREF: "extensions.zen-auto-organize.ai-sort-mode",
   AI_EXISTING_BEHAVIOR_PREF: "extensions.zen-auto-organize.ai-existing-behavior",
   AI_NEW_GROUP_BEHAVIOR_PREF: "extensions.zen-auto-organize.ai-new-group-behavior",
+  AI_RESPECT_SPACE_CONTAINERS_PREF: "extensions.zen-auto-organize.ai-respect-space-containers",
+  AI_WORKSPACE_SORT_STRICTNESS_PREF: "extensions.zen-auto-organize.ai-workspace-sort-strictness",
 
   // JEV Decision Model settings (Stage 1: classify into existing workspace tab groups)
   AI_JEV_PROVIDER_PREF: "extensions.zen-auto-organize.ai-jev-provider",
@@ -116,6 +119,7 @@ export const CONFIG = {
 
   // Fallback-LLM settings (Stage 2: one-shot cluster & name for tabs left ungrouped by JEV)
   AI_FALLBACK_PROVIDER_PREF: "extensions.zen-auto-organize.ai-fallback-provider",
+  AI_PROVIDER_PROFILES_PREF: "extensions.zen-auto-organize.ai-provider-profiles-json",
 
   // Sign in with ChatGPT (SIWC) settings
   AI_CHATGPT_SESSION_PREF: "extensions.zen-auto-organize.ai-chatgpt-session-json",

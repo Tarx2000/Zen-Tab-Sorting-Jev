@@ -1,41 +1,55 @@
 // Zen Tab Sorting — browser-context event hooks.
 //
-// Rule growth is now strictly user-initiated:
-//   • Settings UI — direct editing of each rule's domain list.
-//   • Tab right-click → "Add <hostname> to <group> rule" — explicit menu item
-//     installed by setupTabContextMenu (this file).
+// Per-window state is stored in a WeakMap<Window, State> so multi-window
+// sessions remain strictly isolated and never leak across closed windows.
 //
-// We REMOVED the previous global TabGrouped listener because Zen dispatches
-// TabGrouped events asynchronously (and for non-user reasons like session
-// restore reconciling state after we've programmatically ejected a tab).
-// There's no reliable way to distinguish user-initiated grouping from Zen's
-// internal re-attaches, so the listener was an endless source of phantom
-// rule growth. The context menu item replaces it with explicit user intent.
-//
-// Remaining DOM hook + observer in this file:
-//   TabGroupCreate   — re-apply rule colors when Zen restores groups on startup.
-//   minimal-style    — re-run syncAllGroupColors when the user toggles the pref.
-//
-// On DOM hooks we stash the installed handler back onto its host element as a
-// `_zaoXxxHook` expando. This prevents double-install if the entry script is
-// re-evaluated (e.g. across module reloads during development).
+// Hooks in this file:
+//   TabContextMenu      — explicit "Add <host> to Rule…" submenu
+//   TabGroupContextMenu — explicit "Dissolve group" entry on normal tab-groups
+//   TabGroupCreate      — re-apply rule colors when Zen creates/restores groups
+//   CollapsedMigration  — one-time migration from legacy collapsed pref into group-state.mjs
+//   MinimalStylePref    — re-run syncAllGroupColors when the user toggles minimal-style
 
-import { CONFIG, LOG, BUILD_VERSION, isZenColorName, isUnsetLabel, pipMetrics } from "./config.mjs";
+import { CONFIG, LOG, BUILD_VERSION, isZenColorName } from "./config.mjs";
 import { getTabUrl, getHostname } from "./tabs.mjs";
-import { isSidebarCopy } from "./sidebar-elements.mjs";
-import { readRulesPref, writeRulesPref, readSkipDomainsPref, writeSkipDomainsPref, readCollapsedGroupsPref, writeCollapsedGroupsPref, isMinimalStyle, getPipShape, getPipSize, getPipOpenBehavior } from "./rules.mjs";
-import { applyGroupColor, syncAllGroupColors, moveTabsToTop } from "./groups.mjs";
+import { NORMAL_GROUP_SELECTOR, isSidebarCopy } from "./sidebar-elements.mjs";
+import {
+  readRulesPref,
+  writeRulesPref,
+  readSkipDomainsPref,
+  writeSkipDomainsPref,
+  readCollapsedGroupsPref,
+  writeCollapsedGroupsPref,
+  isMinimalStyle,
+} from "./rules.mjs";
+import { applyGroupColor, syncAllGroupColors, moveTabsToTop, directGroupTabs, expandIfCollapsed, collapseGroup, resolveWorkspaceElement } from "./groups.mjs";
+import { saveGroupState } from "./group-state.mjs";
+import { t } from "./i18n.mjs";
 
-// ─── Helpers (module level so they're reusable + easy to find) ───────────────
+const WINDOW_STATE = new WeakMap();
 
-// Add the tab's hostname to an existing rule, or create a new rule if the group
-// name isn't in the rules yet. Called from both the named-group and new-group paths.
+const getWindowState = (win = globalThis.window) => {
+  if (!win) return null;
+  let state = WINDOW_STATE.get(win);
+  if (!state) {
+    state = {
+      contextMenu: null,
+      groupContextMenu: null,
+      tabGroupCreate: null,
+      collapseMigration: null,
+      minimalStyleObserver: null,
+    };
+    WINDOW_STATE.set(win, state);
+  }
+  return state;
+};
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
 const applyToRule = (tab, groupName, group) => {
   const hostname = getHostname(getTabUrl(tab));
   if (!hostname) return;
 
-  // keepIncomplete: true so we can find an existing in-progress rule by
-  // name and grow it, rather than creating a duplicate with the same name.
   const rules = readRulesPref({ keepIncomplete: true }) || [];
   const rule = rules.find((r) => r.name === groupName);
 
@@ -55,27 +69,21 @@ const applyToRule = (tab, groupName, group) => {
     writeRulesPref(rules);
     console.log(
       `${LOG} context-menu: created new rule "${groupName}" with "${hostname}"` +
-        (newRule.color ? ` (color: ${newRule.color})` : "")
+        (newRule.color ? ` (color: ${newRule.color})` : ""),
     );
   }
 };
 
-// ─── Setup ───────────────────────────────────────────────────────────────────
+// ─── Tab right-click: "Add <host> to Rule…" ─────────────────────────────────
 
-// Install a tab right-click submenu `Add "<hostname>" to Rule…` that lists
-// every current rule as a child menuitem. User picks a rule → the hostname is
-// added to that rule's domains. The current group is irrelevant — this lets
-// the user grow ANY rule for the hostname, not just the rule matching the
-// tab's existing group.
-//
-// Replaces the previous global TabGrouped listener (which couldn't reliably
-// distinguish user actions from Zen's async session-restore re-attaches) with
-// an explicit user-driven flow: no events, no race conditions.
 const PARENT_MENU_ID = "zen-tab-sorting-add-to-rule-menu";
+const MOVE_TO_FOLDER_MENU_ID = "zen-tab-sorting-move-to-folder-menu";
+const HTML_NS = "http://www.w3.org/1999/xhtml";
+const SPLIT_VIEW_SELECTOR = "tab-group[split-view-group], tab-split-view-wrapper";
 
-const findContextMenu = () =>
-  document.getElementById("tabContextMenu") ||
-  document.getElementById("zenTabContextMenu") ||
+const findContextMenu = (doc) =>
+  doc?.getElementById?.("tabContextMenu") ||
+  doc?.getElementById?.("zenTabContextMenu") ||
   null;
 
 const getTabHostname = (tab) => {
@@ -83,64 +91,114 @@ const getTabHostname = (tab) => {
   try { return getHostname(getTabUrl(tab)); } catch { return null; }
 };
 
-export const setupTabContextMenu = () => {
-  const menu = findContextMenu();
+const getWorkspaceFolderElements = (win, workspaceId) => {
+  const doc = win?.document;
+  if (!doc || !workspaceId) return [];
+  const wsEl = resolveWorkspaceElement(workspaceId);
+  const scope = wsEl || doc;
+  const groups = [];
+  const seen = new Set();
+  for (const el of scope.querySelectorAll(NORMAL_GROUP_SELECTOR)) {
+    if (!el?.isConnected || isSidebarCopy(el) || seen.has(el)) continue;
+    const groupWs = el.closest?.("zen-workspace")?.id || el.getAttribute?.("zen-workspace-id");
+    if (groupWs && groupWs !== workspaceId) continue;
+    const label = (el.getAttribute?.("label") || "").trim();
+    if (!label) continue;
+    seen.add(el);
+    groups.push({ el, label, count: directGroupTabs(el, workspaceId).length });
+  }
+  return groups;
+};
+
+export const setupTabContextMenu = (win = globalThis.window) => {
+  const state = getWindowState(win);
+  const doc = win?.document;
+  if (!state || !doc || state.contextMenu) return;
+
+  const menu = findContextMenu(doc);
   if (!menu) {
     console.warn(`${LOG} tab context menu not found — context menu integration skipped`);
     return;
   }
-  if (menu._zaoContextMenuInstalled) return;
 
-  // Build the submenu skeleton. Submenu items are rebuilt each popupshowing
-  // so rule edits in settings are immediately reflected.
-  const parent = document.createXULElement("menu");
+  // Remove stale elements if re-initializing after a dev reload.
+  doc.getElementById(PARENT_MENU_ID)?.remove?.();
+  doc.getElementById(MOVE_TO_FOLDER_MENU_ID)?.remove?.();
+
+  const parent = doc.createXULElement("menu");
   parent.id = PARENT_MENU_ID;
-  parent.setAttribute("label", "Add to Rule…");
+  parent.setAttribute("label", t("menu.addToRule", null, win));
   parent.setAttribute("hidden", "true");
 
-  const popup = document.createXULElement("menupopup");
+  const popup = doc.createXULElement("menupopup");
   parent.appendChild(popup);
   menu.appendChild(parent);
 
-  // Captured on the outer popupshowing and read by the inner command handler.
+  // "Move to Folder…" submenu with quick-pick filter across active workspace folders.
+  const moveParent = doc.createXULElement("menu");
+  moveParent.id = MOVE_TO_FOLDER_MENU_ID;
+  moveParent.setAttribute("label", t("menu.moveToFolder", null, win));
+  moveParent.setAttribute("hidden", "true");
+
+  const movePopup = doc.createXULElement("menupopup");
+  moveParent.appendChild(movePopup);
+  menu.appendChild(moveParent);
+
   let currentTab = null;
   let currentHostname = null;
+  let folderMap = new Map();
+
+  const isTabMovableToFolder = (tab) =>
+    Boolean(
+      tab?.isConnected &&
+      !tab.pinned &&
+      !tab.hasAttribute?.("zen-essential") &&
+      !tab.hasAttribute?.("zen-glance-tab") &&
+      !tab.hasAttribute?.("zen-empty-tab") &&
+      !tab.closest?.(SPLIT_VIEW_SELECTOR),
+    );
 
   const onOuterShowing = (e) => {
-    // Only react to the outer (tab) context menu opening — submenu popupshowing
-    // also bubbles through here.
     if (e.target !== menu) return;
-    currentTab = window.TabContextMenu?.contextTab || window.gBrowser?.selectedTab;
+    currentTab = win.TabContextMenu?.contextTab || win.gBrowser?.selectedTab || null;
     currentHostname = getTabHostname(currentTab);
+
     if (!currentTab || !currentHostname) {
       parent.hidden = true;
-      return;
+    } else {
+      parent.hidden = false;
+      parent.setAttribute("label", t("menu.addHostToRule", { host: currentHostname }, win));
     }
-    parent.hidden = false;
-    parent.setAttribute("label", `Add "${currentHostname}" to Rule…`);
+
+    const canMove = isTabMovableToFolder(currentTab);
+    moveParent.hidden = !canMove;
+    if (canMove) {
+      moveParent.setAttribute("label", t("menu.moveToFolder", null, win));
+    }
+  };
+
+  const onOuterHidden = (e) => {
+    if (e.target !== menu) return;
+    // Release tab & folder DOM references immediately when the popup closes.
+    currentTab = null;
+    currentHostname = null;
+    folderMap.clear();
   };
 
   const onSubmenuShowing = () => {
     while (popup.firstChild) popup.firstChild.remove();
-    // keepIncomplete: true so a named-but-domainless in-progress rule
-    // shows up here — clicking it adds the current tab's hostname as its
-    // first domain (which is exactly the natural way to populate a fresh
-    // rule). A blank-name placeholder row (still untitled in the editor)
-    // is suppressed below so we don't surface an empty menu entry.
     const allRules = readRulesPref({ keepIncomplete: true }) || [];
     const rules = allRules.filter((r) => r.name && r.name.length > 0);
     const skipList = readSkipDomainsPref() || [];
     if (rules.length === 0) {
-      const placeholder = document.createXULElement("menuitem");
-      placeholder.setAttribute("label", "(no rules defined yet)");
+      const placeholder = doc.createXULElement("menuitem");
+      placeholder.setAttribute("label", t("menu.noRulesYet", null, win));
       placeholder.setAttribute("disabled", "true");
       popup.appendChild(placeholder);
     } else {
       for (const rule of rules) {
-        const item = document.createXULElement("menuitem");
+        const item = doc.createXULElement("menuitem");
         const inRule = currentHostname && rule.domains.includes(currentHostname);
-        // Checkmark for rules that already contain this hostname (disabled
-        // to make it clear the action is a no-op).
         item.setAttribute("label", inRule ? `✓ ${rule.name}` : rule.name);
         if (inRule) item.setAttribute("disabled", "true");
         item.dataset.zaoRuleName = rule.name;
@@ -148,14 +206,10 @@ export const setupTabContextMenu = () => {
       }
     }
 
-    // Skip-domains entry: a distinct "destination" for the hostname (parks
-    // the tab at the top of the workspace on every tidy click instead of
-    // grouping it). Separated from rules with a menuseparator. Shows ✓ +
-    // disabled if the hostname is already in the skip list.
-    popup.appendChild(document.createXULElement("menuseparator"));
-    const skipItem = document.createXULElement("menuitem");
+    popup.appendChild(doc.createXULElement("menuseparator"));
+    const skipItem = doc.createXULElement("menuitem");
     const inSkip = currentHostname && skipList.includes(currentHostname);
-    skipItem.setAttribute("label", inSkip ? "✓ Skip" : "Skip");
+    skipItem.setAttribute("label", t(inSkip ? "menu.skipChecked" : "menu.skip", null, win));
     if (inSkip) skipItem.setAttribute("disabled", "true");
     skipItem.dataset.zaoSkip = "true";
     popup.appendChild(skipItem);
@@ -174,418 +228,406 @@ export const setupTabContextMenu = () => {
     }
     const ruleName = item?.dataset?.zaoRuleName;
     if (!ruleName) return;
-    // applyToRule reads the hostname off the tab itself; pass the tab's
-    // current group element so its color is preserved if applyToRule has to
-    // create a new rule (defensive — the submenu only lists existing rules,
-    // but applyToRule is safe either way).
-    const groupEl = currentTab.closest?.("tab-group");
+    const groupEl = currentTab.closest?.(NORMAL_GROUP_SELECTOR);
     applyToRule(currentTab, ruleName, groupEl);
   };
 
+  const moveTabIntoFolder = (tab, targetGroup) => {
+    if (!tab?.isConnected || !targetGroup?.isConnected) return;
+    if (tab.closest?.(NORMAL_GROUP_SELECTOR) === targetGroup) return;
+    const wasCollapsed = expandIfCollapsed(targetGroup);
+    try {
+      win.gBrowser?.moveTabToExistingGroup?.(tab, targetGroup);
+      if (wasCollapsed) {
+        (win.setTimeout || setTimeout)(() => {
+          if (!win.closed && targetGroup.isConnected) collapseGroup(targetGroup);
+        }, 0);
+      }
+      saveGroupState(win);
+    } catch (e) {
+      console.error(`${LOG} Move to Folder failed:`, e);
+    }
+  };
+
+  const onMoveSubmenuShowing = () => {
+    while (movePopup.firstChild) movePopup.firstChild.remove();
+    folderMap.clear();
+    if (!isTabMovableToFolder(currentTab)) return;
+
+    const workspaceId =
+      currentTab.getAttribute?.("zen-workspace-id") ||
+      win.gZenWorkspaces?.activeWorkspace;
+    const currentGroup = currentTab.closest?.(NORMAL_GROUP_SELECTOR) || null;
+    const folders = getWorkspaceFolderElements(win, workspaceId);
+
+    if (folders.length === 0) {
+      const emptyItem = doc.createXULElement("menuitem");
+      emptyItem.setAttribute("label", t("menu.noFoldersYet", null, win));
+      emptyItem.setAttribute("disabled", "true");
+      movePopup.appendChild(emptyItem);
+      return;
+    }
+
+    const folderItems = [];
+
+    // Add quick-pick search input when 5+ folders exist in the workspace.
+    if (folders.length >= 5 && typeof doc.createElementNS === "function") {
+      const searchBox = doc.createElementNS(HTML_NS, "input");
+      searchBox.type = "search";
+      searchBox.className = "zao-folder-search-input";
+      searchBox.placeholder = t("menu.searchFolders", null, win);
+      searchBox.setAttribute("aria-label", t("menu.searchFolders", null, win));
+      searchBox.style.cssText = "margin:4px 8px;padding:4px 8px;width:calc(100% - 16px);box-sizing:border-box;border-radius:6px;";
+      const stopBubble = (ev) => ev.stopPropagation();
+      searchBox.addEventListener("click", stopBubble);
+      searchBox.addEventListener("mousedown", stopBubble);
+      searchBox.addEventListener("input", () => {
+        const query = searchBox.value.trim().toLowerCase();
+        for (const entry of folderItems) {
+          entry.item.hidden = Boolean(query && !entry.labelLower.includes(query));
+        }
+      });
+      searchBox.addEventListener("keydown", (ev) => {
+        ev.stopPropagation();
+        if (ev.key === "Enter") {
+          const match = folderItems.find((entry) => !entry.item.hidden && !entry.item.disabled);
+          if (match) {
+            moveTabIntoFolder(currentTab, match.groupEl);
+            menu.hidePopup?.();
+          }
+        }
+      });
+      movePopup.appendChild(searchBox);
+      movePopup.appendChild(doc.createXULElement("menuseparator"));
+    }
+
+    folders.forEach(({ el, label, count }, idx) => {
+      const key = `f_${idx}`;
+      folderMap.set(key, el);
+      const item = doc.createXULElement("menuitem");
+      const isCurrent = el === currentGroup;
+      item.setAttribute("label", isCurrent ? `✓ ${label} (${count})` : `${label} (${count})`);
+      if (isCurrent) item.setAttribute("disabled", "true");
+      item.dataset.zaoFolderKey = key;
+      movePopup.appendChild(item);
+      folderItems.push({ item, groupEl: el, labelLower: label.toLowerCase() });
+    });
+  };
+
+  const onMoveCommand = (e) => {
+    const key = e.target?.dataset?.zaoFolderKey;
+    if (!key || !currentTab) return;
+    const targetGroup = folderMap.get(key);
+    if (!targetGroup) return;
+    moveTabIntoFolder(currentTab, targetGroup);
+  };
+
   menu.addEventListener("popupshowing", onOuterShowing);
+  menu.addEventListener("popuphidden", onOuterHidden);
   popup.addEventListener("popupshowing", onSubmenuShowing);
   popup.addEventListener("command", onCommand);
-  menu._zaoContextMenuInstalled = { onOuterShowing, onSubmenuShowing, onCommand, parent, popup };
-  console.log(`${LOG} tab context submenu installed (build ${BUILD_VERSION})`);
+  movePopup.addEventListener("popupshowing", onMoveSubmenuShowing);
+  movePopup.addEventListener("command", onMoveCommand);
+
+  state.contextMenu = {
+    menu,
+    parent,
+    popup,
+    moveParent,
+    movePopup,
+    onOuterShowing,
+    onOuterHidden,
+    onSubmenuShowing,
+    onCommand,
+    onMoveSubmenuShowing,
+    onMoveCommand,
+  };
+  console.log(`${LOG} tab context submenus installed (build ${BUILD_VERSION})`);
 };
 
-export const teardownTabContextMenu = () => {
-  const menu = findContextMenu();
-  if (!menu?._zaoContextMenuInstalled) return;
-  const { onOuterShowing, onSubmenuShowing, onCommand, parent, popup } = menu._zaoContextMenuInstalled;
-  try { menu.removeEventListener("popupshowing", onOuterShowing); } catch {}
-  try { popup.removeEventListener("popupshowing", onSubmenuShowing); } catch {}
-  try { popup.removeEventListener("command", onCommand); } catch {}
-  if (parent?.isConnected) try { parent.remove(); } catch {}
-  menu._zaoContextMenuInstalled = null;
+export const teardownTabContextMenu = (win = globalThis.window) => {
+  const state = WINDOW_STATE.get(win);
+  const ctx = state?.contextMenu;
+  if (!ctx) return;
+  try { ctx.menu.removeEventListener("popupshowing", ctx.onOuterShowing); } catch {}
+  try { ctx.menu.removeEventListener("popuphidden", ctx.onOuterHidden); } catch {}
+  try { ctx.popup.removeEventListener("popupshowing", ctx.onSubmenuShowing); } catch {}
+  try { ctx.popup.removeEventListener("command", ctx.onCommand); } catch {}
+  try { ctx.movePopup.removeEventListener("popupshowing", ctx.onMoveSubmenuShowing); } catch {}
+  try { ctx.movePopup.removeEventListener("command", ctx.onMoveCommand); } catch {}
+  if (ctx.parent?.isConnected) try { ctx.parent.remove(); } catch {}
+  if (ctx.moveParent?.isConnected) try { ctx.moveParent.remove(); } catch {}
+  state.contextMenu = null;
 };
 
 // ─── Tab-group right-click: "Dissolve group" ─────────────────────────────────
-//
-// Zen routes right-clicks on tab-group labels to Firefox's standard toolbar
-// context menu (#toolbar-context-menu) — the same menu used for empty
-// sidebar / toolbar customization. We append a "Dissolve group" entry that's
-// only visible when the right-click happened on a tab-group label.
-//
-// "Dissolve group" — ungroup all tabs in the group AND move them to the top
-// of the workspace. The matching rule in settings stays intact so the next
-// wand click would re-create the group from whatever tabs match the rule.
 
 const TOOLBAR_CONTEXT_MENU_ID = "toolbar-context-menu";
 
-// Most recent tab-group that was right-clicked. Set by our capture-phase
-// contextmenu listener; read by the menu's popupshowing handler to decide
-// whether to show the "Dissolve group" item.
-let _pendingDissolveTargetGroup = null;
-
-const dissolveTabGroup = (group) => {
-  if (!group?.isConnected) return;
-  const workspaceId = window.gZenWorkspaces?.activeWorkspace;
+const dissolveTabGroup = (win, group) => {
+  if (!group?.isConnected || win?.closed) return;
+  const workspaceId = group.closest?.("zen-workspace")?.id ||
+    group.getAttribute?.("zen-workspace-id") ||
+    win.gZenWorkspaces?.activeWorkspace;
   if (!workspaceId) {
-    console.warn(`${LOG} dissolveTabGroup: no active workspace`);
+    console.warn(`${LOG} dissolveTabGroup: no workspace resolved`);
     return;
   }
-  const tabs = Array.from(group.querySelectorAll(`tab[zen-workspace-id="${workspaceId}"]`))
-    .filter((t) => t.isConnected);
+  const tabs = directGroupTabs(group, workspaceId);
   if (tabs.length === 0) {
-    // Empty group — just remove the element.
-    try { group.remove(); } catch {}
+    if (!group.querySelector("tab")) {
+      try { group.remove(); } catch {}
+    }
     return;
   }
-  const groupName = group.getAttribute?.("label") || "(unnamed)";
-  // moveTabsToTop handles gBrowser.ungroupTab + DOM reparent to top, the same
-  // path strict-mode ejection and skip-domain parking use.
+  const groupName = group.getAttribute?.("label") || t("menu.unnamedGroup", null, win);
   const moved = moveTabsToTop(tabs, workspaceId);
   console.log(`${LOG} dissolved group "${groupName}" — ejected ${moved} tab(s) to top of workspace`);
-  // Group element typically auto-removes when empty, but defensively remove
-  // it ourselves if it lingered.
-  setTimeout(() => {
-    if (group.isConnected && !group.querySelector("tab")) {
-      try { group.remove(); } catch {}
+  const groupRef = typeof WeakRef === "function" ? new WeakRef(group) : { deref: () => group };
+  (win.setTimeout || setTimeout)(() => {
+    if (win.closed) return;
+    const liveGroup = groupRef.deref();
+    if (liveGroup?.isConnected && !liveGroup.querySelector("tab")) {
+      try { liveGroup.remove(); } catch {}
     }
   }, 50);
 };
 
-// Capture-phase contextmenu listener — fires BEFORE the toolbar context menu
-// opens so the pending-target is set in time for popupshowing.
-const onContextMenuCapture = (e) => {
-  _pendingDissolveTargetGroup = e.target?.closest?.("tab-group") || null;
-};
+export const setupTabGroupContextMenu = (win = globalThis.window) => {
+  const state = getWindowState(win);
+  const doc = win?.document;
+  if (!state || !doc || state.groupContextMenu) return;
 
-let _onMenuShowing = null;
-let _onMenuHidden = null;
-let _onMenuItemCommand = null;
-
-export const setupTabGroupContextMenu = () => {
-  const menu = document.getElementById(TOOLBAR_CONTEXT_MENU_ID);
+  const menu = doc.getElementById(TOOLBAR_CONTEXT_MENU_ID);
   if (!menu) {
     console.warn(`${LOG} #${TOOLBAR_CONTEXT_MENU_ID} not found — Dissolve group menuitem not installed`);
     return;
   }
-  if (menu._zaoDissolveInstalled) return;
-  menu._zaoDissolveInstalled = true;
 
-  // Build menuitem + separator. Hidden by default; shown on popupshowing when
-  // the most recent right-click was on a tab-group.
-  const separator = document.createXULElement("menuseparator");
+  menu.querySelector?.("#zen-tab-sorting-dissolve-group")?.remove?.();
+  menu.querySelector?.("#zen-tab-sorting-dissolve-separator")?.remove?.();
+
+  const separator = doc.createXULElement("menuseparator");
   separator.id = "zen-tab-sorting-dissolve-separator";
   separator.setAttribute("hidden", "true");
 
-  const item = document.createXULElement("menuitem");
+  const item = doc.createXULElement("menuitem");
   item.id = "zen-tab-sorting-dissolve-group";
-  item.setAttribute("label", "Dissolve group");
+  item.setAttribute("label", t("menu.dissolveGroup", null, win));
   item.setAttribute("hidden", "true");
 
-  // Insert at the top of the menu so it's prominent when shown. (The native
-  // Zen items remain in their normal positions below.)
   menu.prepend(separator);
   menu.prepend(item);
 
-  _onMenuShowing = () => {
-    const group = _pendingDissolveTargetGroup;
-    const show = !!group;
+  let pendingGroupRef = null;
+  const getPendingGroup = () => {
+    const group = pendingGroupRef?.deref?.() || null;
+    return group?.isConnected ? group : null;
+  };
+
+  const onContextMenuCapture = (e) => {
+    const targetEl = e.target?.nodeType === 1 ? e.target : e.target?.parentElement;
+    const group = targetEl?.closest?.(NORMAL_GROUP_SELECTOR) || null;
+    pendingGroupRef = group && !isSidebarCopy(group)
+      ? (typeof WeakRef === "function" ? new WeakRef(group) : { deref: () => group })
+      : null;
+  };
+
+  const onMenuShowing = (e) => {
+    if (e.target !== menu) return;
+    const group = getPendingGroup();
+    const show = Boolean(group);
     item.hidden = !show;
     separator.hidden = !show;
     if (show) {
-      const name = group.getAttribute?.("label") || "(unnamed)";
-      item.setAttribute("label", `Dissolve group "${name}"`);
+      const name = group.getAttribute?.("label") || t("menu.unnamedGroup", null, win);
+      item.setAttribute("label", t("menu.dissolveNamedGroup", { name }, win));
     }
   };
-  _onMenuHidden = () => {
-    // Clear after the menu closes (whether from click or dismiss) so a
-    // subsequent non-group right-click doesn't surface our item stale.
-    _pendingDissolveTargetGroup = null;
+
+  const onMenuHidden = (e) => {
+    if (e.target !== menu) return;
+    pendingGroupRef = null;
   };
-  _onMenuItemCommand = () => {
-    const group = _pendingDissolveTargetGroup;
+
+  const onMenuItemCommand = () => {
+    const group = getPendingGroup();
+    pendingGroupRef = null;
     if (!group) {
       console.warn(`${LOG} dissolve clicked but no target group captured`);
       return;
     }
-    dissolveTabGroup(group);
+    dissolveTabGroup(win, group);
   };
 
-  menu.addEventListener("popupshowing", _onMenuShowing);
-  menu.addEventListener("popuphidden", _onMenuHidden);
-  item.addEventListener("command", _onMenuItemCommand);
-  document.addEventListener("contextmenu", onContextMenuCapture, true);
+  menu.addEventListener("popupshowing", onMenuShowing);
+  menu.addEventListener("popuphidden", onMenuHidden);
+  item.addEventListener("command", onMenuItemCommand);
+  doc.addEventListener("contextmenu", onContextMenuCapture, true);
 
+  state.groupContextMenu = {
+    menu,
+    doc,
+    item,
+    separator,
+    onContextMenuCapture,
+    onMenuShowing,
+    onMenuHidden,
+    onMenuItemCommand,
+  };
   console.log(`${LOG} #${TOOLBAR_CONTEXT_MENU_ID}: 'Dissolve group' menuitem installed`);
 };
 
-export const teardownTabGroupContextMenu = () => {
-  const menu = document.getElementById(TOOLBAR_CONTEXT_MENU_ID);
-  if (menu) {
-    if (_onMenuShowing) menu.removeEventListener("popupshowing", _onMenuShowing);
-    if (_onMenuHidden) menu.removeEventListener("popuphidden", _onMenuHidden);
-    menu._zaoDissolveInstalled = false;
-    const item = menu.querySelector?.("#zen-tab-sorting-dissolve-group");
-    const sep = menu.querySelector?.("#zen-tab-sorting-dissolve-separator");
-    if (item?.isConnected) try { item.remove(); } catch {}
-    if (sep?.isConnected) try { sep.remove(); } catch {}
-  }
-  document.removeEventListener("contextmenu", onContextMenuCapture, true);
-  _onMenuShowing = null;
-  _onMenuHidden = null;
-  _onMenuItemCommand = null;
-  _pendingDissolveTargetGroup = null;
+export const teardownTabGroupContextMenu = (win = globalThis.window) => {
+  const state = WINDOW_STATE.get(win);
+  const ctx = state?.groupContextMenu;
+  if (!ctx) return;
+  try { ctx.menu.removeEventListener("popupshowing", ctx.onMenuShowing); } catch {}
+  try { ctx.menu.removeEventListener("popuphidden", ctx.onMenuHidden); } catch {}
+  try { ctx.item.removeEventListener("command", ctx.onMenuItemCommand); } catch {}
+  try { ctx.doc.removeEventListener("contextmenu", ctx.onContextMenuCapture, true); } catch {}
+  if (ctx.item?.isConnected) try { ctx.item.remove(); } catch {}
+  if (ctx.separator?.isConnected) try { ctx.separator.remove(); } catch {}
+  state.groupContextMenu = null;
 };
 
-// On every tab-group creation (including session restore on startup), re-apply the
-// rule's color so it survives across browser restarts even if Zen's session storage
-// dropped our previously-set color.
-// Apply our saved state to a tab-group: re-collapse if its label is in the
-// collapsed-set pref, and re-apply its rule color. Used both as the
-// TabGroupCreate event handler (for newly-created groups) and at install
-// time (for groups Zen restored before our script loaded).
-const collapseKey = (group) => `id:${group.id || `${group.getAttribute("zen-workspace-id")}:${group.getAttribute("label")}`}`;
+// ─── TabGroupCreate color hook ───────────────────────────────────────────────
 
-const applyTabGroupRestoreState = (group) => {
+const applyTabGroupRuleColor = (win, group) => {
   try {
-    if (!group?.isConnected || isSidebarCopy(group)) return;
-    const label = group.getAttribute?.("label");
+    if (!group?.isConnected || isSidebarCopy(group) || group.hasAttribute?.("split-view-group")) return;
+    const label = (group.getAttribute?.("label") || "").trim();
     if (!label) return;
 
-    // Restore collapsed state. Deferred so Zen's own group setup finishes
-    // before we toggle. Use the property setter, not setAttribute, so
-    // Firefox also updates aria-hidden on inner tabs (which the collapse
-    // CSS rule relies on).
-    const collapsedSet = readCollapsedGroupsPref();
-    if (collapsedSet.has(collapseKey(group)) || collapsedSet.has(label)) {
-      setTimeout(() => {
-        if (!group.isConnected || isSidebarCopy(group)) return;
-        let applied = false;
-        try { group.collapsed = true; applied = true; } catch {}
-        if (!applied) {
-          try { group.setAttribute("collapsed", ""); } catch {}
-          // Property setter wasn't available — manually mark aria-hidden on
-          // non-selected tabs so our CSS rule actually hides them.
-          for (const tab of group.querySelectorAll("tab")) {
-            if (!tab.hasAttribute("selected")) {
-              try { tab.setAttribute("aria-hidden", "true"); } catch {}
-            }
-          }
-        }
-      }, 0);
-    }
-
     const rules = readRulesPref() || [];
-    const rule = rules.find((r) => r.name === label);
+    const rule = rules.find((r) => String(r?.name || "").trim() === label);
     if (rule?.color) {
-      // Defer one tick so Zen's own color setup (which runs synchronously
-      // during group construction) is done before we override.
-      setTimeout(() => {
-        if (group.isConnected) applyGroupColor(group, rule.color);
+      // Defer one tick so Zen's own color setup completes before we override.
+      (win.setTimeout || setTimeout)(() => {
+        if (!win.closed && group.isConnected) applyGroupColor(group, rule.color);
       }, 0);
     }
   } catch (e) {
-    console.error(`${LOG} applyTabGroupRestoreState error:`, e);
+    console.error(`${LOG} applyTabGroupRuleColor error:`, e);
   }
 };
 
-export const setupTabGroupCreateHook = () => {
-  if (typeof gBrowser === "undefined" || !gBrowser.tabContainer) return;
-  if (gBrowser.tabContainer._zaoTabGroupCreateHook) return;
+export const setupTabGroupCreateHook = (win = globalThis.window, { applyExisting = true } = {}) => {
+  const state = getWindowState(win);
+  const tabContainer = win?.gBrowser?.tabContainer;
+  if (!state || !tabContainer || state.tabGroupCreate) return;
 
-  const handler = (event) => applyTabGroupRestoreState(event.target);
-  gBrowser.tabContainer.addEventListener("TabGroupCreate", handler);
-  gBrowser.tabContainer._zaoTabGroupCreateHook = handler;
+  const handler = (event) => applyTabGroupRuleColor(win, event.target);
+  tabContainer.addEventListener("TabGroupCreate", handler);
+  state.tabGroupCreate = { tabContainer, handler };
 
-  // Already-existing tab-groups — session restore likely fired
-  // TabGroupCreate BEFORE we installed the listener. Process them now.
-  const existing = document.querySelectorAll("tab-group");
-  if (existing.length > 0) {
-    console.log(`${LOG} TabGroupCreate hook: applying restore state to ${existing.length} pre-existing tab-group(s)`);
-    existing.forEach(applyTabGroupRestoreState);
+  if (applyExisting) {
+    const existing = win.document?.querySelectorAll?.(NORMAL_GROUP_SELECTOR) || [];
+    if (existing.length > 0) {
+      console.log(`${LOG} TabGroupCreate hook: applying rule colors to ${existing.length} pre-existing tab-group(s)`);
+      existing.forEach((group) => applyTabGroupRuleColor(win, group));
+    }
   }
   console.log(`${LOG} TabGroupCreate hook installed`);
 };
 
-export const teardownTabGroupCreateHook = () => {
-  if (typeof gBrowser === "undefined" || !gBrowser?.tabContainer?._zaoTabGroupCreateHook) return;
-  try {
-    gBrowser.tabContainer.removeEventListener("TabGroupCreate", gBrowser.tabContainer._zaoTabGroupCreateHook);
-  } catch {}
-  delete gBrowser.tabContainer._zaoTabGroupCreateHook;
+export const teardownTabGroupCreateHook = (win = globalThis.window) => {
+  const state = WINDOW_STATE.get(win);
+  const ctx = state?.tabGroupCreate;
+  if (!ctx) return;
+  try { ctx.tabContainer.removeEventListener("TabGroupCreate", ctx.handler); } catch {}
+  state.tabGroupCreate = null;
 };
 
-// Watch every tab-group's `collapsed` attribute and persist the current set
-// of collapsed labels to the pref. Re-applied on TabGroupCreate (above) so
-// the user's collapse choices survive browser restarts.
-export const setupCollapsedStatePersistence = () => {
-  if (window._zaoCollapseObserverInstalled) return;
-  window._zaoCollapseObserverInstalled = true;
+// ─── Legacy collapsed-groups one-time migration into group-state.mjs ─────────
+//
+// `group-state.mjs` is now the single authority for group collapse persistence
+// via per-window SessionStore values. This hook performs a one-time migration
+// of any legacy COLLAPSED_GROUPS_PREF entries after group-state restoration
+// completes (no dual-pref race, no per-group MutationObserver churn).
 
-  const groupObservers = new Set();
+const collapseKey = (group) =>
+  `id:${group.id || `${group.getAttribute("zen-workspace-id")}:${group.getAttribute("label")}`}`;
 
-  const persist = (group) => {
-    if (isSidebarCopy(group)) return;
-    const label = group.getAttribute?.("label");
-    if (!label) return;
-    const isCollapsed = group.hasAttribute("collapsed");
-    const set = readCollapsedGroupsPref();
-    const key = collapseKey(group);
-    const had = set.has(key);
-    const legacy = set.delete(label);
-    if (isCollapsed && !had) set.add(key);
-    else if (!isCollapsed && had) set.delete(key);
-    else if (legacy) { /* Save the migration from a legacy label. */ }
-    else return; // no change
-    writeCollapsedGroupsPref(set);
-  };
+export const setupCollapsedStatePersistence = (win = globalThis.window) => {
+  const state = getWindowState(win);
+  if (!state || state.collapseMigration) return;
 
-  const watch = (group) => {
-    if (isSidebarCopy(group)) return;
-    if (group._zaoCollapseAttrObs) return;
-    const obs = new MutationObserver((muts) => {
-      for (const m of muts) {
-        if (m.type === "attributes" && m.attributeName === "collapsed") persist(group);
+  const token = { cancelled: false };
+  state.collapseMigration = token;
+
+  const legacySet = readCollapsedGroupsPref();
+  if (!legacySet || legacySet.size === 0) return;
+
+  const waitReady = win._zaoGroupState?.ready || Promise.resolve();
+  Promise.resolve(waitReady)
+    .then(() => {
+      if (token.cancelled || win.closed || !win.document) return;
+      const currentLegacy = readCollapsedGroupsPref();
+      if (!currentLegacy || currentLegacy.size === 0) return;
+
+      let migrated = 0;
+      for (const group of win.document.querySelectorAll(NORMAL_GROUP_SELECTOR)) {
+        if (!group?.isConnected || isSidebarCopy(group)) continue;
+        const label = group.getAttribute?.("label");
+        if (!label) continue;
+        if (currentLegacy.has(collapseKey(group)) || currentLegacy.has(label)) {
+          try {
+            if (!group.collapsed) group.collapsed = true;
+            migrated++;
+          } catch {}
+        }
       }
+      if (migrated > 0) saveGroupState(win);
+      // Clear legacy pref so group-state.mjs remains the sole source of truth.
+      writeCollapsedGroupsPref(new Set());
+      console.log(`${LOG} migrated ${migrated} legacy collapsed group(s) into window group-state`);
+    })
+    .catch((e) => {
+      console.warn(`${LOG} legacy collapse migration skipped:`, e);
     });
-    obs.observe(group, { attributes: true, attributeFilter: ["collapsed"] });
-    group._zaoCollapseAttrObs = obs;
-    groupObservers.add(obs);
-    persist(group);
-  };
-
-  const unwatch = (group) => {
-    const obs = group?._zaoCollapseAttrObs;
-    if (!obs) return;
-    try { obs.disconnect(); } catch {}
-    groupObservers.delete(obs);
-    delete group._zaoCollapseAttrObs;
-  };
-
-  // Existing tab-groups
-  document.querySelectorAll("tab-group").forEach(watch);
-
-  // Future tab-groups (e.g. session restore, user-created via "New Group")
-  const containerObs = new MutationObserver((muts) => {
-    for (const m of muts) {
-      for (const n of m.addedNodes) {
-        if (n.nodeType !== 1) continue;
-        if (n.tagName?.toLowerCase() === "tab-group") watch(n);
-        else n.querySelectorAll?.("tab-group").forEach(watch);
-      }
-      for (const n of m.removedNodes) {
-        if (n.nodeType !== 1) continue;
-        if (n.tagName?.toLowerCase() === "tab-group") unwatch(n);
-        else n.querySelectorAll?.("tab-group").forEach(unwatch);
-      }
-    }
-  });
-  const observeTarget =
-    (typeof gBrowser !== "undefined" && gBrowser?.tabContainer) ||
-    document.body ||
-    document.documentElement;
-  containerObs.observe(observeTarget, {
-    childList: true,
-    subtree: true,
-  });
-
-  window._zaoCollapseObservers = { containerObs, groupObservers };
-  console.log(`${LOG} collapsed-state persistence observer installed`);
 };
 
-export const teardownCollapsedStatePersistence = () => {
-  const state = window._zaoCollapseObservers;
-  if (!state) return;
-  try { state.containerObs?.disconnect(); } catch {}
-  for (const obs of state.groupObservers) {
-    try { obs.disconnect(); } catch {}
-  }
-  state.groupObservers.clear();
-  delete window._zaoCollapseObservers;
-  delete window._zaoCollapseObserverInstalled;
+export const teardownCollapsedStatePersistence = (win = globalThis.window) => {
+  const state = WINDOW_STATE.get(win);
+  if (!state?.collapseMigration) return;
+  state.collapseMigration.cancelled = true;
+  state.collapseMigration = null;
 };
 
 // ─── Pref observers ──────────────────────────────────────────────────────────
 
-// Live re-apply of group styling when the user toggles the minimal-style pref.
-// Without this the change is invisible until the next tidy-click.
-//
-// Services.prefs.addObserver attaches to the *global* prefs service (lives in the
-// parent process) and would survive window close, leaking a window reference if
-// we don't remove it. Hence the explicit teardown — wired into the entry
-// script's cleanup() handler.
-let minimalStylePrefObserver = null;
+export const setupMinimalStylePrefObserver = (win = globalThis.window) => {
+  const state = getWindowState(win);
+  if (!state || state.minimalStyleObserver) return;
 
-export const setupMinimalStylePrefObserver = () => {
-  if (minimalStylePrefObserver) return;
-  minimalStylePrefObserver = {
+  const observer = {
     observe(_subject, topic, data) {
-      if (topic !== "nsPref:changed") return;
-      if (data !== CONFIG.MINIMAL_STYLE_PREF) return;
+      if (topic !== "nsPref:changed" || data !== CONFIG.MINIMAL_STYLE_PREF) return;
+      if (win.closed) return;
       try {
-        // Pass null so we walk every workspace's tab-groups — minimal-style is a
-        // global pref and a user toggling it expects the change to apply everywhere,
-        // not just whichever workspace happens to be active at the moment.
         const rules = readRulesPref() || [];
         const touched = syncAllGroupColors(null, rules);
-        console.log(`${LOG} minimal-style toggled → resynced ${touched} group(s) across all workspaces (minimal=${isMinimalStyle()})`);
+        console.log(
+          `${LOG} minimal-style toggled → resynced ${touched} group(s) across all workspaces (minimal=${isMinimalStyle()})`,
+        );
       } catch (e) {
         console.error(`${LOG} minimal-style pref observer error:`, e);
       }
     },
   };
-  Services.prefs.addObserver(CONFIG.MINIMAL_STYLE_PREF, minimalStylePrefObserver);
+  Services.prefs.addObserver(CONFIG.MINIMAL_STYLE_PREF, observer);
+  state.minimalStyleObserver = observer;
   console.log(`${LOG} minimal-style pref observer installed`);
 };
 
-export const teardownMinimalStylePrefObserver = () => {
-  if (!minimalStylePrefObserver) return;
+export const teardownMinimalStylePrefObserver = (win = globalThis.window) => {
+  const state = WINDOW_STATE.get(win);
+  if (!state?.minimalStyleObserver) return;
   try {
-    Services.prefs.removeObserver(CONFIG.MINIMAL_STYLE_PREF, minimalStylePrefObserver);
+    Services.prefs.removeObserver(CONFIG.MINIMAL_STYLE_PREF, state.minimalStyleObserver);
   } catch (e) {
     console.warn(`${LOG} failed to remove minimal-style pref observer:`, e);
   }
-  minimalStylePrefObserver = null;
-};
-
-// Collapsed-group pip: publish the user's shape/size choice to CSS as custom
-// properties on the document root. userChrome.css can't read prefs, so this is
-// the bridge — the stylesheet just reads var(--zao-pip-size / --zao-pip-radius)
-// and keeps its own fallbacks for the moment before this first runs.
-export const applyPipStyle = () => {
-  try {
-    const shape = getPipShape();
-    const m = pipMetrics(shape, getPipSize(shape), getPipOpenBehavior());
-    const root = document.documentElement;
-    root.style.setProperty("--zao-pip-size", `${m.size}px`);
-    root.style.setProperty("--zao-pip-radius", m.radius);
-    root.style.setProperty("--zao-pip-display", m.display);
-    root.style.setProperty("--zao-pip-pad", m.pad);
-    root.style.setProperty("--zao-pip-open-size", `${m.openSize}px`);
-    root.style.setProperty("--zao-pip-open-radius", m.openRadius);
-    root.style.setProperty("--zao-pip-open-display", m.openDisplay);
-    root.style.setProperty("--zao-pip-open-pad", m.openPad);
-  } catch (e) {
-    console.error(`${LOG} applyPipStyle error:`, e);
-  }
-};
-
-// One observer on the shared `…pip-` branch covers both the shape and size
-// prefs, so either edit re-renders the pips immediately.
-let pipStylePrefObserver = null;
-
-export const setupPipStylePrefObserver = () => {
-  if (pipStylePrefObserver) return;
-  pipStylePrefObserver = {
-    observe(_subject, topic) {
-      if (topic !== "nsPref:changed") return;
-      applyPipStyle();
-    },
-  };
-  Services.prefs.addObserver(CONFIG.PIP_PREF_BRANCH, pipStylePrefObserver);
-  console.log(`${LOG} pip-style pref observer installed`);
-};
-
-export const teardownPipStylePrefObserver = () => {
-  if (!pipStylePrefObserver) return;
-  try {
-    Services.prefs.removeObserver(CONFIG.PIP_PREF_BRANCH, pipStylePrefObserver);
-  } catch (e) {
-    console.warn(`${LOG} failed to remove pip-style pref observer:`, e);
-  }
-  pipStylePrefObserver = null;
+  state.minimalStyleObserver = null;
 };

@@ -1,13 +1,47 @@
 import { readSkipDomainsPref } from "./rules.mjs";
 import { classifyWorkspaceUnitsWithJev } from "./workspace-jev.mjs";
-import { snapshotWorkspaceUnits, workspaceUnitIsUnchanged, workspaceUnitIsAtTarget, moveWorkspaceUnit } from "./workspace-browser.mjs";
+import {
+  snapshotWorkspaceUnits,
+  workspaceUnitIsUnchanged,
+  workspaceUnitIsAtTarget,
+  moveWorkspaceUnit,
+  captureUndoSnapshot,
+  restoreUndoSnapshot,
+} from "./workspace-browser.mjs";
 import { animateSidebarChanges } from "./sort-animation.mjs";
 import { isSortRunning, withSortSession } from "./sort-session.mjs";
 import { showToast } from "./ui-toast.mjs";
 import { recordDebugEvent } from "./debug-journal.mjs";
 import { saveGroupState } from "./group-state.mjs";
+import { t } from "./i18n.mjs";
 
 const HTML = "http://www.w3.org/1999/xhtml";
+
+const waitAbortable = (win, ms, signal) =>
+  new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new Error(t("error.sortAborted", null, win)));
+      return;
+    }
+    const onAbort = () => {
+      win.clearTimeout?.(timer);
+      reject(new Error(t("error.sortAborted", null, win)));
+    };
+    const timer = (win.setTimeout || setTimeout)(() => {
+      signal?.removeEventListener?.("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener?.("abort", onAbort, { once: true });
+  });
+
+const settleFrame = (win) =>
+  new Promise((resolve) => {
+    if (typeof win?.requestAnimationFrame === "function") {
+      win.requestAnimationFrame(() => resolve());
+    } else {
+      resolve();
+    }
+  });
 
 const showErrorReport = (win, errors) => {
   win.document.getElementById("zao-workspace-errors")?.remove();
@@ -21,9 +55,9 @@ const showErrorReport = (win, errors) => {
   panel.id = "zao-workspace-errors";
   panel.className = "zao-workspace-errors";
   panel.setAttribute("role", "region");
-  panel.setAttribute("aria-label", "Fehler beim Sortieren der Spaces");
-  const title = element("strong", `${errors.length} Elemente konnten nicht einsortiert werden`);
-  const close = element("button", "Schließen");
+  panel.setAttribute("aria-label", t("workspace.errorReportAria", null, win));
+  const title = element("strong", t("workspace.errorReportTitle", { count: errors.length }, win));
+  const close = element("button", t("workspace.close", null, win));
   close.type = "button";
   close.addEventListener("click", () => panel.remove());
   const list = element("ul");
@@ -32,24 +66,51 @@ const showErrorReport = (win, errors) => {
   win.document.documentElement.appendChild(panel);
 };
 
+export const undoLastWorkspaceSort = (win = globalThis.window) =>
+  withSortSession("workspaces", async () => {
+    const toast = (message, options = {}) => showToast(message, { ...options, targetWindow: win });
+    const snapshot = win?._zaoLastWorkspaceUndo;
+    if (!snapshot || !snapshot.entries?.length) {
+      toast(t("toast.undoUnavailable", null, win), { type: "info" });
+      return { restored: 0, failed: 0 };
+    }
+    delete win._zaoLastWorkspaceUndo;
+    const outcome = restoreUndoSnapshot(win, snapshot);
+    saveGroupState(win);
+    try { win.document.querySelector("zen-library-spaces-section")?.refreshStripsNow?.(); } catch {}
+    if (outcome.failed > 0) {
+      toast(t("toast.undoPartial", { restored: outcome.restored, failed: outcome.failed }, win), { type: "warning" });
+    } else {
+      toast(t("toast.undoDone", { count: outcome.restored }, win), { type: "success" });
+    }
+    recordDebugEvent("SPACE-UNDO", `Restored ${outcome.restored}, failed ${outcome.failed}`);
+    return outcome;
+  }, win);
+
 export const organizeWorkspaces = (win = globalThis.window) => withSortSession("workspaces", async (signal) => {
   const toast = (message, options = {}) => showToast(message, { ...options, targetWindow: win });
-  const run = { startedAt: Date.now(), finished: false, moved: 0, kept: 0, excluded: 0, errors: [], moves: [] };
+  const run = { startedAt: Date.now(), finished: false, aborted: false, failed: false, moved: 0, kept: 0, excluded: 0, errors: [], moves: [] };
   win.ZenTabSortingLastWorkspaceRun = run;
   win.document.getElementById("zao-workspace-errors")?.remove();
   try {
     const snapshot = snapshotWorkspaceUnits(win, readSkipDomainsPref());
     run.excluded = snapshot.skipped.length;
     if (snapshot.workspaces.length < 2) {
-      toast("Zum Sortieren werden mindestens zwei Spaces in diesem Fenster benötigt.");
+      toast(t("workspace.needTwoSpaces", null, win));
       return run;
     }
     if (!snapshot.units.length) {
-      toast("Keine sortierbaren Tabs oder Ordner gefunden.");
+      toast(t("workspace.noUnits", null, win));
       return run;
     }
     recordDebugEvent("SPACE-START", `${snapshot.units.length} Einheiten in ${snapshot.workspaces.length} Spaces`);
     const plan = await classifyWorkspaceUnitsWithJev({ ...snapshot, fetchImpl: win.fetch.bind(win), signal, concurrency: 3 });
+    if (signal.aborted) {
+      run.aborted = true;
+      toast(t("toast.sortAborted", null, win), { type: "info" });
+      return run;
+    }
+
     const errors = [...plan.errors];
     run.kept = plan.decisions.filter((decision) => !decision.shouldMove).length;
     const moves = plan.decisions.filter((decision) => decision.shouldMove);
@@ -62,68 +123,203 @@ export const organizeWorkspaces = (win = globalThis.window) => withSortSession("
     const onSpaceChange = () => { if (!mutating) userChangedFocus = true; };
     win.addEventListener("TabSelect", onSelection);
     win.addEventListener("ZenWorkspaceChange", onSpaceChange);
+
+    const movedDecisions = [];
+    let fullUndoSnapshot = null;
+
     try {
       // Freeze validation before the first mutation so one planned move cannot
       // invalidate the neighbours of a later one.
       const ready = moves.filter(({ unit, toWorkspaceId }) => {
-        const target = win.gZenWorkspaces.getWorkspaces().find((space) => space.uuid === toWorkspaceId);
+        const currentSpaces = win.gZenWorkspaces.getWorkspaces?.() || [];
+        const target = currentSpaces.find((space) => space.uuid === toWorkspaceId);
         const original = snapshot.workspaces.find((space) => space.id === toWorkspaceId);
-        const source = win.gZenWorkspaces.getWorkspaces().find((space) => space.uuid === unit.workspaceId);
+        const source = currentSpaces.find((space) => space.uuid === unit.workspaceId);
         const originalSource = snapshot.workspaces.find((space) => space.id === unit.workspaceId);
         if (workspaceUnitIsUnchanged(unit) && target?.name === original?.name && source?.name === originalSource?.name) return true;
-        errors.push({ unit, phase: "move", reason: "Element oder Ziel-Space wurde während der Berechnung verändert" });
+        errors.push({ unit, phase: "move", reason: t("error.elementOrSpaceChanged", null, win) });
         return false;
       });
-      await animateSidebarChanges(win, async () => {
-        for (const decision of ready) {
-          const { unit, toWorkspaceId } = decision;
-          let failure;
-          for (let attempt = 0; attempt < 2; attempt++) {
-            if (signal.aborted) throw new Error("Sortierung abgebrochen");
-            if (attempt) await new Promise((resolve) => win.setTimeout(resolve, 350));
+
+      fullUndoSnapshot = captureUndoSnapshot(win, ready);
+      const retryQueue = [];
+
+      // Keep mutating=true across the full synchronous mutation batch + rAF settle tick,
+      // and keep retries outside the animation callback so motion never stalls for 350ms.
+      mutating = true;
+      try {
+        await animateSidebarChanges(win, () => {
+          for (const decision of ready) {
+            if (signal.aborted) break;
+            const { unit, toWorkspaceId } = decision;
             try {
-              mutating = true;
               moveWorkspaceUnit(win, unit, toWorkspaceId);
-              failure = null;
-              break;
+              movedDecisions.push(decision);
+              run.moved++;
+              run.moves.push({
+                id: unit.id,
+                name: unit.name,
+                kind: unit.kind,
+                from: unit.workspaceId,
+                to: toWorkspaceId,
+                score: decision.score,
+                currentScore: decision.currentScore,
+              });
             } catch (error) {
               // A native event listener can throw after the mutation succeeded.
-              if (workspaceUnitIsAtTarget(win, unit, toWorkspaceId)) { failure = null; break; }
-              failure = error;
-            } finally { mutating = false; }
+              if (workspaceUnitIsAtTarget(win, unit, toWorkspaceId)) {
+                movedDecisions.push(decision);
+                run.moved++;
+                run.moves.push({
+                  id: unit.id,
+                  name: unit.name,
+                  kind: unit.kind,
+                  from: unit.workspaceId,
+                  to: toWorkspaceId,
+                  score: decision.score,
+                  currentScore: decision.currentScore,
+                });
+              } else {
+                retryQueue.push({ decision, firstError: error });
+              }
+            }
           }
-          if (failure) errors.push({ unit, phase: "move", reason: failure.message || "Transfer fehlgeschlagen" });
-          else {
-            run.moved++;
-            run.moves.push({ id: unit.id, name: unit.name, kind: unit.kind, from: unit.workspaceId, to: toWorkspaceId, score: decision.score, currentScore: decision.currentScore });
+          win.gBrowser.tabContainer._invalidateCachedTabs?.();
+          win.gZenWorkspaces.updateTabsContainers?.();
+          void win.gBrowser.tabs.length;
+        }, {
+          entries: ready.map(({ unit, toWorkspaceId }) => ({
+            node: unit._node,
+            label: unit.name,
+            fromWorkspaceId: unit.workspaceId,
+            toWorkspaceId,
+          })),
+          signal,
+        });
+
+        // Retry failed moves outside the animation callback.
+        if (retryQueue.length > 0 && !signal.aborted) {
+          await waitAbortable(win, 350, signal);
+          for (const { decision, firstError } of retryQueue) {
+            if (signal.aborted) break;
+            const { unit, toWorkspaceId } = decision;
+            try {
+              moveWorkspaceUnit(win, unit, toWorkspaceId);
+              movedDecisions.push(decision);
+              run.moved++;
+              run.moves.push({
+                id: unit.id,
+                name: unit.name,
+                kind: unit.kind,
+                from: unit.workspaceId,
+                to: toWorkspaceId,
+                score: decision.score,
+                currentScore: decision.currentScore,
+              });
+            } catch (error) {
+              if (workspaceUnitIsAtTarget(win, unit, toWorkspaceId)) {
+                movedDecisions.push(decision);
+                run.moved++;
+                run.moves.push({
+                  id: unit.id,
+                  name: unit.name,
+                  kind: unit.kind,
+                  from: unit.workspaceId,
+                  to: toWorkspaceId,
+                  score: decision.score,
+                  currentScore: decision.currentScore,
+                });
+              } else {
+                errors.push({
+                  unit,
+                  phase: "move",
+                  reason: error?.message || firstError?.message || t("error.transferFailed", null, win),
+                });
+              }
+            }
           }
+          win.gBrowser.tabContainer._invalidateCachedTabs?.();
+          win.gZenWorkspaces.updateTabsContainers?.();
+          void win.gBrowser.tabs.length;
         }
-        win.gBrowser.tabContainer._invalidateCachedTabs?.();
-        win.gZenWorkspaces.updateTabsContainers?.();
-        void win.gBrowser.tabs.length;
-        if (!saveGroupState(win)) errors.push({ unit: { id: "group-state", name: "Gruppenstatus" }, phase: "persistence", reason: "Gruppenstatus konnte nicht für den nächsten Neustart gespeichert werden" });
-      }, { entries: ready.map(({ unit, toWorkspaceId }) => ({ node: unit._node, label: unit.name, fromWorkspaceId: unit.workspaceId, toWorkspaceId })) });
-      if (!userChangedFocus && selected?.isConnected && !selected.closing) {
-        const target = selected.getAttribute("zen-workspace-id");
-        if (target && target !== win.gZenWorkspaces.activeWorkspace) {
-          mutating = true;
-          await win.gZenWorkspaces.changeWorkspaceWithID(target);
+
+        if (!saveGroupState(win)) {
+          errors.push({
+            unit: { id: "group-state", name: t("workspace.groupStateName", null, win) },
+            phase: "persistence",
+            reason: t("workspace.groupStateSaveError", null, win),
+          });
         }
-        win.gBrowser.selectedTab = selected;
+
+        if (!signal.aborted && !userChangedFocus && selected?.isConnected && !selected.closing) {
+          const target = selected.getAttribute("zen-workspace-id");
+          if (target && target !== win.gZenWorkspaces.activeWorkspace) {
+            await win.gZenWorkspaces.changeWorkspaceWithID(target);
+          }
+          win.gBrowser.selectedTab = selected;
+        }
+
+        // Wait one rAF settle tick while mutating=true so deferred Zen focus events
+        // don't masquerade as user navigation.
+        await settleFrame(win);
+      } finally {
+        mutating = false;
       }
     } finally {
       win.removeEventListener("TabSelect", onSelection);
       win.removeEventListener("ZenWorkspaceChange", onSpaceChange);
     }
+
+    // Store undo snapshot restricted to entries that actually moved.
+    if (movedDecisions.length > 0 && fullUndoSnapshot) {
+      const movedIds = new Set(movedDecisions.map((d) => d.unit.id));
+      win._zaoLastWorkspaceUndo = {
+        createdAt: fullUndoSnapshot.createdAt,
+        entries: fullUndoSnapshot.entries.filter((entry) => movedIds.has(entry.id)),
+      };
+    } else {
+      delete win._zaoLastWorkspaceUndo;
+    }
+
+    if (signal.aborted) {
+      run.aborted = true;
+      toast(t("toast.sortAborted", null, win), { type: "info" });
+      return run;
+    }
+
     run.errors = errors.map(({ unit, reason, phase }) => ({ id: unit.id, name: unit.name, reason, phase }));
     showErrorReport(win, run.errors);
-    toast(`${run.moved} Elemente verschoben, ${run.kept} bleiben, ${run.excluded} ausgenommen.${run.errors.length ? ` ${run.errors.length} Fehler – Details im Fehlerbericht.` : ""}`, {
-      type: run.errors.length ? "warning" : "success", duration: run.errors.length ? 9000 : 5500,
+    const summaryKey = run.errors.length ? "workspace.summaryWithErrors" : "workspace.summary";
+    const summaryMsg = t(summaryKey, {
+      moved: run.moved,
+      kept: run.kept,
+      excluded: run.excluded,
+      errors: run.errors.length,
+    }, win);
+    toast(summaryMsg, {
+      type: run.errors.length ? "warning" : "success",
+      duration: run.errors.length ? 9000 : run.moved > 0 ? 7500 : 5500,
+      action: run.moved > 0
+        ? {
+            label: t("toast.undo", null, win),
+            onClick: () => { void undoLastWorkspaceSort(win); },
+          }
+        : undefined,
     });
     recordDebugEvent("SPACE-RESULT", `${run.moved} verschoben, ${run.kept} bleiben, ${run.errors.length} Fehler`, run);
     return run;
   } catch (error) {
-    run.errors.push({ name: "Workspace-Sortierung", reason: error.message || "Sortierung fehlgeschlagen", phase: "run" });
+    if (signal.aborted) {
+      run.aborted = true;
+      toast(t("toast.sortAborted", null, win), { type: "info" });
+      return run;
+    }
+    run.failed = true;
+    run.errors.push({
+      name: t("workspace.runName", null, win),
+      reason: error?.message || t("toast.sortFailed", null, win),
+      phase: "run",
+    });
     showErrorReport(win, run.errors);
     toast(run.errors.at(-1).reason, { type: "error" });
     return run;
@@ -143,13 +339,14 @@ export const setupWorkspaceSortMenu = (win = globalThis.window) => {
   if (!popup || win._zaoWorkspaceMenu) return;
   const item = win.document.createXULElement("menuitem");
   item.id = "zao-sort-workspaces";
-  item.setAttribute("label", "Alle Spaces automatisch sortieren");
-  item.setAttribute("tooltiptext", "Tabs und vollständige Gruppen dieses Fensters mit Jev in vorhandene Spaces sortieren");
+  item.setAttribute("label", t("workspace.menuLabel", null, win));
+  item.setAttribute("tooltiptext", t("workspace.menuTooltip", null, win));
   const separator = win.document.createXULElement("menuseparator");
   const onShowing = (event) => {
     if (event.target !== popup) return;
-    item.disabled = isSortRunning(win);
-    item.setAttribute("label", isSortRunning(win) ? "Spaces werden sortiert …" : "Alle Spaces automatisch sortieren");
+    const running = isSortRunning(win);
+    item.disabled = running;
+    item.setAttribute("label", t(running ? "workspace.menuBusy" : "workspace.menuLabel", null, win));
   };
   const onCommand = () => { void organizeWorkspaces(win); };
   popup.append(separator, item);
