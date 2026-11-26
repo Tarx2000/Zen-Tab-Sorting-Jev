@@ -11,6 +11,7 @@ const ATTR_DRAGGING_FOLDER = "data-zao-dragging-folder";
 const ATTR_DRAG_SHIFT = "data-zao-drag-shift";
 const ATTR_EDGE_REORDER = "data-zao-edge-reorder";
 const PREVIEW_CLASS = "zao-folder-drag-preview";
+export const AUTO_EXPAND_DELAY_MS = 650;
 const TAB_DRAG_TYPES = ["application/x-moz-tabbrowser-tab", "application/x-moz-tab", "text/tab"];
 const SIBLING_TAGS = new Set(["tab", "tab-group", "zen-folder", "tab-split-view-wrapper"]);
 
@@ -223,6 +224,43 @@ export const resolveTargetIndex = ({
   return Math.max(0, Math.min(items.length, dest));
 };
 
+/**
+ * Pure helper: compute smooth vertical edge auto-scroll velocity (px/frame).
+ *
+ * @param {object} params
+ * @param {number} params.clientY
+ * @param {number} params.containerTop
+ * @param {number} params.containerBottom
+ * @param {number} [params.edgeZone=40]
+ * @param {number} [params.maxSpeed=14]
+ * @returns {number} Negative to scroll up, positive to scroll down, 0 inside center.
+ */
+export const computeEdgeScrollVelocity = ({
+  clientY,
+  containerTop,
+  containerBottom,
+  edgeZone = 40,
+  maxSpeed = 14,
+} = {}) => {
+  if (!Number.isFinite(clientY) || !Number.isFinite(containerTop) || !Number.isFinite(containerBottom)) {
+    return 0;
+  }
+  const height = containerBottom - containerTop;
+  if (height <= 0 || edgeZone <= 0 || maxSpeed <= 0) return 0;
+  const zone = Math.min(edgeZone, height / 3);
+  if (zone <= 0) return 0;
+
+  if (clientY < containerTop + zone && clientY >= containerTop - 24) {
+    const ratio = Math.min(1, (containerTop + zone - clientY) / zone);
+    return -Math.max(1, Math.round(maxSpeed * ratio));
+  }
+  if (clientY > containerBottom - zone && clientY <= containerBottom + 24) {
+    const ratio = Math.min(1, (clientY - (containerBottom - zone)) / zone);
+    return Math.max(1, Math.round(maxSpeed * ratio));
+  }
+  return 0;
+};
+
 export const setupGroupDrag = (win = globalThis.window) => {
   if (win._zaoGroupDrag) return;
   const doc = win.document;
@@ -232,9 +270,20 @@ export const setupGroupDrag = (win = globalThis.window) => {
   let edgeHeader = null;
   let styleEl = null;
 
-  // Live folder drag preview & sibling-shift session state.
+  // Live folder drag preview, edge auto-scroll, auto-expand hover, and sibling-shift state.
   let activeDrag = null;
   let lastHandledDragEvent = null;
+  let autoExpandTimer = null;
+  let autoExpandGroup = null;
+
+  const setTimer = (cb, ms) => (typeof win.setTimeout === "function" ? win.setTimeout(cb, ms) : setTimeout(cb, ms));
+  const clearTimer = (id) => (typeof win.clearTimeout === "function" ? win.clearTimeout(id) : clearTimeout(id));
+  const reqRaf = (cb) =>
+    typeof win.requestAnimationFrame === "function"
+      ? win.requestAnimationFrame(cb)
+      : setTimer(() => cb(Date.now()), 16);
+  const cancelRaf = (id) =>
+    typeof win.cancelAnimationFrame === "function" ? win.cancelAnimationFrame(id) : clearTimer(id);
 
   const ensureStyles = () => {
     if (styleEl?.isConnected) return;
@@ -559,9 +608,158 @@ export const setupGroupDrag = (win = globalThis.window) => {
     setStyleProp(preview, "opacity", "0.96");
   };
 
+  const cancelAutoExpand = () => {
+    if (autoExpandTimer != null) {
+      clearTimer(autoExpandTimer);
+      autoExpandTimer = null;
+    }
+    autoExpandGroup = null;
+  };
+
+  const updateAutoExpandHover = (header, group, isEdgeReorder) => {
+    const isCollapsed = Boolean(group && (group.collapsed || group.hasAttribute?.("collapsed")));
+    const isSelf = Boolean(activeDrag?.folder && (group === activeDrag.folder || activeDrag.folder.contains?.(group)));
+    const dropIntoReady = Boolean(
+      header && (header.classList?.contains?.("zen-drop-target") || tagOf(group) === "zen-folder"),
+    );
+    const eligible = Boolean(
+      group &&
+      isDraggableFolder(group) &&
+      isCollapsed &&
+      !isSelf &&
+      !isEdgeReorder &&
+      dropIntoReady,
+    );
+    if (!eligible) {
+      cancelAutoExpand();
+      return;
+    }
+    if (autoExpandGroup === group) return;
+    cancelAutoExpand();
+    autoExpandGroup = group;
+    autoExpandTimer = setTimer(() => {
+      const targetGroup = autoExpandGroup;
+      autoExpandTimer = null;
+      autoExpandGroup = null;
+      if (!targetGroup?.isConnected) return;
+      const stillCollapsed = Boolean(targetGroup.collapsed || targetGroup.hasAttribute?.("collapsed"));
+      if (!stillCollapsed) return;
+      targetGroup.collapsed = false;
+      if (targetGroup.hasAttribute?.("collapsed")) {
+        targetGroup.removeAttribute("collapsed");
+      }
+      invalidateDragCache();
+    }, AUTO_EXPAND_DELAY_MS);
+  };
+
+  const findScrollContainer = (startEl) => {
+    const candidates = [];
+    let cur = startEl;
+    while (cur && cur !== doc.documentElement) {
+      candidates.push(cur);
+      if (cur === tabContainer) break;
+      cur = cur.parentElement;
+    }
+    if (tabContainer?.arrowScrollbox?.scrollbox) candidates.push(tabContainer.arrowScrollbox.scrollbox);
+    if (tabContainer?.arrowScrollbox) candidates.push(tabContainer.arrowScrollbox);
+    if (tabContainer && !candidates.includes(tabContainer)) candidates.push(tabContainer);
+
+    for (const el of candidates) {
+      if (
+        typeof el?.scrollTop === "number" &&
+        typeof el?.scrollHeight === "number" &&
+        typeof el?.clientHeight === "number" &&
+        el.scrollHeight > el.clientHeight + 1 &&
+        typeof el.getBoundingClientRect === "function"
+      ) {
+        return el;
+      }
+    }
+    return null;
+  };
+
+  const stopAutoScroll = (session = activeDrag) => {
+    if (!session) return;
+    if (session.autoScrollRaf != null) {
+      cancelRaf(session.autoScrollRaf);
+      session.autoScrollRaf = null;
+    }
+    session.autoScrollTarget = null;
+    session.autoScrollVelocity = 0;
+  };
+
+  const updateAutoScroll = (session, container, clientY) => {
+    if (!session) return;
+    if (Number.isFinite(clientY)) session.lastClientY = clientY;
+    const sc = findScrollContainer(container);
+    if (!sc || !Number.isFinite(session.lastClientY)) {
+      stopAutoScroll(session);
+      return;
+    }
+    const rect = sc.getBoundingClientRect();
+    const velocity = computeEdgeScrollVelocity({
+      clientY: session.lastClientY,
+      containerTop: rect.top,
+      containerBottom: rect.bottom,
+    });
+    const maxScroll = Math.max(0, sc.scrollHeight - sc.clientHeight);
+    const canScroll = velocity < 0 ? sc.scrollTop > 0 : velocity > 0 ? sc.scrollTop < maxScroll : false;
+    if (!canScroll || velocity === 0) {
+      stopAutoScroll(session);
+      return;
+    }
+
+    session.autoScrollTarget = sc;
+    session.autoScrollVelocity = velocity;
+    if (session.autoScrollRaf != null) return;
+
+    const step = () => {
+      if (activeDrag !== session || !session.autoScrollTarget || !session.autoScrollVelocity) {
+        stopAutoScroll(session);
+        return;
+      }
+      const targetEl = session.autoScrollTarget;
+      const limit = Math.max(0, targetEl.scrollHeight - targetEl.clientHeight);
+      const prev = targetEl.scrollTop;
+      const next = Math.max(0, Math.min(limit, prev + session.autoScrollVelocity));
+      if (next === prev) {
+        stopAutoScroll(session);
+        return;
+      }
+      targetEl.scrollTop = next;
+      refreshActiveDragSnapshots();
+      const snapshot = session.activeSnapshot;
+      if (snapshot && Number.isFinite(session.lastClientY)) {
+        const targetIndex = resolveTargetIndex({
+          items: snapshot.items,
+          originIndex: snapshot.originIndex,
+          clientY: session.lastClientY,
+        });
+        if (targetIndex !== session.lastTargetIndex) {
+          session.lastTargetIndex = targetIndex;
+          const offsets = computeSiblingShifts({
+            count: snapshot.items.length,
+            originIndex: snapshot.originIndex,
+            targetIndex,
+            shiftHeight: session.shiftHeight,
+          });
+          applySiblingOffsets(session, snapshot, offsets);
+        }
+      }
+      if (activeDrag === session && session.autoScrollVelocity !== 0) {
+        session.autoScrollRaf = reqRaf(step);
+      } else {
+        session.autoScrollRaf = null;
+      }
+    };
+    session.autoScrollRaf = reqRaf(step);
+  };
+
   const endFolderDrag = ({ immediate = true } = {}) => {
+    cancelAutoExpand();
     if (!activeDrag) return;
     const session = activeDrag;
+    stopAutoScroll(session);
     activeDrag = null;
     lastHandledDragEvent = null;
 
@@ -618,6 +816,10 @@ export const setupGroupDrag = (win = globalThis.window) => {
       shiftedNodes: new Map(),
       lastTargetIndex: originSnapshot.originIndex,
       lastContainer: originContainer,
+      autoScrollRaf: null,
+      autoScrollTarget: null,
+      autoScrollVelocity: 0,
+      lastClientY: Number.isFinite(event?.clientY) ? event.clientY : null,
     };
 
     if (Number.isFinite(event?.clientY)) {
@@ -687,6 +889,8 @@ export const setupGroupDrag = (win = globalThis.window) => {
     const target = event?.target;
     const container = resolveHoverContainer(target, activeDrag);
     if (!container) return;
+
+    updateAutoScroll(activeDrag, container, event?.clientY);
 
     let snapshot = activeDrag.snapshots.get(container);
     if (!snapshot) {
@@ -898,13 +1102,18 @@ export const setupGroupDrag = (win = globalThis.window) => {
   const tabContainer = win.gBrowser.tabContainer;
 
   const onDragLeave = (event) => {
-    if (!edgeHeader?.contains?.(event.relatedTarget)) {
+    const related = event.relatedTarget;
+    if (!edgeHeader?.contains?.(related)) {
       restore();
     }
+    if (autoExpandGroup && !autoExpandGroup.contains?.(related)) {
+      cancelAutoExpand();
+    }
     if (activeDrag) {
-      const related = event.relatedTarget;
       const stillInsideStrip = Boolean(related && tabContainer?.contains?.(related));
       if (!stillInsideStrip) {
+        stopAutoScroll(activeDrag);
+        cancelAutoExpand();
         // Pointer left the tab strip (or window): relax sibling shifts and hide preview until re-entry.
         if (activeDrag.activeSnapshot) {
           const zeros = new Array(activeDrag.activeSnapshot.items.length).fill(0);
@@ -917,6 +1126,7 @@ export const setupGroupDrag = (win = globalThis.window) => {
   };
 
   const onDragEndOrDrop = () => {
+    cancelAutoExpand();
     restore();
     endFolderDrag({ immediate: true });
     invalidateDragCache();
@@ -956,6 +1166,9 @@ export const setupGroupDrag = (win = globalThis.window) => {
         }
       }
     }
+
+    const hoverGroup = header?.closest?.("tab-group, zen-folder") || null;
+    updateAutoExpandHover(header, hoverGroup, Boolean(header?.hasAttribute?.(ATTR_EDGE_REORDER)));
 
     if (activeDrag) {
       updateFolderDragPreview(event);

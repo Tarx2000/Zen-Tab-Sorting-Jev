@@ -294,6 +294,16 @@ test("CSS collapse rules allow mid-collapse WAAPI animation while preserving spl
     folderCss.includes("user-select: none !important;"),
     "styles/folder-engine.css should prevent accidental label text selection during rapid toggling",
   );
+  assert.ok(
+    folderCss.includes("opacity: 0;\n  transform: scale(0.82);") &&
+      folderCss.includes("opacity: 1;\n  transform: scale(1);"),
+    "styles/folder-engine.css must smoothly cross-fade and scale .zao-folder-tab-count",
+  );
+  assert.ok(
+    folderCss.includes(":where(:root:not([data-zao-renaming-folder=\"true\"]) #tabbrowser-tabs:not([movingtab])) &:active") &&
+      folderCss.includes("scale: var(--zen-active-tab-scale, 0.985);"),
+    "styles/folder-engine.css must match Zen's native tab active press scale without inflating Zia specificity",
+  );
 });
 
 // ─── 2. Smooth Close Animation Tests ─────────────────────────────────────────

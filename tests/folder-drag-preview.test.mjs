@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  AUTO_EXPAND_DELAY_MS,
+  computeEdgeScrollVelocity,
   computeSiblingShifts,
   resolveTargetIndex,
   setupGroupDrag,
@@ -743,6 +745,226 @@ test("folder drag preview: dims only after nativeStart, ignores rename input dra
     assert.equal(win._zaoGroupDrag.headerRects.has(f2.header), false, "Shifted rect must not be cached in headerRects");
 
     doc.dispatchEvent({ type: "dragend" });
+  } finally {
+    teardownGroupDrag(win);
+  }
+});
+
+// ─── 6. Edge auto-scroll & 650 ms auto-expand hover timer ────────────────────
+
+test("computeEdgeScrollVelocity scales smoothly at top/bottom edges and returns 0 in center", () => {
+  assert.equal(computeEdgeScrollVelocity({ clientY: 150, containerTop: 0, containerBottom: 300 }), 0);
+  const topFast = computeEdgeScrollVelocity({ clientY: 0, containerTop: 0, containerBottom: 300 });
+  const topSlow = computeEdgeScrollVelocity({ clientY: 32, containerTop: 0, containerBottom: 300 });
+  assert.ok(topFast < 0 && topSlow < 0 && topFast < topSlow, "closer to top edge scrolls upward faster");
+
+  const botSlow = computeEdgeScrollVelocity({ clientY: 268, containerTop: 0, containerBottom: 300 });
+  const botFast = computeEdgeScrollVelocity({ clientY: 300, containerTop: 0, containerBottom: 300 });
+  assert.ok(botSlow > 0 && botFast > 0 && botFast > botSlow, "closer to bottom edge scrolls downward faster");
+
+  assert.equal(computeEdgeScrollVelocity({ clientY: NaN, containerTop: 0, containerBottom: 300 }), 0);
+});
+
+test("folder drag edge auto-scroll advances scrollTop via rAF, refreshes rects, and stops on dragend", () => {
+  const { doc, makeEl } = createDragDom();
+  const tabContainer = makeEl("div");
+  const ws = makeEl("zen-workspace");
+  const strip = makeEl("div");
+
+  // Scrollable viewport: 0..200px visible, 600px total height
+  strip.scrollTop = 0;
+  strip.scrollHeight = 600;
+  strip.clientHeight = 200;
+  strip._rect = { left: 8, top: 0, width: 220, height: 200, right: 228, bottom: 200 };
+
+  const f0 = makeFolder(makeEl, { label: "Source", top: 0, height: 36, collapsed: true });
+  const tab1 = makeTab(makeEl, { label: "Tab 1", top: 36, height: 36 });
+  const tab2 = makeTab(makeEl, { label: "Tab 2", top: 180, height: 36 });
+  strip.appendChild(f0.group);
+  strip.appendChild(tab1);
+  strip.appendChild(tab2);
+  ws.appendChild(strip);
+  tabContainer.appendChild(ws);
+  doc.body.appendChild(tabContainer);
+
+  const service = { startTabDrag() {}, handle_dragover() {} };
+  tabContainer.tabDragAndDrop = service;
+
+  class FakeMutationObserver {
+    observe() {}
+    disconnect() {}
+  }
+
+  let nextRafId = 1;
+  const rafQueue = new Map();
+  const win = {
+    document: doc,
+    MutationObserver: FakeMutationObserver,
+    gBrowser: { tabContainer },
+    getComputedStyle: (el) => el._computed || { display: "flex", visibility: "visible", getPropertyValue: () => "" },
+    requestAnimationFrame: (cb) => {
+      const id = nextRafId++;
+      rafQueue.set(id, cb);
+      return id;
+    },
+    cancelAnimationFrame: (id) => {
+      rafQueue.delete(id);
+    },
+    addEventListener() {},
+    removeEventListener() {},
+  };
+
+  setupGroupDrag(win);
+  try {
+    service.startTabDrag({ clientY: 18 }, f0.labelEl, {});
+
+    // Drag into bottom edge zone (clientY = 192 inside 0..200)
+    doc.dispatchEvent({
+      type: "dragover",
+      target: tab2,
+      clientY: 192,
+      dataTransfer: { types: ["application/x-moz-tabbrowser-tab"] },
+    });
+    assert.equal(rafQueue.size, 1, "rAF loop scheduled when hovering bottom edge");
+
+    // Simulate scrolling advancing one frame and updating visible rect positions
+    const [rafId, cb] = [...rafQueue.entries()][0];
+    rafQueue.delete(rafId);
+    const prevScroll = strip.scrollTop;
+    cb();
+    assert.ok(strip.scrollTop > prevScroll, "scrollTop advances downward");
+    const dy = strip.scrollTop - prevScroll;
+    tab1._rect.top -= dy;
+    tab1._rect.bottom -= dy;
+
+    // Moving back to center cancels active rAF auto-scroll
+    doc.dispatchEvent({
+      type: "dragover",
+      target: tab1,
+      clientY: 100,
+      dataTransfer: { types: ["application/x-moz-tabbrowser-tab"] },
+    });
+    assert.equal(rafQueue.size, 0, "moving out of edge zone cancels auto-scroll loop");
+
+    doc.dispatchEvent({ type: "dragend" });
+  } finally {
+    teardownGroupDrag(win);
+  }
+});
+
+test("collapsed folder auto-expands after ~650ms center hover and cancels on edge-reorder, self-hover, or leave", () => {
+  const { doc, makeEl } = createDragDom();
+  const tabContainer = makeEl("div");
+  const ws = makeEl("zen-workspace");
+  const strip = makeEl("div");
+
+  const dragged = makeFolder(makeEl, { label: "Dragged", top: 0, height: 36, collapsed: true });
+  const target = makeFolder(makeEl, { label: "Target", top: 36, height: 36, collapsed: true });
+  const zenTarget = makeFolder(makeEl, { label: "Native", top: 72, height: 36, collapsed: true, tag: "zen-folder" });
+  strip.appendChild(dragged.group);
+  strip.appendChild(target.group);
+  strip.appendChild(zenTarget.group);
+  ws.appendChild(strip);
+  tabContainer.appendChild(ws);
+  doc.body.appendChild(tabContainer);
+
+  const service = { startTabDrag() {}, handle_dragover() {} };
+  tabContainer.tabDragAndDrop = service;
+
+  class FakeMutationObserver {
+    observe() {}
+    disconnect() {}
+  }
+
+  let nextTimerId = 1;
+  const timers = new Map();
+  const win = {
+    document: doc,
+    MutationObserver: FakeMutationObserver,
+    gBrowser: { tabContainer },
+    getComputedStyle: (el) => el._computed || { display: "flex", visibility: "visible", getPropertyValue: () => "" },
+    setTimeout: (fn, ms) => {
+      const id = nextTimerId++;
+      timers.set(id, { fn, ms });
+      return id;
+    },
+    clearTimeout: (id) => {
+      timers.delete(id);
+    },
+    addEventListener() {},
+    removeEventListener() {},
+  };
+
+  setupGroupDrag(win);
+  try {
+    assert.equal(AUTO_EXPAND_DELAY_MS, 650);
+    service.startTabDrag({ clientY: 18 }, dragged.labelEl, {});
+
+    // 1. Hovering dragged folder itself must never arm auto-expand
+    doc.dispatchEvent({
+      type: "dragover",
+      target: dragged.labelEl,
+      clientY: 18,
+      dataTransfer: { types: ["application/x-moz-tabbrowser-tab"] },
+    });
+    assert.equal(timers.size, 0);
+
+    // 2. Hovering center of collapsed target folder arms 650ms timer (and repeated dragover doesn't reset it)
+    doc.dispatchEvent({
+      type: "dragover",
+      target: target.labelEl,
+      clientY: 54,
+      dataTransfer: { types: ["application/x-moz-tabbrowser-tab"] },
+    });
+    assert.equal(timers.size, 1);
+    const [[firstTimerId, firstTimer]] = [...timers.entries()];
+    assert.equal(firstTimer.ms, AUTO_EXPAND_DELAY_MS);
+
+    doc.dispatchEvent({
+      type: "dragover",
+      target: target.labelEl,
+      clientY: 55,
+      dataTransfer: { types: ["application/x-moz-tabbrowser-tab"] },
+    });
+    assert.equal(timers.has(firstTimerId), true, "repeated dragover on same folder keeps existing timer");
+
+    // 3. Moving into top edge-reorder zone (clientY = 38) cancels the timer without expanding
+    doc.dispatchEvent({
+      type: "dragover",
+      target: target.labelEl,
+      clientY: 38,
+      dataTransfer: { types: ["application/x-moz-tabbrowser-tab"] },
+    });
+    assert.equal(timers.size, 0);
+    assert.equal(target.group.collapsed, true);
+
+    // 4. Re-entering center and letting 650ms elapse expands the collapsed folder cleanly
+    doc.dispatchEvent({
+      type: "dragover",
+      target: target.labelEl,
+      clientY: 54,
+      dataTransfer: { types: ["application/x-moz-tabbrowser-tab"] },
+    });
+    assert.equal(timers.size, 1);
+    const [[expandId, expandEntry]] = [...timers.entries()];
+    timers.delete(expandId);
+    expandEntry.fn();
+    assert.equal(target.group.collapsed, false);
+    assert.equal(target.group.hasAttribute("collapsed"), false);
+
+    // 5. Native zen-folder also auto-expands, and dragleave cancels before timer fires
+    doc.dispatchEvent({
+      type: "dragover",
+      target: zenTarget.labelEl,
+      clientY: 90,
+      dataTransfer: { types: ["application/x-moz-tabbrowser-tab"] },
+    });
+    assert.equal(timers.size, 1);
+    doc.dispatchEvent({ type: "dragleave", target: zenTarget.labelEl, relatedTarget: strip });
+    assert.equal(timers.size, 0);
+    assert.equal(zenTarget.group.collapsed, true);
+
+    doc.dispatchEvent({ type: "drop" });
   } finally {
     teardownGroupDrag(win);
   }

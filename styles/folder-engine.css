@@ -97,6 +97,15 @@ tab-group[atg-folder-look]:not([split-view-group]) {
       background-color: transparent !important;
     }
 
+    @media not (prefers-reduced-motion: reduce) {
+      transition: scale 0.1s ease;
+    }
+
+    :where(:root:not([data-zao-renaming-folder="true"]) #tabbrowser-tabs:not([movingtab])) &:active:not(:has(.zao-folder-rename-input)) {
+      scale: var(--zen-active-tab-scale, 0.985);
+      rotate: 0.01deg;
+    }
+
     &::before {
       content: "" !important;
       position: absolute !important;
@@ -107,6 +116,7 @@ tab-group[atg-folder-look]:not([split-view-group]) {
       background-color: transparent !important;
       border-radius: var(--border-radius-medium) !important;
       z-index: -1 !important;
+      transition: background-color 0.1s ease;
     }
 
     &:hover::before {
@@ -225,8 +235,28 @@ tab-group[atg-folder-look]:not([split-view-group]) > .tab-group-container > tab-
   user-select: none;
 }
 
-:root[data-zao-folder-tab-count="true"][zen-sidebar-expanded="true"] tab-group[atg-folder-look][collapsed][data-zao-tab-count]:not([data-zao-tab-count="0"]):not([split-view-group]) > .tab-group-label-container > .zao-folder-tab-count {
+:root[data-zao-folder-tab-count="true"][zen-sidebar-expanded="true"] tab-group[atg-folder-look][data-zao-tab-count]:not([data-zao-tab-count="0"]):not([split-view-group]) > .tab-group-label-container > .zao-folder-tab-count {
   display: inline-flex;
+  opacity: 0;
+  transform: scale(0.82);
+  max-width: 0;
+  min-width: 0;
+  padding: 0;
+  overflow: hidden;
+  transition:
+    opacity 150ms ease,
+    transform 180ms cubic-bezier(0.22, 1, 0.36, 1),
+    max-width 180ms cubic-bezier(0.22, 1, 0.36, 1),
+    min-width 180ms cubic-bezier(0.22, 1, 0.36, 1),
+    padding 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+:root[data-zao-folder-tab-count="true"][zen-sidebar-expanded="true"] tab-group[atg-folder-look][collapsed][data-zao-tab-count]:not([data-zao-tab-count="0"]):not([split-view-group]) > .tab-group-label-container > .zao-folder-tab-count {
+  opacity: 1;
+  transform: scale(1);
+  max-width: 48px;
+  min-width: 18px;
+  padding: 0 5px;
 }
 
 /* ---- Inline folder rename input ---- */
@@ -479,6 +509,11 @@ tab-group[atg-folder-look]:not([split-view-group]) > .tab-group-container > tab-
 @media (prefers-reduced-motion: reduce) {
   .zao-move-folder-popover {
     animation: none;
+  }
+  .zao-folder-tab-count,
+  tab-group[atg-folder-look]:not([split-view-group]) > .tab-group-label-container,
+  tab-group[atg-folder-look]:not([split-view-group]) > .tab-group-label-container::before {
+    transition: none;
   }
   tab-group[atg-folder-look]:not([split-view-group]) > .tab-group-label-container .tab-group-folder-icon svg :is(g, rect, path) {
     transition: none;
